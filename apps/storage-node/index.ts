@@ -21,6 +21,7 @@
  *   overwritten.
  */
 
+import { createHash } from "crypto";
 import { createServer } from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from "fs/promises";
@@ -126,7 +127,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   const hasKeystore = typeof options.identityPath === "string" && options.identityPath !== "";
 
   const server = createServer((req, res) => {
-    void handleRequest(req, res, storageDir, capacityBytes, { requireAuth, maxClockSkewMs, seenNonces }).catch(() => {
+    void handleRequest(req, res, storageDir, capacityBytes, { requireAuth, maxClockSkewMs, seenNonces }, () => nodeIdentity).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal error" });
       } else {
@@ -277,6 +278,7 @@ async function handleRequest(
   storageDir: string,
   capacityBytes: number,
   auth: AuthState,
+  getNodeIdentity: () => Identity | undefined,
 ): Promise<void> {
   const method = (req.method ?? "").toUpperCase();
   const rawPath = (req.url ?? "/").split("?")[0] as string;
@@ -289,6 +291,22 @@ async function handleRequest(
   }
 
   const segments = rawPath.split("/");
+  // Piece integrity verification (OPENSTORE-017): metadata only, never piece bytes.
+  // Matches before the generic /pieces/:id route since it has an extra segment.
+  if (segments.length === 4 && segments[1] === "pieces" && segments[3] === "verify") {
+    const id = decodeSegment(segments[2] as string);
+    if (id === null || !isValidPieceId(id)) {
+      sendJson(res, 400, { error: "invalid piece id" });
+      return;
+    }
+    if (!checkAuth(req, method, rawPath, undefined, auth, res)) return;
+    if (method !== "GET") {
+      sendJson(res, 405, { error: "method not allowed" });
+      return;
+    }
+    await handleVerifyPiece(res, join(storageDir, id), id, getNodeIdentity());
+    return;
+  }
   if (segments.length === 3 && segments[1] === "pieces") {
     const id = decodeSegment(segments[2] as string);
     if (id === null || !isValidPieceId(id)) {
@@ -476,6 +494,59 @@ async function handleGetPiece(
     "content-length": bytes.length,
   });
   res.end(headOnly ? undefined : bytes);
+}
+
+/**
+ * GET /pieces/:id/verify checks integrity without returning piece data.
+ * Confirms the piece exists, its bytes hash to the expected pieceId
+ * (content addressing), and reports the node's authentic identity
+ * (public key only — private keys never leave the node).
+ * Returns metadata only: pieceId, size, hash, verification status.
+ */
+async function handleVerifyPiece(
+  res: ServerResponse,
+  piecePath: string,
+  expectedPieceId: string,
+  nodeIdentity: Identity | undefined,
+): Promise<void> {
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(piecePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      sendJson(res, 404, { error: "piece not found", pieceId: expectedPieceId, verified: false });
+      return;
+    }
+    throw err;
+  }
+  const actualHash = createHash("sha256").update(bytes).digest("hex");
+  const identityFields = nodeIdentity
+    ? {
+        nodeId: nodeIdentity.publicKey.toString("base64"),
+        publicKey: nodeIdentity.publicKey.toString("base64"),
+      }
+    : {};
+  if (actualHash !== expectedPieceId) {
+    sendJson(res, 409, {
+      version: STORAGE_NODE_VERSION,
+      pieceId: expectedPieceId,
+      size: bytes.length,
+      hash: actualHash,
+      expectedHash: expectedPieceId,
+      verified: false,
+      error: "hash mismatch: stored bytes do not match expected piece id",
+      ...identityFields,
+    });
+    return;
+  }
+  sendJson(res, 200, {
+    version: STORAGE_NODE_VERSION,
+    pieceId: expectedPieceId,
+    size: bytes.length,
+    hash: actualHash,
+    verified: true,
+    ...identityFields,
+  });
 }
 
 async function handleDeletePiece(
