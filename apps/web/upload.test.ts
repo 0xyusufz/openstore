@@ -96,7 +96,11 @@ afterAll(async () => {
     await n.node.close();
     await rm(n.dir, { recursive: true, force: true });
   }
-  if (manifestDir) await rm(manifestDir, { recursive: true, force: true });
+  if (manifestDir) {
+    await rm(manifestDir, { recursive: true, force: true });
+    // The DEK vault is a sibling file, invisible to the manifest catalog.
+    await rm(`${manifestDir}.deks.json`, { force: true });
+  }
 });
 
 function buildMultipartBody(filename: string, fileData: Buffer): Buffer {
@@ -449,6 +453,7 @@ describe("real web file upload (OPENSTORE-026, hardened OPENSTORE-027)", () => {
         await rm(n.dir, { recursive: true, force: true });
       }
       await rm(freshManifestDir, { recursive: true, force: true });
+      await rm(`${freshManifestDir}.deks.json`, { force: true });
     }
   });
 

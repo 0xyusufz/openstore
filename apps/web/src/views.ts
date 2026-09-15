@@ -55,23 +55,29 @@ export function renderFiles(state: WebState): string {
     state.files.length === 0
       ? `<tr><td colspan="5" class="empty">No files yet. Uploads land here once the backend is connected.</td></tr>`
       : state.files
-          .map(
-            (f) => `<tr>
+          .map((f) => {
+            const downloading = state.download.status === "active" && state.download.fileId === f.fileId;
+            return `<tr>
         <td data-label="Name">${esc(f.filename)}<br><span class="muted">${esc(truncateId(f.fileId, 18))}</span></td>
         <td data-label="Size">${esc(formatBytes(f.size))}</td>
         <td data-label="Chunks">${f.totalChunks}</td>
         <td data-label="Created">${esc(formatDateTime(f.createdAt ?? 0))}</td>
         <td data-label="Actions" class="actions">
-          <button type="button" data-action="download-attempt" data-file-id="${esc(f.fileId)}">Download</button>
+          <button type="button" data-action="download-attempt" data-file-id="${esc(f.fileId)}"${downloading ? " disabled" : ""}>${downloading ? "Downloading…" : "Download"}</button>
           <button type="button" data-action="delete-attempt" data-file-id="${esc(f.fileId)}" class="danger">Delete</button>
         </td>
-      </tr>`,
-          )
+      </tr>`;
+          })
           .join("");
+  const downloadLine =
+    state.download.status === "idle"
+      ? ""
+      : `<p class="muted" role="status">${esc(state.download.note ?? "")}</p>`;
   return `
   <section aria-label="My files">
     <h2>My Files</h2>
     <p class="muted">Safe metadata only. File contents and keys never appear here.</p>
+    ${downloadLine}
     <div class="table-wrap"><table class="table">
       <thead><tr><th>Name</th><th>Size</th><th>Chunks</th><th>Created</th><th>Actions</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -244,6 +250,8 @@ export function renderSettings(state: WebState): string {
         <li>This dashboard renders metadata only — never file contents, private keys, or encryption keys.</li>
         <li>Recovery phrases are shown once during creation, then immediately cleared from memory.</li>
         <li>Passwords are never stored — not in this page, not in the backend, nowhere.</li>
+        <li>Downloads verify every piece before reconstructing your file; corrupt data fails closed.</li>
+        <li>Deletes are disabled until their backend integration lands.</li>
         <li>If you lose both your password and recovery phrase, your identity is permanently unrecoverable.</li>
       </ul>
     </div>

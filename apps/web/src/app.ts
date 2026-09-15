@@ -13,6 +13,8 @@ import {
   createInitialState,
   dashboardStats,
   dismissNotice,
+  downloadComplete,
+  downloadFailed,
   identityCreationDismissed,
   identityCreationReceived,
   identityLocked,
@@ -20,7 +22,6 @@ import {
   identityUnlocked,
   navigate,
   parseHash,
-  resetUploadDraft,
   selectFileForUpload,
   toggleRecoveryPhraseReveal,
   uploadComplete,
@@ -44,6 +45,20 @@ function render(state: WebState): void {
 
 function syncFromHash(state: WebState): WebState {
   return navigate(state, parseHash(window.location.hash));
+}
+
+/**
+ * Stage a user-picked file for upload (pure, tested).
+ *
+ * This is exactly what the `#upload-input` change handler applies:
+ * `selectFileForUpload` already yields a clean `ready` draft (replacing
+ * any previous draft), so the result must NOT be passed through
+ * `resetUploadDraft` — that would wipe the staging back to `idle` and
+ * leave the UI stuck on "No file staged" with Upload disabled.
+ * Only the file name/size enter state; bytes stay in the File object.
+ */
+export function stagePickedFile(state: WebState, fileName: string, fileSize: number): WebState {
+  return selectFileForUpload(state, fileName, fileSize);
 }
 
 interface ApiFilesPayload {
@@ -317,9 +332,50 @@ export function startApp(): void {
         }
         render(state);
       })();
-    } else if (action === "delete-attempt" || action === "download-attempt") {
+    } else if (action === "download-attempt") {
       const fileId = actionEl.getAttribute("data-file-id") ?? "";
-      state = action === "delete-attempt" ? attemptDelete(state, fileId) : attemptDownload(state, fileId);
+      state = attemptDownload(state, fileId);
+      render(state);
+      // Missing file (or a download already running): nothing to fetch.
+      if (state.download.status !== "active" || state.download.fileId !== fileId) return;
+      const activeFileId = fileId;
+      void (async () => {
+        try {
+          const res = await fetch(`/api/files/${encodeURIComponent(activeFileId)}/download`);
+          if (!res.ok) {
+            let errText = `status ${res.status}`;
+            try {
+              const errJson = (await res.json()) as Record<string, unknown>;
+              if (typeof errJson["error"] === "string") errText = errJson["error"] as string;
+            } catch {}
+            state = downloadFailed(state, errText);
+            render(state);
+            return;
+          }
+          const blob = await res.blob();
+          const filename = state.download.status === "active" ? state.download.filename : "download";
+          const url = URL.createObjectURL(blob);
+          try {
+            const anchor = document.createElement("a");
+            anchor.href = url;
+            anchor.download = filename || "download";
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+          } finally {
+            // The bytes now belong to the browser download manager;
+            // release the temporary object URL promptly.
+            setTimeout(() => URL.revokeObjectURL(url), 5000);
+          }
+          state = downloadComplete(state, { fileId: activeFileId, filename, size: blob.size });
+        } catch (err) {
+          state = downloadFailed(state, err instanceof Error ? err.message : "network error");
+        }
+        render(state);
+      })();
+    } else if (action === "delete-attempt") {
+      const fileId = actionEl.getAttribute("data-file-id") ?? "";
+      state = attemptDelete(state, fileId);
       render(state);
     }
   });
@@ -329,8 +385,10 @@ export function startApp(): void {
     if (target?.id === "upload-input" && target instanceof HTMLInputElement) {
       const picked = target.files?.[0];
       if (picked) {
+        // Name/size only — file bytes are never read here; they travel
+        // inside the staged File reference straight to the upload POST.
         stagedFile = picked;
-        state = resetUploadDraft(selectFileForUpload(state, picked.name, picked.size));
+        state = stagePickedFile(state, picked.name, picked.size);
         render(state);
       }
     }

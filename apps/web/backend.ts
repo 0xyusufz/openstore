@@ -21,11 +21,14 @@ import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { createIdentity, recoverIdentity } from "../../packages/identity/index.js";
 import { loadIdentity, saveIdentity } from "../../packages/identity/keystore.js";
-import { createManifestStore } from "../../packages/manifest/store.js";
+import { createManifestStore, isValidManifestFileId } from "../../packages/manifest/store.js";
 import type { ManifestStore } from "../../packages/manifest/store.js";
 import { createFileCatalog } from "../client/catalog.js";
 import type { CatalogEntry } from "../client/catalog.js";
 import { uploadBuffer } from "../client/upload.js";
+import { downloadBuffer } from "../client/download.js";
+import { createDekStore } from "./dekstore.js";
+import type { DekStore } from "./dekstore.js";
 import type { StorageNodeEndpoint } from "../client/index.js";
 import type { Registry } from "../../packages/registry/index.js";
 import { MOCK_FILES, MOCK_IDENTITY, MOCK_NODES } from "./src/mock.js";
@@ -106,6 +109,13 @@ export interface WebBackendOptions {
    * endpoints report that management is not configured (demo mode).
    */
   keystorePath?: string;
+  /**
+   * Path of the server-side DEK vault file holding per-file encryption
+   * keys for web uploads (0o600, never served). Defaults to a sibling
+   * of `manifestDir` (`<manifestDir>.deks.json`) so it stays invisible
+   * to the manifest catalog. Only used when `manifestDir` is set.
+   */
+  dekPath?: string;
 }
 
 /** Creation result: public metadata plus the phrase shown exactly once. */
@@ -154,6 +164,17 @@ export interface UploadFileResult {
   totalChunks: number;
 }
 
+/**
+ * Download result: reconstructed file bytes plus safe metadata.
+ * The file DEK is consumed server-side and never included.
+ */
+export interface DownloadFileResult {
+  fileId: string;
+  filename: string;
+  size: number;
+  data: Buffer;
+}
+
 export interface WebBackend {
   readonly version: number;
   readonly status: BackendStatus;
@@ -193,6 +214,14 @@ export interface WebBackend {
    * Returns safe metadata only; the encryption key never surfaces.
    */
   uploadFile(filename: string, data: Buffer): Promise<UploadFileResult>;
+  /**
+   * Download a file: fetch the manifest, resolve piece replicas, verify
+   * integrity, decrypt with the vaulted file DEK, and reconstruct the
+   * original bytes. Fails closed (no partial/corrupt bytes returned).
+   * The DEK never leaves the server; only file bytes + safe metadata
+   * are returned to the owning browser.
+   */
+  downloadFile(fileId: string): Promise<DownloadFileResult>;
 }
 
 export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
@@ -208,9 +237,17 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
   if (options.keystorePath !== undefined && (typeof options.keystorePath !== "string" || options.keystorePath === "")) {
     throw new TypeError("keystorePath must be a non-empty string");
   }
+  if (options.dekPath !== undefined && (typeof options.dekPath !== "string" || options.dekPath === "")) {
+    throw new TypeError("dekPath must be a non-empty string");
+  }
   const catalog = options.manifestDir ? createFileCatalog(createManifestStore({ dir: options.manifestDir })) : null;
   const registry = options.registry ?? null;
   const keystorePath = options.keystorePath ?? null;
+  // The DEK vault lives alongside the manifests (sibling file, never
+  // inside the manifest directory) and only exists for live backends.
+  const dekStore: DekStore | null = options.manifestDir
+    ? createDekStore({ path: options.dekPath ?? `${options.manifestDir}.deks.json` })
+    : null;
   const status: BackendStatus = {
     demoMode: !catalog && !registry,
     manifestStore: catalog !== null,
@@ -394,7 +431,7 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
     },
 
     async uploadFile(filename: string, data: Buffer): Promise<UploadFileResult> {
-      if (!catalog) {
+      if (!catalog || !dekStore) {
         throw new Error("manifest store is not configured on this server");
       }
       if (!Buffer.isBuffer(data)) {
@@ -414,13 +451,22 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
       const endpoints: StorageNodeEndpoint[] = nodeSnapshot.map((n) => ({ id: n.id, baseUrl: n.baseUrl }));
       // The pipeline encrypts every chunk with a fresh per-file DEK and
       // fresh IVs, stores only ciphertext on the nodes, and persists the
-      // manifest only after every chunk lands on at least one node. The
-      // DEK is discarded with the returned UploadResult here — only safe
-      // metadata crosses this boundary.
+      // manifest only after every chunk lands on at least one node.
       const { manifest, encryptionKey } = await uploadBuffer(data, safeFilename, endpoints, {
         manifestStore: catalog.store,
       });
       try {
+        try {
+          // Vault the DEK so this file stays downloadable. If vaulting
+          // fails, roll the manifest back: a catalog entry without its
+          // key would be a misleading, unrecoverable record.
+          await dekStore.saveDek(manifest.fileId, encryptionKey);
+        } catch (dekErr) {
+          try {
+            await catalog.store.delete(manifest.fileId);
+          } catch {}
+          throw new Error(`upload failed: could not persist file key (${(dekErr as Error).message})`);
+        }
         return {
           fileId: manifest.fileId,
           filename: manifest.filename,
@@ -431,6 +477,60 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
         // The per-file DEK must never linger in server memory: the
         // caller only ever receives safe metadata above.
         encryptionKey.fill(0);
+      }
+    },
+
+    async downloadFile(fileId: string): Promise<DownloadFileResult> {
+      if (!catalog || !dekStore) {
+        throw new Error("manifest store is not configured on this server");
+      }
+      if (!isValidManifestFileId(fileId)) {
+        throw new Error("invalid file id");
+      }
+      // load() revalidates the manifest (ordering, hashes, no key
+      // material); missing manifests resolve to undefined.
+      const manifest = await catalog.store.load(fileId);
+      if (!manifest) {
+        throw new Error("file not found");
+      }
+      const dek = await dekStore.loadDek(fileId);
+      if (!dek) {
+        throw new Error("file key unavailable: this file was not uploaded through this server");
+      }
+      try {
+        const nodeSnapshot = registry ? registry.list().map(toWebNode) : [];
+        if (nodeSnapshot.length === 0) {
+          throw new Error("no storage nodes available");
+        }
+        const endpoints: StorageNodeEndpoint[] = nodeSnapshot.map((n) => ({ id: n.id, baseUrl: n.baseUrl }));
+        // Replica rotation: the download pipeline fetches each piece from
+        // the first healthy replica, but a corrupt-yet-servable replica
+        // fails hash verification instead of falling through. Rotating the
+        // endpoint order gives every replica a chance to serve all pieces
+        // before failing closed.
+        let lastError: unknown = null;
+        for (let rotation = 0; rotation < endpoints.length; rotation += 1) {
+          const ordered = endpoints.slice(rotation).concat(endpoints.slice(0, rotation));
+          try {
+            const data = await downloadBuffer(manifest, dek, ordered);
+            // Belt-and-braces: per-chunk size/hash/order were already
+            // verified inside downloadBuffer; confirm the total too.
+            if (data.length !== manifest.size) {
+              throw new Error("download failed: reconstructed size mismatch");
+            }
+            return {
+              fileId: manifest.fileId,
+              filename: manifest.filename,
+              size: data.length,
+              data,
+            };
+          } catch (err) {
+            lastError = err;
+          }
+        }
+        throw lastError instanceof Error ? lastError : new Error("download failed");
+      } finally {
+        dek.fill(0);
       }
     },
   };

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  attemptDownload,
   attemptUpload,
   createInitialState,
   dashboardStats,
+  downloadFailed,
   identityCreationReceived,
   identityLocked,
   identityUnlocked,
@@ -46,6 +48,33 @@ describe("web views", () => {
     expect(idle).toContain("No file staged");
     expect(idle).toContain("only ever receive encrypted data");
     expect(idle).toContain("disabled");
+  });
+
+  it("download button disables and reports status while downloading", () => {
+    const idle = renderFiles(createInitialState());
+    expect(idle).not.toContain("Downloading…");
+
+    const fileId = createInitialState().files[0]!.fileId;
+    const active = attemptDownload(createInitialState(), fileId);
+    const activeHtml = renderFiles(active);
+    expect(activeHtml).toContain("Downloading…");
+    expect(activeHtml).toContain("disabled");
+
+    const failedHtml = renderFiles(downloadFailed(active, "node unreachable"));
+    expect(failedHtml).toContain("Download failed");
+    expect(failedHtml).toContain("node unreachable");
+    expect(failedHtml).not.toContain("Downloading…");
+  });
+
+  it("staged file shows name/size with Upload enabled (file-input flow)", () => {
+    const staged = selectFileForUpload(createInitialState(), "photo.jpg", 12345);
+    expect(staged.upload.status).toBe("ready");
+    const html = renderUpload(staged);
+    expect(html).toContain("photo.jpg");
+    expect(html).toContain("Ready to upload.");
+    // Exactly one Upload button and it is NOT disabled when ready.
+    expect(html).toContain('data-action="upload-attempt"');
+    expect(html).not.toContain("disabled");
   });
 
   it("upload button is disabled while an upload is active", () => {

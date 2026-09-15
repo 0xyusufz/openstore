@@ -6,6 +6,8 @@ import {
   createInitialState,
   dashboardStats,
   dismissNotice,
+  downloadComplete,
+  downloadFailed,
   identityCreationDismissed,
   identityCreationReceived,
   identityLocked,
@@ -88,7 +90,7 @@ describe("web UI store", () => {
     expect(resetUploadDraft(state).upload.status).toBe("idle");
   });
 
-  it("deletes and downloads never mutate files", () => {
+  it("deletes never mutate files", () => {
     let state = createInitialState();
     const fileId = state.files[0]?.fileId as string;
     const snapshot = state.files.map((f) => f.fileId);
@@ -97,11 +99,35 @@ describe("web UI store", () => {
     expect(state.files.map((f) => f.fileId)).toEqual(snapshot);
     expect(state.notice).toMatch(/not performed/i);
 
-    state = attemptDownload(state, fileId);
-    expect(state.files.map((f) => f.fileId)).toEqual(snapshot);
-    expect(state.notice).toMatch(/not performed/i);
-
     expect(attemptDelete(state, "missing-id").notice).toMatch(/no file/i);
+  });
+
+  it("downloads start an active flow without touching files", () => {
+    let state = createInitialState();
+    const file = state.files[0]!;
+    const snapshot = state.files.map((f) => f.fileId);
+
+    state = attemptDownload(state, file.fileId);
+    expect(state.files.map((f) => f.fileId)).toEqual(snapshot);
+    expect(state.download.status).toBe("active");
+    expect(state.download.fileId).toBe(file.fileId);
+    expect(state.download.filename).toBe(file.filename);
+    expect(state.notice).toBeNull();
+
+    // Duplicate attempts while active are a no-op (same state reference).
+    expect(attemptDownload(state, file.fileId)).toBe(state);
+
+    state = downloadComplete(state, { fileId: file.fileId, filename: file.filename, size: 12 });
+    expect(state.download.status).toBe("complete");
+    expect(state.download.note).toContain(file.filename);
+
+    state = downloadFailed(state, "node unreachable");
+    expect(state.download.status).toBe("failed");
+    expect(state.download.note).toMatch(/node unreachable/i);
+
+    // A finished flow accepts a fresh download; unknown IDs warn cleanly.
+    const retry = attemptDownload(state, file.fileId);
+    expect(retry.download.status).toBe("active");
     expect(attemptDownload(state, "missing-id").notice).toMatch(/no file/i);
   });
 

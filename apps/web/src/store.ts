@@ -32,6 +32,15 @@ export interface UploadDraft {
   note: string | null;
 }
 
+export type DownloadStatus = "idle" | "active" | "complete" | "failed";
+
+export interface DownloadDraft {
+  status: DownloadStatus;
+  fileId: string | null;
+  filename: string;
+  note: string | null;
+}
+
 export interface WebState {
   view: ViewId;
   files: CatalogEntry[];
@@ -46,6 +55,11 @@ export interface WebState {
   /** Whether the recovery phrase in the creation backup is revealed. */
   recoveryPhraseRevealed: boolean;
   upload: UploadDraft;
+  /**
+   * Transient download progress. File bytes never enter UI state — the
+   * browser receives them as a Blob handed straight to an object URL.
+   */
+  download: DownloadDraft;
   notice: string | null;
   demoMode: boolean;
 }
@@ -59,6 +73,7 @@ export function createInitialState(): WebState {
     identityCreation: null,
     recoveryPhraseRevealed: false,
     upload: { status: "idle", fileName: "", fileSize: 0, note: null },
+    download: { status: "idle", fileId: null, filename: "", note: null },
     notice: null,
     demoMode: DEMO_MODE,
   };
@@ -154,16 +169,54 @@ export function uploadFailed(state: WebState, error: string): WebState {
 }
 
 /**
- * Attempt a download. Always honest: nothing is fetched or written.
+ * Start a download. Only one download runs at a time: while one is
+ * active every further attempt is a no-op returning the same state
+ * (duplicate-click prevention). The actual fetch happens in app.ts
+ * after this pure state transition.
  */
 export function attemptDownload(state: WebState, fileId: string): WebState {
+  if (state.download.status === "active") {
+    return state;
+  }
   const file = state.files.find((f) => f.fileId === fileId);
   if (!file) {
     return { ...state, notice: `No file with ID "${fileId}".` };
   }
   return {
     ...state,
-    notice: `Download not performed — backend integration is pending. "${file.filename}" was not fetched.`,
+    notice: null,
+    download: {
+      status: "active",
+      fileId,
+      filename: file.filename,
+      note: `Downloading "${file.filename}"…`,
+    },
+  };
+}
+
+/** Record a completed download (bytes already handed to the browser). */
+export function downloadComplete(
+  state: WebState,
+  result: { fileId: string; filename: string; size: number },
+): WebState {
+  return {
+    ...state,
+    download: {
+      status: "complete",
+      fileId: result.fileId,
+      filename: result.filename,
+      note: `Downloaded "${result.filename}" (${result.size} bytes).`,
+    },
+    notice: null,
+  };
+}
+
+/** Record a failed download with a safe user-facing reason. */
+export function downloadFailed(state: WebState, error: string): WebState {
+  return {
+    ...state,
+    download: { ...state.download, status: "failed", note: `Download failed: ${error}` },
+    notice: null,
   };
 }
 

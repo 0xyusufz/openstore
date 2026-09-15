@@ -14,8 +14,9 @@ import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
-import { createWebBackend, MAX_UPLOAD_BYTES } from "./backend.js";
-import type { WebBackend, WebBackendOptions, UploadFileResult } from "./backend.js";
+import { createWebBackend, MAX_UPLOAD_BYTES, sanitizeUploadFilename } from "./backend.js";
+import type { WebBackend, WebBackendOptions, DownloadFileResult, UploadFileResult } from "./backend.js";
+import { isValidManifestFileId } from "../../packages/manifest/store.js";
 
 export const WEB_SERVER_VERSION = 1;
 export const DEFAULT_WEB_PORT = 4173;
@@ -131,6 +132,32 @@ async function handleRequest(
   if (rawPath === "/api/files") {
     const snapshot = await backend.getSnapshot();
     sendJson(res, 200, { files: snapshot.files, source: snapshot.filesSource }, headOnly);
+    return;
+  }
+  if (
+    (method === "GET" || method === "HEAD") &&
+    rawPath.startsWith("/api/files/") &&
+    rawPath.endsWith("/download")
+  ) {
+    const fileId = rawPath.slice("/api/files/".length, -"/download".length);
+    if (!isValidManifestFileId(fileId)) {
+      sendJson(res, 400, { error: "invalid file id" }, headOnly);
+      return;
+    }
+    try {
+      const result: DownloadFileResult = await backend.downloadFile(fileId);
+      const attachmentName = toSafeDownloadFilename(result.filename, fileId);
+      res.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": result.data.length,
+        "content-disposition": `attachment; filename="${attachmentName}"`,
+        "cache-control": "no-store",
+      });
+      res.end(headOnly ? undefined : result.data);
+    } catch (err) {
+      const message = (err as Error).message;
+      sendJson(res, downloadErrorStatus(message), { error: toSafeDownloadError(message) }, headOnly);
+    }
     return;
   }
   if (rawPath === "/api/nodes") {
@@ -303,6 +330,47 @@ function toSafeUploadError(message: string): string {
   return message.length > 500 ? `${message.slice(0, 500)}…` : message;
 }
 
+/**
+ * Map download errors to safe statuses: unknown IDs and files whose key
+ * was never vaulted here are 404; everything else fails closed as 500.
+ * Messages never carry secrets (see {@link toSafeDownloadError}).
+ */
+function downloadErrorStatus(message: string): number {
+  if (/invalid file id/i.test(message)) return 400;
+  if (/file not found|file key unavailable|dek store is malformed/i.test(message)) return 404;
+  return 500;
+}
+
+/**
+ * Sanitize download error messages. Piece IDs (hashes) and node IDs
+ * (public keys) may pass through; key material, phrases, passwords,
+ * and plaintext never do.
+ */
+function toSafeDownloadError(message: string): string {
+  if (typeof message !== "string" || message === "") return "download failed";
+  if (/privatekey|recoveryphrase|mnemonic|encryptionkey|decryptionkey|\bdek\b|password|plaintext|auth\s*tag|authTag|ciphertext/i.test(message)) {
+    return "download failed";
+  }
+  return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+}
+
+/**
+ * Make a stored filename safe for a Content-Disposition header:
+ * re-sanitize (defense in depth for pre-existing manifests), then strip
+ * header-significant characters. Falls back to `<fileId>.bin` rather
+ * than failing a recoverable download.
+ */
+function toSafeDownloadFilename(filename: string, fileId = "download"): string {
+  let safe: string;
+  try {
+    safe = sanitizeUploadFilename(filename);
+  } catch {
+    safe = `${fileId}.bin`;
+  }
+  safe = safe.replace(/["\\\r\n]/g, "_");
+  return safe === "" ? `${fileId}.bin` : safe;
+}
+
 /** Map identity errors to safe statuses. Messages never carry secrets. */
 function identityErrorStatus(message: string): number {
   if (/already configured/i.test(message)) return 409;
@@ -371,13 +439,26 @@ async function readMultipartBody(
 
 function splitMultipartParts(body: Buffer, boundaryBuf: Buffer): Buffer[] {
   const parts: Buffer[] = [];
-  let start = indexOf(body, boundaryBuf);
+  // RFC 2046 delimiters are full lines: the boundary text is preceded by
+  // CRLF except for the very first delimiter that opens the body.
+  // Requiring that framing keeps arbitrary file bytes (which may contain
+  // the boundary text mid-content) from splitting the body early — the
+  // only residual collision is content holding CRLF + boundary verbatim,
+  // infeasible with browser-generated random boundaries.
+  const delimiterAt = (from: number): number => {
+    let at = indexOf(body, boundaryBuf, from);
+    while (at !== -1 && at !== 0 && !(body[at - 2] === 0x0d && body[at - 1] === 0x0a)) {
+      at = indexOf(body, boundaryBuf, at + 1);
+    }
+    return at;
+  };
+  let start = delimiterAt(0);
   if (start === -1) return parts;
   start += boundaryBuf.length;
   while (start < body.length) {
     if (body[start] === 0x2d && body[start + 1] === 0x2d) break;
-    if (body[start] === 0x0d) start += 2;
-    const nextBoundary = indexOf(body, boundaryBuf, start);
+    if (body[start] === 0x0d && body[start + 1] === 0x0a) start += 2;
+    const nextBoundary = delimiterAt(start);
     if (nextBoundary === -1) break;
     let partEnd = nextBoundary - 2;
     if (partEnd >= 0 && body[partEnd] === 0x0d) partEnd -= 1;
