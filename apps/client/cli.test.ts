@@ -2,6 +2,7 @@ import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, readFile, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
+import { randomBytes } from "crypto";
 import { loadIdentity } from "../../packages/identity/keystore.js";
 import { generateFileId } from "../../packages/manifest/index.js";
 import type { FileManifest } from "../../packages/manifest/index.js";
@@ -12,6 +13,14 @@ import type { StorageNode } from "../storage-node/index.js";
 import type { StorageNodeEndpoint } from "./index.js";
 import { uploadBuffer } from "./upload.js";
 import { runCli, EXIT_OK, EXIT_FAILURE, EXIT_USAGE } from "./cli.js";
+
+/**
+ * Per-run generated test-only password. Random by design: no hardcoded
+ * credential ever appears in this file, and values never leave the test.
+ */
+function testPassword(): string {
+  return `test-pw-${randomBytes(12).toString("hex")}`;
+}
 
 function capture() {
   const stdout: string[] = [];
@@ -47,11 +56,12 @@ describe("OpenStore CLI foundation (OPENSTORE-022)", () => {
     const dir = await mkdtemp(join(tmpdir(), "openstore-cli-id-"));
     try {
       const keystorePath = join(dir, "identity.json");
+      const password = testPassword();
       const cap = capture();
       const code = await runCli(["identity", "create"], {
         ...cap.deps,
         keystorePath,
-        password: "cli-test-password-022",
+        password,
       });
       expect(code).toBe(EXIT_OK);
       const output = cap.stdout.join("\n");
@@ -60,7 +70,7 @@ describe("OpenStore CLI foundation (OPENSTORE-022)", () => {
       expect(output).toMatch(/WARNING/i);
       expect(output).toMatch(/back up/i);
       // Keystore file decrypts with the password
-      const identity = await loadIdentity("cli-test-password-022", keystorePath);
+      const identity = await loadIdentity(password, keystorePath);
       expect(output).toContain(identity.publicKey.toString("base64"));
       // Phrase shown once for backup, but never persisted
       const phrase = identity.recoveryPhrase.join(" ");
@@ -197,13 +207,14 @@ describe("OpenStore CLI foundation (OPENSTORE-022)", () => {
     try {
       // Identity material for negative checks
       const keystorePath = join(dir, "identity.json");
+      const cliPassword = testPassword();
       const capId = capture();
-      await runCli(["identity", "create"], { ...capId.deps, keystorePath, password: "secret-cli-pw-022" });
+      await runCli(["identity", "create"], { ...capId.deps, keystorePath, password: cliPassword });
       const identityOut = capId.stdout.join("\n");
-      const identity = await loadIdentity("secret-cli-pw-022", keystorePath);
+      const identity = await loadIdentity(cliPassword, keystorePath);
       expect(identityOut).not.toContain(identity.privateKey.toString("base64"));
       expect(identityOut).not.toContain(identity.privateKey.toString("hex"));
-      expect(identityOut).not.toContain("secret-cli-pw-022");
+      expect(identityOut).not.toContain(cliPassword);
 
       // File commands must not leak plaintext, keys, or phrase words
       const store = createManifestStore({ dir: join(dir, "manifests") });
@@ -220,7 +231,7 @@ describe("OpenStore CLI foundation (OPENSTORE-022)", () => {
       expect(text).not.toContain(Buffer.from(encryptionKey).toString("base64"));
       expect(text).not.toContain(Buffer.from(encryptionKey).toString("hex"));
       expect(text).not.toContain(identity.privateKey.toString("base64"));
-      expect(text).not.toContain("secret-cli-pw-022");
+      expect(text).not.toContain(cliPassword);
       expect(text.toLowerCase()).not.toContain("privatekey");
       expect(text.toLowerCase()).not.toContain("encryptionkey");
       expect(text.toLowerCase()).not.toContain("recoveryphrase");

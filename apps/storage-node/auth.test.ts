@@ -16,13 +16,15 @@ let node: StorageNode;
 let clientIdentity: ReturnType<typeof createIdentity>;
 let nodeIdentity: ReturnType<typeof createIdentity>;
 let nodeKeystorePath: string;
-const nodePassword = "node-secret-pass-009";
+// Per-run generated test-only password (never hardcoded, never leaves the test).
+let nodePassword = "";
 
 beforeAll(async () => {
   storageDir = await mkdtemp(join(tmpdir(), "openstore-auth-node-"));
   authDir = await mkdtemp(join(tmpdir(), "openstore-auth-key-"));
   clientIdentity = createIdentity();
   nodeIdentity = createIdentity();
+  nodePassword = `test-node-pw-${randomBytes(12).toString("hex")}`;
   nodeKeystorePath = join(authDir, "node.json");
   await saveIdentity(nodeIdentity, nodePassword, nodeKeystorePath);
 
