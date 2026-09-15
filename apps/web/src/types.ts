@@ -33,8 +33,12 @@ export interface WebNode {
 /** Local identity status shown in Settings (presence only, no secrets). */
 export interface WebIdentityStatus {
   configured: boolean;
+  /** True after a successful keystore unlock (server-side session flag). */
+  unlocked: boolean;
   /** Human label such as a truncated public key or "(demo)". */
   label: string;
+  /** Base64 public key when a keystore is linked. Safe to display. */
+  publicKey?: string;
 }
 
 /** Aggregates for the dashboard, computed from files + nodes. */

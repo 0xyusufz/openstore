@@ -6,6 +6,10 @@ import {
   createInitialState,
   dashboardStats,
   dismissNotice,
+  identityCreationDismissed,
+  identityCreationReceived,
+  identityLocked,
+  identityUnlocked,
   navigate,
   parseHash,
   resetUploadDraft,
@@ -82,5 +86,34 @@ describe("web UI store", () => {
     expect(stats.bytesAllocated).toBe(1_073_741_824 * 2 + 536_870_912);
     expect(stats.bytesAvailable).toBe(stats.bytesAllocated - stats.bytesUsed);
     expect(stats.avgScore).toBe(Math.round((92 + 74 + 41) / 3));
+  });
+
+  it("tracks transient identity creation without persisting it", () => {
+    const phrase = ["alpha", "bravo", "charlie"];
+    const created = identityCreationReceived(createInitialState(), { publicKey: "cHVi", recoveryPhrase: phrase });
+    expect(created.identity.configured).toBe(true);
+    expect(created.identity.unlocked).toBe(true);
+    expect(created.identityCreation?.recoveryPhrase).toEqual(phrase);
+    // Copied, not referenced
+    expect(created.identityCreation?.recoveryPhrase).not.toBe(phrase);
+
+    const dismissed = identityCreationDismissed(created);
+    expect(dismissed.identityCreation).toBeNull();
+    expect(dismissed.identity.configured).toBe(true);
+
+    expect(() => identityCreationReceived(createInitialState(), null as never)).toThrow(/creation/i);
+  });
+
+  it("reflects unlock and lock transitions", () => {
+    const unlocked = identityUnlocked(createInitialState(), "cHVi");
+    expect(unlocked.identity.unlocked).toBe(true);
+    expect(unlocked.identity.configured).toBe(true);
+    expect(unlocked.identity.publicKey).toBe("cHVi");
+
+    const locked = identityLocked(unlocked);
+    expect(locked.identity.unlocked).toBe(false);
+    expect(locked.identity.publicKey).toBe("cHVi");
+
+    expect(() => identityUnlocked(createInitialState(), "")).toThrow(/publicKey/i);
   });
 });

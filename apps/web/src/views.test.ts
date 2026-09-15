@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { createInitialState, dashboardStats, navigate } from "./store.js";
+import {
+  createInitialState,
+  dashboardStats,
+  identityCreationReceived,
+  identityLocked,
+  identityUnlocked,
+  navigate,
+} from "./store.js";
 import { renderApp, renderDashboard, renderFiles, renderNodes, renderSettings, renderUpload } from "./views.js";
 
 // Secret identifiers/values that must never render. The English word
@@ -49,7 +56,8 @@ describe("web views", () => {
   it("settings view discloses identity limits", () => {
     const html = renderSettings(createInitialState());
     expect(html).toContain("Not configured");
-    expect(html).toContain("never handles private keys");
+    expect(html).toContain("never stored");
+    expect(html).toContain("Security guarantees");
   });
 
   it("app shell marks the active view, demo badge, and notices", () => {
@@ -86,5 +94,35 @@ describe("web views", () => {
     const html = renderFiles({ ...state, files: [evil] });
     expect(html).not.toContain('<img src=x onerror="1">');
     expect(html).toContain("&lt;img src=x onerror=&quot;1&quot;&gt;");
+  });
+
+  it("settings shows creation, unlock, and lock states safely", () => {
+    // Unconfigured: creation form, empty password fields
+    const fresh = renderSettings(createInitialState());
+    expect(fresh).toContain('id="identity-create-form"');
+    expect(fresh).toContain('type="password"');
+    expect(fresh).not.toContain("value=");
+
+    // Creation result: phrase words + strong warning + dismiss
+    const created = identityCreationReceived(createInitialState(), {
+      publicKey: "cHVi",
+      recoveryPhrase: ["alpha", "bravo"],
+    });
+    const creationHtml = renderSettings(created);
+    expect(creationHtml).toContain("alpha");
+    expect(creationHtml).toContain("bravo");
+    expect(creationHtml).toMatch(/only time|back up/i);
+    expect(creationHtml).toContain('data-action="creation-dismiss"');
+    expect(creationHtml).not.toContain("privateKey");
+
+    // Locked: unlock form
+    const locked = identityLocked(identityUnlocked(createInitialState(), "cHVi"));
+    const lockedHtml = renderSettings(locked);
+    expect(lockedHtml).toContain('id="identity-unlock-form"');
+
+    // Unlocked: lock button, truncated public key
+    const unlockedHtml = renderSettings(identityUnlocked(createInitialState(), "cHVi"));
+    expect(unlockedHtml).toContain('data-action="identity-lock"');
+    expect(unlockedHtml).toContain("cHVi");
   });
 });

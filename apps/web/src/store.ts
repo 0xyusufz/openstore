@@ -11,7 +11,7 @@
 import { DEMO_MODE, MOCK_FILES, MOCK_IDENTITY, MOCK_NODES } from "./mock.js";
 import type { DashboardStats, WebIdentityStatus, WebNode } from "./types.js";
 import type { CatalogEntry } from "../../client/catalog.js";
-import type { BackendSnapshot } from "../backend.js";
+import type { BackendSnapshot, IdentityCreation } from "../backend.js";
 
 export type ViewId = "dashboard" | "files" | "upload" | "nodes" | "settings";
 
@@ -37,6 +37,12 @@ export interface WebState {
   files: CatalogEntry[];
   nodes: WebNode[];
   identity: WebIdentityStatus;
+  /**
+   * Transient creation result holding the recovery phrase for one-time
+   * backup display. Never persisted, never sent anywhere; cleared on
+   * dismiss. No other private material ever enters UI state.
+   */
+  identityCreation: IdentityCreation | null;
   upload: UploadDraft;
   notice: string | null;
   demoMode: boolean;
@@ -48,6 +54,7 @@ export function createInitialState(): WebState {
     files: MOCK_FILES.map((f) => ({ ...f })),
     nodes: MOCK_NODES.map((n) => ({ ...n })),
     identity: { ...MOCK_IDENTITY },
+    identityCreation: null,
     upload: { status: "idle", fileName: "", fileSize: 0, note: null },
     notice: null,
     demoMode: DEMO_MODE,
@@ -129,6 +136,51 @@ export function attemptDelete(state: WebState, fileId: string): WebState {
 
 export function dismissNotice(state: WebState): WebState {
   return { ...state, notice: null };
+}
+
+/**
+ * Record a completed first-run creation. The phrase stays in memory
+ * only until {@link identityCreationDismissed} clears it.
+ */
+export function identityCreationReceived(
+  state: WebState,
+  creation: { publicKey: string; recoveryPhrase: string[] },
+): WebState {
+  if (!creation || typeof creation.publicKey !== "string" || !Array.isArray(creation.recoveryPhrase)) {
+    throw new TypeError("creation must carry a publicKey and recoveryPhrase");
+  }
+  return {
+    ...state,
+    identity: { configured: true, unlocked: true, label: "local keystore", publicKey: creation.publicKey },
+    identityCreation: { publicKey: creation.publicKey, recoveryPhrase: [...creation.recoveryPhrase] },
+    notice: null,
+  };
+}
+
+/** Drop the displayed recovery phrase (backup confirmed by the user). */
+export function identityCreationDismissed(state: WebState): WebState {
+  return { ...state, identityCreation: null };
+}
+
+/** Reflect a successful keystore unlock (public metadata only). */
+export function identityUnlocked(state: WebState, publicKey: string): WebState {
+  if (typeof publicKey !== "string" || publicKey === "") {
+    throw new TypeError("publicKey must be a non-empty string");
+  }
+  return {
+    ...state,
+    identity: { ...state.identity, configured: true, unlocked: true, label: "local keystore", publicKey },
+    notice: null,
+  };
+}
+
+/** Reflect a lock (server-side flag cleared). */
+export function identityLocked(state: WebState): WebState {
+  return {
+    ...state,
+    identity: { ...state.identity, unlocked: false },
+    notice: null,
+  };
 }
 
 /**

@@ -129,21 +129,64 @@ export function renderNodes(state: WebState): string {
 }
 
 export function renderSettings(state: WebState): string {
+  if (state.identityCreation) {
+    const words = state.identityCreation.recoveryPhrase
+      .map((word, index) => `<li><span class="word-index">${index + 1}</span> ${esc(word)}</li>`)
+      .join("");
+    return `
+  <section aria-label="Settings">
+    <h2>Settings</h2>
+    <div class="card">
+      <h3>Back up your recovery phrase</h3>
+      <p class="warning" role="alert"><strong>Write these ${state.identityCreation.recoveryPhrase.length} words down now.</strong>
+      This is the only time they are shown. They are never stored on disk and cannot be recovered if lost.
+      Never share them with anyone.</p>
+      <ol class="phrase">${words}</ol>
+      <p class="muted">Public key: ${esc(truncateId(state.identityCreation.publicKey, 20))}</p>
+      <div class="row"><button type="button" data-action="creation-dismiss">I have backed it up</button></div>
+    </div>
+  </section>`;
+  }
+
+  const statusLine = state.identity.configured
+    ? state.identity.unlocked
+      ? "Configured · <strong>Unlocked</strong>"
+      : "Configured · <strong>Locked</strong>"
+    : "<strong>Not configured</strong>";
+  const publicKeyLine = state.identity.publicKey
+    ? `<p class="muted">Public key: ${esc(truncateId(state.identity.publicKey, 20))}</p>`
+    : "";
+  const form = !state.identity.configured
+    ? `<form id="identity-create-form" autocomplete="off">
+        <h3>Create identity (first run)</h3>
+        <div class="form-row"><label>Password <input id="create-password" name="password" type="password" autocomplete="new-password" required minlength="1" /></label></div>
+        <div class="form-row"><label>Confirm password <input id="create-confirm" name="confirm" type="password" autocomplete="new-password" required minlength="1" /></label></div>
+        <div class="row"><button type="submit">Create identity</button></div>
+      </form>`
+    : !state.identity.unlocked
+      ? `<form id="identity-unlock-form" autocomplete="off">
+          <h3>Unlock keystore</h3>
+          <div class="form-row"><label>Password <input id="unlock-password" name="password" type="password" autocomplete="current-password" required minlength="1" /></label></div>
+          <div class="row"><button type="submit">Unlock</button></div>
+        </form>`
+      : `<div class="row"><button type="button" data-action="identity-lock">Lock identity</button></div>`;
   return `
   <section aria-label="Settings">
     <h2>Settings</h2>
     <div class="card">
       <h3>Local identity</h3>
-      <p>Status: <strong>${state.identity.configured ? "Configured" : "Not configured"}</strong></p>
+      <p>Status: ${statusLine}</p>
       <p class="muted">Label: ${esc(state.identity.label)}</p>
-      <p class="muted">Identity management lives in the CLI and the encrypted keystore.
-      This UI never handles private keys, passwords, recovery phrases, or encryption keys.</p>
+      ${publicKeyLine}
+      ${form}
+      <p class="muted">Passwords are asked only when needed and never stored — not in this page, not in the backend, nowhere.
+      Identity management requires a server started with identity support; otherwise these actions report an error.</p>
     </div>
     <div class="card">
       <h3>Security guarantees</h3>
       <ul>
         <li>Client-side encryption stays in the audited library packages.</li>
-        <li>This dashboard renders metadata only — never file contents.</li>
+        <li>This dashboard renders metadata only — never file contents, private keys, or encryption keys.</li>
         <li>Uploads, downloads, and deletes are disabled until backend integration lands; the UI says so instead of faking success.</li>
       </ul>
     </div>

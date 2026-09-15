@@ -79,5 +79,6 @@ export const MOCK_NODES: WebNode[] = [
 
 export const MOCK_IDENTITY: WebIdentityStatus = {
   configured: false,
+  unlocked: false,
   label: "demo — no real identity loaded",
 };

@@ -13,6 +13,10 @@ import {
   createInitialState,
   dashboardStats,
   dismissNotice,
+  identityCreationDismissed,
+  identityCreationReceived,
+  identityLocked,
+  identityUnlocked,
   navigate,
   parseHash,
   resetUploadDraft,
@@ -96,6 +100,84 @@ export function startApp(): void {
     render(state);
   });
 
+  async function postIdentity(path: string, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    let json: Record<string, unknown> = {};
+    try {
+      json = (await res.json()) as Record<string, unknown>;
+    } catch {
+      // Non-JSON error body; status below still guides the message.
+    }
+    return { status: res.status, json };
+  }
+
+  function inputValue(id: string): string {
+    const el = document.getElementById(id);
+    const value = el instanceof HTMLInputElement ? el.value : "";
+    // Clear immediately: passwords live only in this call frame.
+    if (el instanceof HTMLInputElement) el.value = "";
+    return value;
+  }
+
+  document.addEventListener("submit", (event) => {
+    const form = event.target as HTMLFormElement | null;
+    if (!form || form.tagName !== "FORM") return;
+    if (form.id !== "identity-create-form" && form.id !== "identity-unlock-form") return;
+    event.preventDefault();
+    void (async () => {
+      try {
+        if (form.id === "identity-create-form") {
+          const password = inputValue("create-password");
+          const confirm = inputValue("create-confirm");
+          if (password === "" || password !== confirm) {
+            state = { ...state, notice: "Passwords do not match or are empty." };
+            render(state);
+            return;
+          }
+          const { status, json } = await postIdentity("/api/identity/create", { password });
+          if (status === 200 && typeof json["publicKey"] === "string" && Array.isArray(json["recoveryPhrase"])) {
+            state = identityCreationReceived(state, {
+              publicKey: json["publicKey"] as string,
+              recoveryPhrase: (json["recoveryPhrase"] as unknown[]).map(String),
+            });
+          } else if (status === 409) {
+            state = { ...state, notice: "An identity is already configured on this server." };
+          } else {
+            state = { ...state, notice: `Identity creation failed: ${errorText(json, status)}` };
+          }
+        } else {
+          const password = inputValue("unlock-password");
+          if (password === "") {
+            state = { ...state, notice: "Enter the keystore password." };
+            render(state);
+            return;
+          }
+          const { status, json } = await postIdentity("/api/identity/unlock", { password });
+          if (status === 200 && typeof json["publicKey"] === "string") {
+            state = identityUnlocked(state, json["publicKey"] as string);
+          } else if (status === 401) {
+            state = { ...state, notice: "Incorrect password." };
+          } else if (status === 404) {
+            state = { ...state, notice: "No keystore found on this server." };
+          } else {
+            state = { ...state, notice: `Unlock failed: ${errorText(json, status)}` };
+          }
+        }
+      } catch {
+        state = { ...state, notice: "Identity request failed — is the server reachable?" };
+      }
+      render(state);
+    })();
+  });
+
+  function errorText(json: Record<string, unknown>, status: number): string {
+    return typeof json["error"] === "string" ? (json["error"] as string) : `unexpected status ${status}`;
+  }
+
   document.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
     const actionEl = target?.closest?.("[data-action]") as HTMLElement | null;
@@ -104,6 +186,19 @@ export function startApp(): void {
     if (action === "notice-dismiss") {
       state = dismissNotice(state);
       render(state);
+    } else if (action === "creation-dismiss") {
+      state = identityCreationDismissed(state);
+      render(state);
+    } else if (action === "identity-lock") {
+      void (async () => {
+        try {
+          await postIdentity("/api/identity/lock", {});
+        } catch {
+          // Lock is best-effort client-side regardless.
+        }
+        state = identityLocked(state);
+        render(state);
+      })();
     } else if (action === "upload-attempt") {
       state = attemptUpload(state);
       render(state);

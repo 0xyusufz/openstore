@@ -257,7 +257,7 @@ describe("web backend snapshot state", () => {
     const after = applyBackendSnapshot(before, {
       files: [liveFile],
       nodes: [],
-      identity: { configured: true, label: "op:abc" },
+      identity: { configured: true, unlocked: true, label: "op:abc" },
       filesSource: "live",
       nodesSource: "live",
     });
@@ -271,7 +271,7 @@ describe("web backend snapshot state", () => {
     const demo = applyBackendSnapshot(before, {
       files: [],
       nodes: [],
-      identity: { configured: false, label: "demo" },
+      identity: { configured: false, unlocked: false, label: "demo" },
       filesSource: "demo",
       nodesSource: "demo",
     });
