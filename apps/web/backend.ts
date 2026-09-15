@@ -444,11 +444,13 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
         throw new Error("file too large (100 MB limit)");
       }
       const safeFilename = sanitizeUploadFilename(filename);
-      const nodeSnapshot = registry ? registry.list().map(toWebNode) : [];
-      if (nodeSnapshot.length === 0) {
+      // Available nodes only: heartbeat-expired (offline/dead) records
+      // are excluded from selection. Snapshots still list them so the
+      // UI can show them as offline — selection must never use them.
+      const endpoints: StorageNodeEndpoint[] = registry ? registry.getAvailableEndpoints() : [];
+      if (endpoints.length === 0) {
         throw new Error("no storage nodes available");
       }
-      const endpoints: StorageNodeEndpoint[] = nodeSnapshot.map((n) => ({ id: n.id, baseUrl: n.baseUrl }));
       // The pipeline encrypts every chunk with a fresh per-file DEK and
       // fresh IVs, stores only ciphertext on the nodes, and persists the
       // manifest only after every chunk lands on at least one node.
@@ -498,11 +500,10 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
         throw new Error("file key unavailable: this file was not uploaded through this server");
       }
       try {
-        const nodeSnapshot = registry ? registry.list().map(toWebNode) : [];
-        if (nodeSnapshot.length === 0) {
+        const endpoints: StorageNodeEndpoint[] = registry ? registry.getAvailableEndpoints() : [];
+        if (endpoints.length === 0) {
           throw new Error("no storage nodes available");
         }
-        const endpoints: StorageNodeEndpoint[] = nodeSnapshot.map((n) => ({ id: n.id, baseUrl: n.baseUrl }));
         // Replica rotation: the download pipeline fetches each piece from
         // the first healthy replica, but a corrupt-yet-servable replica
         // fails hash verification instead of falling through. Rotating the

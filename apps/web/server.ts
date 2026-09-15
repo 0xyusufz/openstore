@@ -529,22 +529,136 @@ function sendJson(res: ServerResponse, status: number, body: unknown, headOnly =
   res.end(headOnly ? undefined : text);
 }
 
+/**
+ * Parse a comma-separated env list into trimmed non-empty entries.
+ * Unset/blank → []. Exported for unit tests.
+ */
+export function parseCsvList(value: string | undefined): string[] {
+  if (value === undefined || value.trim() === "") return [];
+  return value.split(",").map((s) => s.trim()).filter((s) => s !== "");
+}
+
+/**
+ * Parse per-node ports for `parseCsvList`'d storage dirs. Unset → all
+ * ephemeral (0). Set → must match the dir count, each 1–65535.
+ * Exported for unit tests.
+ */
+export function parseStoragePorts(value: string | undefined, expectedCount: number): number[] {
+  if (value === undefined || value.trim() === "") return new Array<number>(expectedCount).fill(0);
+  const parts = parseCsvList(value);
+  if (parts.length !== expectedCount) {
+    throw new Error(
+      `OPENSTORE_WEB_STORAGE_PORTS has ${parts.length} entries but OPENSTORE_WEB_STORAGE_DIRS has ${expectedCount}`,
+    );
+  }
+  return parts.map((part) => {
+    const port = Number(part);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`invalid storage node port: "${part}" (must be 1–65535)`);
+    }
+    return port;
+  });
+}
+
+/**
+ * Parse the per-node capacity override (bytes). Unset → node default.
+ * Exported for unit tests.
+ */
+export function parseStorageCapacityBytes(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const bytes = Number(value);
+  if (!Number.isInteger(bytes) || bytes <= 0) {
+    throw new Error(`invalid OPENSTORE_WEB_STORAGE_CAPACITY_BYTES: "${value}" (must be a positive integer)`);
+  }
+  return bytes;
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const portArg = Number(process.env["OPENSTORE_WEB_PORT"] ?? process.argv[2] ?? DEFAULT_WEB_PORT);
-  const port = Number.isInteger(portArg) && portArg > 0 ? portArg : DEFAULT_WEB_PORT;
-  // Optional live backend: point at a ManifestStore directory to serve the
-  // real file catalog instead of demo data, and at a keystore file to
-  // enable local identity management. Unset → explicit demo fallback.
-  const manifestDir = process.env["OPENSTORE_WEB_MANIFEST_DIR"] || undefined;
-  const keystorePath = process.env["OPENSTORE_WEB_KEYSTORE"] || undefined;
-  const web = createWebServer({ ...(manifestDir ? { manifestDir } : {}), ...(keystorePath ? { keystorePath } : {}) });
-  web
-    .listen(port, "127.0.0.1")
-    .then((actual) => {
-      console.log(`OpenStore web dashboard at http://127.0.0.1:${actual}/`);
-    })
-    .catch((err) => {
+  void (async () => {
+    try {
+      await runStandaloneServer(process.env, process.argv.slice(2));
+    } catch (err) {
       console.error(`Failed to start web server: ${(err as Error).message}`);
       process.exitCode = 1;
+    }
+  })();
+}
+
+/**
+ * Standalone entrypoint: registry + real storage nodes + web dashboard
+ * in one process for local development and integration testing.
+ *
+ * Environment:
+ * - OPENSTORE_WEB_PORT / argv[0]: dashboard port (default 4173).
+ * - OPENSTORE_WEB_MANIFEST_DIR: live file catalog (unset → demo files).
+ * - OPENSTORE_WEB_KEYSTORE: local identity management (unset → demo identity).
+ * - OPENSTORE_WEB_STORAGE_DIRS: comma-separated storage dirs, one real
+ *   storage node per dir sharing the web backend's registry with signed
+ *   registration + heartbeat (unset → demo nodes).
+ * - OPENSTORE_WEB_STORAGE_PORTS: optional per-node ports matching DIRS
+ *   (unset → ephemeral ports, actual URLs are logged).
+ * - OPENSTORE_WEB_STORAGE_CAPACITY_BYTES: optional per-node quota.
+ */
+export async function runStandaloneServer(env: NodeJS.ProcessEnv, args: string[]): Promise<void> {
+  const portArg = Number(env["OPENSTORE_WEB_PORT"] ?? args[0] ?? DEFAULT_WEB_PORT);
+  const port = Number.isInteger(portArg) && portArg > 0 ? portArg : DEFAULT_WEB_PORT;
+  const manifestDir = env["OPENSTORE_WEB_MANIFEST_DIR"] || undefined;
+  const keystorePath = env["OPENSTORE_WEB_KEYSTORE"] || undefined;
+
+  const storageDirs = parseCsvList(env["OPENSTORE_WEB_STORAGE_DIRS"]);
+  const storagePorts = parseStoragePorts(env["OPENSTORE_WEB_STORAGE_PORTS"], storageDirs.length);
+  const capacityBytes = parseStorageCapacityBytes(env["OPENSTORE_WEB_STORAGE_CAPACITY_BYTES"]);
+
+  // Dynamically imported so library consumers never pay for the
+  // storage-node graph unless they run the standalone server.
+  const { createRegistry } = await import("../../packages/registry/index.js");
+  const { createIdentity } = await import("../../packages/identity/index.js");
+  const { createStorageNode } = await import("../storage-node/index.js");
+  type StorageNode = import("../storage-node/index.js").StorageNode;
+
+  const nodes: StorageNode[] = [];
+  // Only hand the backend a registry when real nodes back it: an empty
+  // registry would flip the UI to Live with zero nodes, hiding demo data
+  // without providing anything real.
+  const registry = storageDirs.length > 0 ? createRegistry() : undefined;
+  try {
+    for (let i = 0; i < storageDirs.length; i += 1) {
+      const node = createStorageNode({
+        storageDir: storageDirs[i] as string,
+        identity: createIdentity(),
+        ...(registry ? { registry } : {}),
+        registryHeartbeatIntervalMs: 5000,
+        ...(capacityBytes !== undefined ? { capacityBytes } : {}),
+      });
+      const actualPort = await node.listen(storagePorts[i] as number, "127.0.0.1");
+      nodes.push(node);
+      console.log(`OpenStore storage node at http://127.0.0.1:${actualPort}/ (${storageDirs[i]})`);
+    }
+    const web = createWebServer({
+      ...(manifestDir ? { manifestDir } : {}),
+      ...(keystorePath ? { keystorePath } : {}),
+      ...(registry ? { registry } : {}),
     });
+    const actual = await web.listen(port, "127.0.0.1");
+    console.log(`OpenStore web dashboard at http://127.0.0.1:${actual}/`);
+    if (storageDirs.length === 0) {
+      console.log("No storage nodes configured (set OPENSTORE_WEB_STORAGE_DIRS) — showing demo nodes; uploads will fail.");
+    }
+    const shutdown = () => {
+      void (async () => {
+        for (const node of nodes) {
+          try { await node.close(); } catch {}
+        }
+        try { await web.close(); } catch {}
+        process.exit(0);
+      })();
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  } catch (err) {
+    for (const node of nodes) {
+      try { await node.close(); } catch {}
+    }
+    throw err;
+  }
 }
