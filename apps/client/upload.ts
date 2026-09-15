@@ -32,6 +32,7 @@ import {
 import type { FileManifest, ManifestChunk } from "../../packages/manifest/index.js";
 import { storePieceOnNodes } from "./index.js";
 import type { StorageNodeEndpoint } from "./index.js";
+import type { Registry } from "../../packages/registry/index.js";
 
 /**
  * Options for {@link uploadBuffer}.
@@ -40,6 +41,8 @@ export interface UploadOptions {
   chunkSize?: number;
   timeoutMs?: number;
   replicationFactor?: number;
+  /** Optional registry for intelligent node selection (capacity/availability aware) */
+  registry?: Registry;
 }
 
 /**
@@ -85,9 +88,25 @@ export async function uploadBuffer(
       const encrypted = encryptChunk(fileChunk.data, encryptionKey);
       const pieceBytes = encodeEncryptedPiece(encrypted);
       const pieceId = hashPieceId(pieceBytes);
-      const report = await storePieceOnNodes(pieceId, pieceBytes, endpoints, {
+
+      // Intelligent selection when registry is available: filter by capacity, prefer more available
+      let selectedEndpoints = endpoints;
+      let replicationFactor = options.replicationFactor;
+      if (options.registry) {
+        const { selectNodes } = await import("./selection.js");
+        const candidates = options.registry.listAvailable();
+        if (candidates.length > 0) {
+          const rf = replicationFactor ?? 3;
+          // Throws if insufficient suitable nodes — do not silently reduce
+          const selected = selectNodes(candidates, pieceBytes.length, rf);
+          selectedEndpoints = selected.map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl }));
+          replicationFactor = rf;
+        }
+      }
+
+      const report = await storePieceOnNodes(pieceId, pieceBytes, selectedEndpoints, {
         timeoutMs: options.timeoutMs,
-        replicationFactor: options.replicationFactor,
+        replicationFactor,
       });
       if (report.succeeded.length === 0) {
         const reasons = report.failed

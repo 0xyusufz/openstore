@@ -53,9 +53,9 @@ export interface RegistryOptions {
 
 export interface Registry {
   readonly version: number;
-  register(baseUrl: string, identity: Identity): NodeRecord;
+  register(baseUrl: string, identity: Identity, capacity?: NodeCapacity): NodeRecord;
   registerSigned(signed: SignedRegistration): NodeRecord;
-  heartbeat(nodeId: string, identity: Identity): NodeRecord;
+  heartbeat(nodeId: string, identity: Identity, capacity?: NodeCapacity): NodeRecord;
   heartbeatSigned(signed: SignedHeartbeat): NodeRecord;
   unregister(nodeId: string, identity: Identity): void;
   unregisterSigned(signed: SignedUnregister): void;
