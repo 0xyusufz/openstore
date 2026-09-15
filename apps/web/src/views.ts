@@ -166,7 +166,7 @@ export function renderApp(state: WebState, stats: DashboardStats): string {
   <header class="topbar">
     <div class="brand"><span class="brand-mark" aria-hidden="true">◈</span> OpenStore</div>
     ${navHtml(state.view)}
-    ${state.demoMode ? `<span class="demo-badge" title="All data on screen is local mock data">Demo data</span>` : ""}
+    ${state.demoMode ? `<span class="demo-badge" title="All data on screen is local mock data">Demo data</span>` : `<span class="live-badge" title="Data served by the OpenStore web backend">Live</span>`}
   </header>
   <main id="view">${noticeHtml(state.notice)}${screen}</main>
   <footer class="footer"><span>OpenStore dashboard (demo build — mock data, no real operations).</span></footer>`;

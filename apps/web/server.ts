@@ -1,9 +1,10 @@
 /**
- * OpenStore Web Server (OPENSTORE-023)
+ * OpenStore Web Server (OPENSTORE-023, backend wiring in OPENSTORE-024)
  *
  * Minimal static file server for the dashboard (Node.js stdlib only).
  * Serves the app shell, stylesheet, compiled frontend modules from
- * `dist/`, and a JSON health endpoint. Unknown extensionless routes
+ * `dist/`, a JSON health endpoint, and the `/api/*` backend boundary
+ * (safe metadata only — see backend.ts). Unknown extensionless routes
  * fall back to the shell for hash-based SPA navigation.
  */
 
@@ -13,13 +14,15 @@ import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
+import { createWebBackend } from "./backend.js";
+import type { WebBackend, WebBackendOptions } from "./backend.js";
 
 export const WEB_SERVER_VERSION = 1;
 export const DEFAULT_WEB_PORT = 4173;
 
 const JS_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-export interface WebServerOptions {
+export interface WebServerOptions extends WebBackendOptions {
   /** Repo root (defaults to the checkout containing this file). */
   rootDir?: string;
 }
@@ -51,9 +54,10 @@ export function createWebServer(options: WebServerOptions = {}): WebServer {
   const root = options.rootDir ?? findRepoRoot(here);
   const webDir = join(root, "apps", "web");
   const jsDir = join(root, "dist", "apps", "web", "src");
+  const backend: WebBackend = createWebBackend(options);
 
   const server = createServer((req, res) => {
-    void handleRequest(req, res, webDir, jsDir).catch(() => {
+    void handleRequest(req, res, webDir, jsDir, backend).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal error" });
       } else {
@@ -93,6 +97,7 @@ async function handleRequest(
   res: ServerResponse,
   webDir: string,
   jsDir: string,
+  backend: WebBackend,
 ): Promise<void> {
   const method = (req.method ?? "").toUpperCase();
   const rawPath = (req.url ?? "/").split("?")[0] as string;
@@ -102,8 +107,27 @@ async function handleRequest(
   }
   const headOnly = method === "HEAD";
 
-  if (rawPath === "/health") {
-    sendJson(res, 200, { status: "ok", app: "openstore-web", version: WEB_SERVER_VERSION }, headOnly);
+  if (rawPath === "/health" || rawPath === "/api/health") {
+    sendJson(res, 200, backend.getHealth(), headOnly);
+    return;
+  }
+  if (rawPath === "/api/files") {
+    const snapshot = await backend.getSnapshot();
+    sendJson(res, 200, { files: snapshot.files, source: snapshot.filesSource }, headOnly);
+    return;
+  }
+  if (rawPath === "/api/nodes") {
+    const snapshot = await backend.getSnapshot();
+    sendJson(res, 200, { nodes: snapshot.nodes, source: snapshot.nodesSource }, headOnly);
+    return;
+  }
+  if (rawPath === "/api/identity") {
+    const snapshot = await backend.getSnapshot();
+    sendJson(res, 200, { identity: snapshot.identity }, headOnly);
+    return;
+  }
+  if (rawPath.startsWith("/api/")) {
+    sendJson(res, 404, { error: "not found" }, headOnly);
     return;
   }
   if (rawPath === "/" || rawPath === "/index.html") {
@@ -155,7 +179,10 @@ function sendJson(res: ServerResponse, status: number, body: unknown, headOnly =
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const portArg = Number(process.env["OPENSTORE_WEB_PORT"] ?? process.argv[2] ?? DEFAULT_WEB_PORT);
   const port = Number.isInteger(portArg) && portArg > 0 ? portArg : DEFAULT_WEB_PORT;
-  const web = createWebServer();
+  // Optional live backend: point at a ManifestStore directory to serve the
+  // real file catalog instead of demo data. Unset → explicit demo fallback.
+  const manifestDir = process.env["OPENSTORE_WEB_MANIFEST_DIR"] || undefined;
+  const web = createWebServer(manifestDir ? { manifestDir } : {});
   web
     .listen(port, "127.0.0.1")
     .then((actual) => {

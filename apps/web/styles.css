@@ -65,6 +65,16 @@ body {
   white-space: nowrap;
 }
 
+.live-badge {
+  font-size: 0.75rem;
+  color: #062e1c;
+  background: var(--good);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 main { flex: 1; width: 100%; max-width: var(--max); margin: 0 auto; padding: 1.5rem 1.25rem 3rem; }
 h2 { margin: 0.25rem 0 1rem; font-size: 1.5rem; }
 h3 { margin: 0 0 0.5rem; font-size: 1rem; color: var(--muted); font-weight: 600; }

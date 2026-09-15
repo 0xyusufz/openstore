@@ -11,6 +11,7 @@
 import { DEMO_MODE, MOCK_FILES, MOCK_IDENTITY, MOCK_NODES } from "./mock.js";
 import type { DashboardStats, WebIdentityStatus, WebNode } from "./types.js";
 import type { CatalogEntry } from "../../client/catalog.js";
+import type { BackendSnapshot } from "../backend.js";
 
 export type ViewId = "dashboard" | "files" | "upload" | "nodes" | "settings";
 
@@ -128,6 +129,31 @@ export function attemptDelete(state: WebState, fileId: string): WebState {
 
 export function dismissNotice(state: WebState): WebState {
   return { ...state, notice: null };
+}
+
+/**
+ * Apply a backend snapshot (live or demo) to UI state.
+ * Replaces files/nodes/identity wholesale and derives demoMode from
+ * the reported sources. Pure and testable; fetching lives in app.ts.
+ */
+export function applyBackendSnapshot(state: WebState, snapshot: BackendSnapshot): WebState {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new TypeError("snapshot must be an object");
+  }
+  if (!Array.isArray(snapshot.files) || !Array.isArray(snapshot.nodes)) {
+    throw new TypeError("snapshot must contain files and nodes arrays");
+  }
+  if (!snapshot.identity || typeof snapshot.identity !== "object") {
+    throw new TypeError("snapshot must contain an identity object");
+  }
+  return {
+    ...state,
+    files: snapshot.files.map((f) => ({ ...f })),
+    nodes: snapshot.nodes.map((n) => ({ ...n })),
+    identity: { ...snapshot.identity },
+    demoMode: snapshot.filesSource === "demo" && snapshot.nodesSource === "demo",
+    notice: null,
+  };
 }
 
 export function resetUploadDraft(state: WebState): WebState {
