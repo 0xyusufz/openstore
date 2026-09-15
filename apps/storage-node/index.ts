@@ -27,6 +27,7 @@ import { mkdir, readFile, stat, unlink, writeFile } from "fs/promises";
 import { join, resolve } from "path";
 import { DEFAULT_MAX_CLOCK_SKEW_MS, PUBKEY_HEADER, verifyAuthHeaders } from "../../packages/auth/index.js";
 import type { Identity } from "../../packages/identity/index.js";
+import type { Registry } from "../../packages/registry/index.js";
 
 export const STORAGE_NODE_VERSION = 1;
 
@@ -48,6 +49,10 @@ export interface StorageNodeOptions {
   requireAuth?: boolean;
   /** Max clock skew for timestamp validation (ms) */
   maxClockSkewMs?: number;
+  /** Optional in-memory registry for node discovery */
+  registry?: Registry;
+  /** Heartbeat interval for registry (ms). Defaults to 10s or 1/3 of registry timeout */
+  registryHeartbeatIntervalMs?: number;
 }
 
 /**
@@ -111,6 +116,10 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     });
   });
 
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let registeredBaseUrl: string | undefined;
+  let registeredNodeId: string | undefined;
+
   const node: StorageNode = {
     version: STORAGE_NODE_VERSION,
     storageDir,
@@ -136,12 +145,71 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
         });
       });
       const address = server.address();
+      let actualPort: number;
       if (address !== null && typeof address === "object") {
-        return address.port;
+        actualPort = address.port;
+      } else {
+        throw new Error("failed to determine listening port");
       }
-      throw new Error("failed to determine listening port");
+
+      // Register with registry if configured
+      if (options.registry && nodeIdentity) {
+        const baseUrl = `http://${host}:${actualPort}`;
+        registeredBaseUrl = baseUrl;
+        registeredNodeId = nodeIdentity.publicKey.toString("base64");
+        try {
+          const { createSignedRegistration } = await import("../../packages/registry/index.js");
+          const signed = createSignedRegistration(nodeIdentity, baseUrl);
+          // Never send private key — only signed payload with publicKey
+          options.registry.registerSigned(signed);
+        } catch (err) {
+          // Clean up server if registration fails
+          await new Promise<void>((res) => server.close(() => res()));
+          throw new Error(`registry registration failed: ${(err as Error).message}`);
+        }
+        // Start heartbeat
+        const intervalMs = options.registryHeartbeatIntervalMs ?? 10_000;
+        heartbeatTimer = setInterval(() => {
+          if (!nodeIdentity || !registeredNodeId || !options.registry) return;
+          try {
+            // Use signed heartbeat to avoid exposing private key
+            import("../../packages/registry/index.js")
+              .then(({ createSignedHeartbeat }) => {
+                const signed = createSignedHeartbeat(nodeIdentity as Identity, registeredNodeId as string);
+                (options.registry as Registry).heartbeatSigned(signed);
+              })
+              .catch(() => {
+                // Heartbeat failures are non-fatal but should be visible
+              });
+          } catch {
+            // ignore
+          }
+        }, intervalMs);
+        // Don't keep process alive just for heartbeat
+        if (heartbeatTimer && typeof (heartbeatTimer as unknown as { unref?: () => void }).unref === "function") {
+          (heartbeatTimer as unknown as { unref: () => void }).unref();
+        }
+      }
+
+      return actualPort;
     },
     async close(): Promise<void> {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = undefined;
+      }
+      // Unregister from registry gracefully
+      if (options.registry && registeredNodeId && nodeIdentity) {
+        try {
+          const { createSignedUnregister } = await import("../../packages/registry/index.js");
+          const signed = createSignedUnregister(nodeIdentity, registeredNodeId);
+          options.registry.unregisterSigned(signed);
+        } catch {
+          // Unregister failures on close should not hide close errors
+        }
+        registeredNodeId = undefined;
+        registeredBaseUrl = undefined;
+      }
       await new Promise<void>((resolveClose, rejectClose) => {
         server.close((err) => {
           if (err) {
