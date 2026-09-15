@@ -24,24 +24,32 @@ export const DEFAULT_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 const NONCE_BYTES = 16;
 
+function getAllocated(cap: NodeCapacity): number {
+  return (cap.allocatedBytes ?? cap.totalBytes ?? 0) as number;
+}
+
 function registrationPayload(baseUrl: string, capacity: NodeCapacity | undefined, timestamp: string, nonce: string): string {
   if (capacity) {
-    return `REGISTER\n${baseUrl}\n${capacity.totalBytes}\n${capacity.usedBytes}\n${capacity.availableBytes}\n${timestamp}\n${nonce}`;
+    const total = getAllocated(capacity);
+    return `REGISTER\n${baseUrl}\n${total}\n${capacity.usedBytes}\n${capacity.availableBytes}\n${timestamp}\n${nonce}`;
   }
   return `REGISTER\n${baseUrl}\n${timestamp}\n${nonce}`;
 }
 
 function heartbeatPayload(nodeId: string, capacity: NodeCapacity | undefined, timestamp: string, nonce: string): string {
   if (capacity) {
-    return `HEARTBEAT\n${nodeId}\n${capacity.totalBytes}\n${capacity.usedBytes}\n${capacity.availableBytes}\n${timestamp}\n${nonce}`;
+    const total = getAllocated(capacity);
+    return `HEARTBEAT\n${nodeId}\n${total}\n${capacity.usedBytes}\n${capacity.availableBytes}\n${timestamp}\n${nonce}`;
   }
   return `HEARTBEAT\n${nodeId}\n${timestamp}\n${nonce}`;
 }
 
 export interface NodeCapacity {
-  totalBytes: number;
+  allocatedBytes?: number;
   usedBytes: number;
   availableBytes: number;
+  /** @deprecated use allocatedBytes */
+  totalBytes?: number;
 }
 
 export interface NodeRecord {
@@ -131,7 +139,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         return null;
       }
     } else {
-      capacity = { totalBytes: 0, usedBytes: 0, availableBytes: 0 };
+      capacity = { allocatedBytes: 0, totalBytes: 0, usedBytes: 0, availableBytes: 0 };
     }
     // Validate baseUrl and publicKey
     try {
@@ -272,21 +280,25 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
   function validateCapacity(cap: unknown): NodeCapacity {
     if (!cap || typeof cap !== "object" || Array.isArray(cap)) throw new Error("malformed node record: invalid capacity");
     const c = cap as Record<string, unknown>;
-    for (const f of ["totalBytes", "usedBytes", "availableBytes"] as const) {
+    // Accept allocatedBytes or totalBytes
+    const totalRaw = c["allocatedBytes"] ?? c["totalBytes"];
+    if (typeof totalRaw !== "number" || !Number.isInteger(totalRaw as number) || (totalRaw as number) < 0) {
+      throw new Error("malformed node record: invalid capacity allocatedBytes");
+    }
+    for (const f of ["usedBytes", "availableBytes"] as const) {
       if (typeof c[f] !== "number" || !Number.isInteger(c[f] as number) || (c[f] as number) < 0) {
         throw new Error(`malformed node record: invalid capacity ${f}`);
       }
     }
-    const total = c["totalBytes"] as number;
+    const total = totalRaw as number;
     const used = c["usedBytes"] as number;
     const available = c["availableBytes"] as number;
     if (used + available !== total && total !== 0) {
-      // Allow total=0 as unlimited, otherwise check consistency
       if (used > total || available !== total - used) {
         throw new Error("malformed node record: capacity inconsistent");
       }
     }
-    return { totalBytes: total, usedBytes: used, availableBytes: available };
+    return { allocatedBytes: total, totalBytes: total, usedBytes: used, availableBytes: available };
   }
 
   function prune(): void {
@@ -343,7 +355,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         baseUrl,
         available: true,
         lastSeen: Date.now(),
-        capacity: cap ?? { totalBytes: 0, usedBytes: 0, availableBytes: 0 },
+        capacity: cap ?? { allocatedBytes: 0, totalBytes: 0, usedBytes: 0, availableBytes: 0 },
       };
       nodes.set(nodeId, record);
       persist();

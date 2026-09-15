@@ -62,19 +62,19 @@ describe("persistent node registry (OPENSTORE-014)", () => {
     const dir = file.split("/").slice(0, -1).join("/");
     const reg1 = createRegistry({ persistencePath: file });
     const id = createIdentity();
-    const cap = { totalBytes: 1000, usedBytes: 200, availableBytes: 800 };
+    const cap = { totalBytes: 1000, usedBytes: 200, availableBytes: 800, allocatedBytes: 1000 };
     reg1.register("http://127.0.0.1:4004", id, cap);
     const rec1 = reg1.get(id.publicKey.toString("base64"));
-    expect(rec1?.capacity).toEqual(cap);
+    expect(rec1?.capacity).toMatchObject({ totalBytes: 1000, allocatedBytes: 1000, usedBytes: 200, availableBytes: 800 });
 
     const reg2 = createRegistry({ persistencePath: file });
-    expect(reg2.get(id.publicKey.toString("base64"))?.capacity).toEqual(cap);
+    expect(reg2.get(id.publicKey.toString("base64"))?.capacity).toMatchObject({ totalBytes: 1000, allocatedBytes: 1000, usedBytes: 200, availableBytes: 800 });
 
     // Heartbeat with new capacity
-    const cap2 = { totalBytes: 1000, usedBytes: 500, availableBytes: 500 };
+    const cap2 = { totalBytes: 1000, usedBytes: 500, availableBytes: 500, allocatedBytes: 1000 };
     reg1.heartbeat(id.publicKey.toString("base64"), id, cap2);
     const reg3 = createRegistry({ persistencePath: file });
-    expect(reg3.get(id.publicKey.toString("base64"))?.capacity).toEqual(cap2);
+    expect(reg3.get(id.publicKey.toString("base64"))?.capacity).toMatchObject({ totalBytes: 1000, allocatedBytes: 1000, usedBytes: 500, availableBytes: 500 });
     await rm(dir, { recursive: true, force: true });
   });
 

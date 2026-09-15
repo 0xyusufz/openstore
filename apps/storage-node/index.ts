@@ -59,9 +59,11 @@ export interface StorageNodeOptions {
 }
 
 export interface NodeCapacity {
-  totalBytes: number;
+  allocatedBytes?: number;
   usedBytes: number;
   availableBytes: number;
+  /** @deprecated use allocatedBytes */
+  totalBytes?: number;
 }
 
 /**
@@ -156,7 +158,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   async function getCapacity(): Promise<NodeCapacity> {
     const used = await getUsedBytes();
     const available = Math.max(0, capacityBytes - used);
-    return { totalBytes: capacityBytes, usedBytes: used, availableBytes: available };
+    return { allocatedBytes: capacityBytes, totalBytes: capacityBytes, usedBytes: used, availableBytes: available };
   }
 
   const node: StorageNode = {
@@ -434,11 +436,14 @@ async function handlePostPieceWithBody(
     }
   }
 
-  // Enforce capacity: only counts OpenStore storage directory
+  // Enforce capacity: only counts OpenStore storage directory (allocated quota, not physical disk)
   const used = await getUsedBytesForDir(storageDir);
   const projected = existed ? used - existingSize + bytes.length : used + bytes.length;
   if (projected > capacityBytes) {
-    sendJson(res, 507, { error: "insufficient storage", capacity: { totalBytes: capacityBytes, usedBytes: used, availableBytes: Math.max(0, capacityBytes - used) } });
+    sendJson(res, 507, {
+      error: "insufficient storage",
+      capacity: { allocatedBytes: capacityBytes, totalBytes: capacityBytes, usedBytes: used, availableBytes: Math.max(0, capacityBytes - used) },
+    });
     return;
   }
 

@@ -161,7 +161,8 @@ describe("storage capacity & node health (OPENSTORE-012)", () => {
       const rec = registry.get(id.publicKey.toString("base64"));
       // used should be cumulative
       expect(rec?.capacity.usedBytes).toBeGreaterThanOrEqual(size);
-      expect(rec?.capacity.availableBytes).toBe(rec!.capacity.totalBytes - rec!.capacity.usedBytes);
+      const total = rec!.capacity.allocatedBytes ?? rec!.capacity.totalBytes ?? 0;
+      expect(rec?.capacity.availableBytes).toBe(total - rec!.capacity.usedBytes);
     }
     await node.close();
     await rm(dir, { recursive: true, force: true });
