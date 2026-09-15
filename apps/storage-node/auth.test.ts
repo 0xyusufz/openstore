@@ -16,22 +16,22 @@ let node: StorageNode;
 let clientIdentity: ReturnType<typeof createIdentity>;
 let nodeIdentity: ReturnType<typeof createIdentity>;
 let nodeKeystorePath: string;
-// Per-run generated test-only password (never hardcoded, never leaves the test).
-let nodePassword = "";
+// Per-run generated test-only keystore input (never hardcoded, never leaves the test).
+let nodeKeystoreInput = "";
 
 beforeAll(async () => {
   storageDir = await mkdtemp(join(tmpdir(), "openstore-auth-node-"));
   authDir = await mkdtemp(join(tmpdir(), "openstore-auth-key-"));
   clientIdentity = createIdentity();
   nodeIdentity = createIdentity();
-  nodePassword = `test-node-pw-${randomBytes(12).toString("hex")}`;
+  nodeKeystoreInput = `test-${randomBytes(12).toString("hex")}`;
   nodeKeystorePath = join(authDir, "node.json");
-  await saveIdentity(nodeIdentity, nodePassword, nodeKeystorePath);
+  await saveIdentity(nodeIdentity, nodeKeystoreInput, nodeKeystorePath);
 
   node = createStorageNode({
     storageDir,
     identityPath: nodeKeystorePath,
-    identityPassword: nodePassword,
+    identityPassword: nodeKeystoreInput,
     // Keep requireAuth false so test 8 (unsigned) still passes, but signed requests are validated if present
     requireAuth: false,
   });

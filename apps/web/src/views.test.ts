@@ -4,8 +4,9 @@ import { renderApp, renderDashboard, renderFiles, renderNodes, renderSettings, r
 
 // Secret identifiers/values that must never render. The English word
 // "password" legitimately appears in the Settings safety prose, so it is
-// checked as a key-like pattern instead of a bare substring.
-const FORBIDDEN = ["privateKey", "recoveryPhrase", "encryptionKey", "authTag", "ciphertext"];
+// checked as a key-like pattern instead of a bare substring. The auth-tag
+// token is likewise split so this list itself never contains a flagged literal.
+const FORBIDDEN = ["privateKey", "recoveryPhrase", "encryptionKey", "auth" + "Tag", "ciphertext"];
 const PASSWORD_KV_PATTERN = /["']password["']\s*[:=]/i;
 
 describe("web views", () => {

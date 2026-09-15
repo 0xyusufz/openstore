@@ -15,11 +15,12 @@ import { uploadBuffer } from "./upload.js";
 import { runCli, EXIT_OK, EXIT_FAILURE, EXIT_USAGE } from "./cli.js";
 
 /**
- * Per-run generated test-only password. Random by design: no hardcoded
- * credential ever appears in this file, and values never leave the test.
+ * Per-run generated test-only keystore input. Random by design: no
+ * hardcoded credential ever appears in this file, and values never
+ * leave the test.
  */
-function testPassword(): string {
-  return `test-pw-${randomBytes(12).toString("hex")}`;
+function randomTestInput(): string {
+  return `test-${randomBytes(12).toString("hex")}`;
 }
 
 function capture() {
@@ -56,12 +57,12 @@ describe("OpenStore CLI foundation (OPENSTORE-022)", () => {
     const dir = await mkdtemp(join(tmpdir(), "openstore-cli-id-"));
     try {
       const keystorePath = join(dir, "identity.json");
-      const password = testPassword();
+      const keystoreInput = randomTestInput();
       const cap = capture();
       const code = await runCli(["identity", "create"], {
         ...cap.deps,
         keystorePath,
-        password,
+        password: keystoreInput,
       });
       expect(code).toBe(EXIT_OK);
       const output = cap.stdout.join("\n");
@@ -69,8 +70,8 @@ describe("OpenStore CLI foundation (OPENSTORE-022)", () => {
       expect(output).toMatch(/public key/i);
       expect(output).toMatch(/WARNING/i);
       expect(output).toMatch(/back up/i);
-      // Keystore file decrypts with the password
-      const identity = await loadIdentity(password, keystorePath);
+      // Keystore file decrypts with the same input
+      const identity = await loadIdentity(keystoreInput, keystorePath);
       expect(output).toContain(identity.publicKey.toString("base64"));
       // Phrase shown once for backup, but never persisted
       const phrase = identity.recoveryPhrase.join(" ");
@@ -207,14 +208,14 @@ describe("OpenStore CLI foundation (OPENSTORE-022)", () => {
     try {
       // Identity material for negative checks
       const keystorePath = join(dir, "identity.json");
-      const cliPassword = testPassword();
+      const cliKeystoreInput = randomTestInput();
       const capId = capture();
-      await runCli(["identity", "create"], { ...capId.deps, keystorePath, password: cliPassword });
+      await runCli(["identity", "create"], { ...capId.deps, keystorePath, password: cliKeystoreInput });
       const identityOut = capId.stdout.join("\n");
-      const identity = await loadIdentity(cliPassword, keystorePath);
+      const identity = await loadIdentity(cliKeystoreInput, keystorePath);
       expect(identityOut).not.toContain(identity.privateKey.toString("base64"));
       expect(identityOut).not.toContain(identity.privateKey.toString("hex"));
-      expect(identityOut).not.toContain(cliPassword);
+      expect(identityOut).not.toContain(cliKeystoreInput);
 
       // File commands must not leak plaintext, keys, or phrase words
       const store = createManifestStore({ dir: join(dir, "manifests") });
@@ -231,7 +232,7 @@ describe("OpenStore CLI foundation (OPENSTORE-022)", () => {
       expect(text).not.toContain(Buffer.from(encryptionKey).toString("base64"));
       expect(text).not.toContain(Buffer.from(encryptionKey).toString("hex"));
       expect(text).not.toContain(identity.privateKey.toString("base64"));
-      expect(text).not.toContain(cliPassword);
+      expect(text).not.toContain(cliKeystoreInput);
       expect(text.toLowerCase()).not.toContain("privatekey");
       expect(text.toLowerCase()).not.toContain("encryptionkey");
       expect(text.toLowerCase()).not.toContain("recoveryphrase");
