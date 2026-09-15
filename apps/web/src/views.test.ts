@@ -40,7 +40,7 @@ describe("web views", () => {
   it("upload view stages honestly without claiming success", () => {
     const idle = renderUpload(createInitialState());
     expect(idle).toContain("No file staged");
-    expect(idle).toContain("never the contents");
+    expect(idle).toContain("never sees plaintext");
     expect(idle).toContain("disabled");
   });
 
@@ -67,7 +67,7 @@ describe("web views", () => {
     expect(html).toContain("Demo data");
     expect(html).toContain("Hello notice");
     expect(html).toContain("OpenStore");
-    expect(html).toContain("mock data, no real operations");
+    expect(html).toContain("encrypted storage network");
   });
 
   it("no view leaks secrets", () => {

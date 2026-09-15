@@ -81,26 +81,42 @@ export function renderFiles(state: WebState): string {
 
 export function renderUpload(state: WebState): string {
   const draft = state.upload;
+  const progressPct =
+    draft.status === "encrypting" ? 25 :
+    draft.status === "storing" ? 60 :
+    draft.status === "complete" ? 100 :
+    draft.status === "failed" ? 100 : 0;
+  const progressLabel =
+    draft.status === "encrypting" ? "Encrypting..." :
+    draft.status === "storing" ? "Storing replicas..." :
+    draft.status === "complete" ? "Complete" :
+    draft.status === "failed" ? "Failed" : "";
   const staged =
     draft.status === "idle"
       ? `<p class="muted">No file staged.</p>`
       : `<div class="staged">
-          <p><strong>Staged:</strong> ${esc(draft.fileName)} (${esc(formatBytes(draft.fileSize))})</p>
+          <p><strong>${esc(draft.fileName)}</strong> (${esc(formatBytes(draft.fileSize))})</p>
           ${draft.note ? `<p class="muted">${esc(draft.note)}</p>` : ""}
-          <div class="progress" aria-hidden="true"><span class="progress-fill" style="width:${draft.status === "blocked" ? 100 : 8}%"></span></div>
-          <p class="muted">${draft.status === "blocked" ? "Not uploaded — see notice above." : "Ready when the backend is connected."}</p>
+          ${draft.status !== "ready" ? `
+          <div class="progress" role="progressbar" aria-valuenow="${progressPct}" aria-valuemin="0" aria-valuemax="100">
+            <span class="progress-fill${draft.status === "complete" ? " progress-good" : draft.status === "failed" ? " progress-bad" : ""}" style="width:${progressPct}%"></span>
+          </div>
+          <p class="muted">${esc(progressLabel)}</p>` : ""}
+          ${draft.status === "ready" ? `<p class="muted">Ready to upload.</p>` : ""}
+          ${draft.status === "complete" ? `<p class="muted">File encrypted, chunked, and stored on nodes.</p>` : ""}
+          ${draft.status === "failed" ? `<p class="muted">Upload failed. Check that storage nodes are running.</p>` : ""}
         </div>`;
   return `
   <section aria-label="Upload">
     <h2>Upload</h2>
-    <p class="muted">Pick a file to stage it locally. Only the name and size are read — never the contents.</p>
+    <p class="muted">Pick a file to upload. It is encrypted and chunked before storage — the server never sees plaintext.</p>
     <div class="upload-box">
       <label class="file-label">Choose file
         <input id="upload-input" type="file" />
       </label>
       ${staged}
       <div class="row">
-        <button type="button" data-action="upload-attempt" ${draft.status === "idle" ? "disabled" : ""}>Upload</button>
+        <button type="button" data-action="upload-attempt" ${draft.status === "idle" || draft.status === "encrypting" || draft.status === "storing" ? "disabled" : ""}>Upload</button>
       </div>
     </div>
   </section>`;
@@ -170,6 +186,19 @@ export function renderSettings(state: WebState): string {
           <div class="row"><button type="submit">Unlock</button></div>
         </form>`
       : `<div class="row"><button type="button" data-action="identity-lock">Lock identity</button></div>`;
+  const wordInputs = Array.from({ length: 12 }, (_, i) => {
+    const n = i + 1;
+    return `<div class="form-row phrase-input"><label>${n} <input id="recovery-word-${n}" name="word${n}" type="text" autocomplete="off" required minlength="1" placeholder="word ${n}" /></label></div>`;
+  }).join("");
+  const recoveryForm = `<form id="identity-recover-form" autocomplete="off">
+        <h3>Recover from phrase</h3>
+        <p class="muted">Enter your 12-word recovery phrase to restore an existing identity.</p>
+        <div class="phrase-inputs">${wordInputs}</div>
+        <div class="form-row"><label>New password <input id="recover-password" name="password" type="password" autocomplete="new-password" required minlength="1" /></label></div>
+        <div class="form-row"><label>Confirm password <input id="recover-confirm" name="confirm" type="password" autocomplete="new-password" required minlength="1" /></label></div>
+        ${state.identity.configured ? `<div class="form-row"><label class="checkbox-label"><input id="recover-confirm-replace" type="checkbox" /> Replace existing keystore</label></div>` : ""}
+        <div class="row"><button type="submit">Recover identity</button></div>
+      </form>`;
   return `
   <section aria-label="Settings">
     <h2>Settings</h2>
@@ -183,11 +212,14 @@ export function renderSettings(state: WebState): string {
       Identity management requires a server started with identity support; otherwise these actions report an error.</p>
     </div>
     <div class="card">
+      ${recoveryForm}
+    </div>
+    <div class="card">
       <h3>Security guarantees</h3>
       <ul>
         <li>Client-side encryption stays in the audited library packages.</li>
         <li>This dashboard renders metadata only — never file contents, private keys, or encryption keys.</li>
-        <li>Uploads, downloads, and deletes are disabled until backend integration lands; the UI says so instead of faking success.</li>
+        <li>Downloads and deletes are disabled until their backend integrations land.</li>
       </ul>
     </div>
   </section>`;
@@ -212,5 +244,5 @@ export function renderApp(state: WebState, stats: DashboardStats): string {
     ${state.demoMode ? `<span class="demo-badge" title="All data on screen is local mock data">Demo data</span>` : `<span class="live-badge" title="Data served by the OpenStore web backend">Live</span>`}
   </header>
   <main id="view">${noticeHtml(state.notice)}${screen}</main>
-  <footer class="footer"><span>OpenStore dashboard (demo build — mock data, no real operations).</span></footer>`;
+  <footer class="footer"><span>OpenStore dashboard — encrypted storage network.</span></footer>`;
 }

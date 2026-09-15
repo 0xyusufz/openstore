@@ -15,7 +15,7 @@ import { readFile } from "fs/promises";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { createWebBackend } from "./backend.js";
-import type { WebBackend, WebBackendOptions } from "./backend.js";
+import type { WebBackend, WebBackendOptions, UploadFileResult } from "./backend.js";
 
 export const WEB_SERVER_VERSION = 1;
 export const DEFAULT_WEB_PORT = 4173;
@@ -111,18 +111,20 @@ async function handleRequest(
     sendJson(res, 200, backend.getHealth(), headOnly);
     return;
   }
-  // Identity actions are POST-only.
+  // Identity actions and file upload are POST-only.
   if (
     rawPath === "/api/identity/create" ||
     rawPath === "/api/identity/unlock" ||
-    rawPath === "/api/identity/lock"
+    rawPath === "/api/identity/lock" ||
+    rawPath === "/api/identity/recover" ||
+    rawPath === "/api/files/upload"
   ) {
     if (method !== "POST") {
       sendJson(res, 405, { error: "method not allowed" }, headOnly);
       return;
     }
   } else if (method === "POST") {
-    // No other POST routes exist (uploads/downloads land next milestone).
+    // No other POST routes exist (downloads land next milestone).
     sendJson(res, 405, { error: "method not allowed" }, headOnly);
     return;
   }
@@ -168,6 +170,55 @@ async function handleRequest(
   if (rawPath === "/api/identity/lock" && method === "POST") {
     backend.lockIdentity();
     sendJson(res, 200, { locked: true });
+    return;
+  }
+  if (rawPath === "/api/identity/recover" && method === "POST") {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) return;
+    const fields = body.value as Record<string, unknown>;
+    const phrase = fields["phrase"];
+    const password = fields["password"];
+    const confirmReplace = fields["confirmReplace"] === true;
+    try {
+      const recovered = await backend.recoverIdentity(phrase as string[], password as string, confirmReplace);
+      sendJson(res, 200, { publicKey: recovered.publicKey });
+    } catch (err) {
+      sendJson(res, identityErrorStatus((err as Error).message), { error: (err as Error).message });
+    }
+    return;
+  }
+  if (rawPath === "/api/files/upload" && method === "POST") {
+    const contentType = (req.headers["content-type"] ?? "") as string;
+    if (!contentType.includes("multipart/form-data")) {
+      sendJson(res, 400, { error: "content-type must be multipart/form-data" }, headOnly);
+      return;
+    }
+    const boundaryMatch = contentType.match(/boundary=([^\s;]+)/);
+    if (!boundaryMatch) {
+      sendJson(res, 400, { error: "missing boundary in content-type" }, headOnly);
+      return;
+    }
+    const parts = await readMultipartBody(req, res, boundaryMatch[1] as string);
+    if (!parts) return;
+    if (parts.filename === null || parts.file === null) {
+      sendJson(res, 400, { error: "missing file or filename in form data" }, headOnly);
+      return;
+    }
+    if (parts.file.length > 100 * 1024 * 1024) {
+      sendJson(res, 413, { error: "file too large (100 MB limit)" }, headOnly);
+      return;
+    }
+    try {
+      const result = await backend.uploadFile(parts.filename, parts.file);
+      sendJson(res, 200, {
+        fileId: result.fileId,
+        filename: result.filename,
+        size: result.size,
+        totalChunks: result.totalChunks,
+      });
+    } catch (err) {
+      sendJson(res, 500, { error: (err as Error).message });
+    }
     return;
   }
   if (rawPath.startsWith("/api/")) {
@@ -217,14 +268,105 @@ async function sendFile(res: ServerResponse, path: string, contentType: string, 
 /** Map identity errors to safe statuses. Messages never carry secrets. */
 function identityErrorStatus(message: string): number {
   if (/already configured/i.test(message)) return 409;
+  if (/keystore already exists/i.test(message)) return 409;
   if (/not configured/i.test(message)) return 400;
   if (/non-empty password|must be a|invalid/i.test(message)) return 400;
+  if (/invalid recovery phrase/i.test(message)) return 400;
+  if (/recovery phrase must have exactly/i.test(message)) return 400;
   if (/malformed/i.test(message)) return 400;
   if (/failed to read keystore|ENOENT|no such file/i.test(message)) return 404;
   return 401;
 }
 
 const MAX_JSON_BODY_BYTES = 64 * 1024;
+
+interface MultipartParts {
+  filename: string | null;
+  file: Buffer | null;
+}
+
+/**
+ * Read and parse a multipart/form-data body into { filename, file }.
+ * Extracts the first file part from the form data. Binary content is
+ * returned as a Buffer. No plaintext or key material is persisted.
+ */
+async function readMultipartBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  boundary: string,
+): Promise<MultipartParts | null> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for await (const chunk of req) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      size += buf.length;
+      if (size > 100 * 1024 * 1024) {
+        sendJson(res, 413, { error: "request body too large" });
+        req.resume();
+        return null;
+      }
+      chunks.push(buf);
+    }
+  } catch {
+    sendJson(res, 400, { error: "failed to read request body" });
+    return null;
+  }
+  const body = Buffer.concat(chunks);
+  const boundaryBuf = Buffer.from(`--${boundary}`, "utf8");
+  const parts = splitMultipartParts(body, boundaryBuf);
+  let filename: string | null = null;
+  let file: Buffer | null = null;
+  for (const part of parts) {
+    const headerEnd = indexOf(part, Buffer.from("\r\n\r\n"));
+    if (headerEnd === -1) continue;
+    const headerSection = part.subarray(0, headerEnd).toString("utf8");
+    const content = part.subarray(headerEnd + 4);
+    const cdMatch = headerSection.match(/content-disposition: form-data;.*filename="([^"]*)"/i);
+    if (cdMatch && file === null) {
+      filename = decodeMultipartFilename(cdMatch[1] as string);
+      file = content;
+    }
+  }
+  return { filename, file };
+}
+
+function splitMultipartParts(body: Buffer, boundaryBuf: Buffer): Buffer[] {
+  const parts: Buffer[] = [];
+  let start = indexOf(body, boundaryBuf);
+  if (start === -1) return parts;
+  start += boundaryBuf.length;
+  while (start < body.length) {
+    if (body[start] === 0x2d && body[start + 1] === 0x2d) break;
+    if (body[start] === 0x0d) start += 2;
+    const nextBoundary = indexOf(body, boundaryBuf, start);
+    if (nextBoundary === -1) break;
+    let partEnd = nextBoundary - 2;
+    if (partEnd >= 0 && body[partEnd] === 0x0d) partEnd -= 1;
+    if (partEnd >= start) parts.push(body.subarray(start, partEnd + 1));
+    start = nextBoundary + boundaryBuf.length;
+  }
+  return parts;
+}
+
+function indexOf(haystack: Buffer, needle: Buffer, fromIndex = 0): number {
+  for (let i = fromIndex; i <= haystack.length - needle.length; i += 1) {
+    let found = true;
+    for (let j = 0; j < needle.length; j += 1) {
+      if (haystack[i + j] !== needle[j]) { found = false; break; }
+    }
+    if (found) return i;
+  }
+  return -1;
+}
+
+function decodeMultipartFilename(value: string): string {
+  try {
+    return decodeURIComponent(value.replace(/\+/g, " "));
+  } catch {
+    return value;
+  }
+}
 
 async function readJsonBody(
   req: IncomingMessage,

@@ -18,11 +18,14 @@
 
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
-import { createIdentity } from "../../packages/identity/index.js";
+import { createIdentity, recoverIdentity } from "../../packages/identity/index.js";
 import { loadIdentity, saveIdentity } from "../../packages/identity/keystore.js";
+import { createManifestStore } from "../../packages/manifest/store.js";
+import type { ManifestStore } from "../../packages/manifest/store.js";
 import { createFileCatalog } from "../client/catalog.js";
 import type { CatalogEntry } from "../client/catalog.js";
-import { createManifestStore } from "../../packages/manifest/store.js";
+import { uploadBuffer } from "../client/upload.js";
+import type { StorageNodeEndpoint } from "../client/index.js";
 import type { Registry } from "../../packages/registry/index.js";
 import { MOCK_FILES, MOCK_IDENTITY, MOCK_NODES } from "./src/mock.js";
 import { toWebNode } from "./src/types.js";
@@ -62,6 +65,11 @@ export interface IdentityUnlock {
   publicKey: string;
 }
 
+/** Recovery result: public metadata only, never private material. */
+export interface IdentityRecovery {
+  publicKey: string;
+}
+
 export interface BackendSnapshot {
   files: CatalogEntry[];
   nodes: WebNode[];
@@ -82,6 +90,13 @@ export interface BackendHealth {
   version: number;
   demoMode: boolean;
   backend: BackendStatus;
+}
+
+export interface UploadFileResult {
+  fileId: string;
+  filename: string;
+  size: number;
+  totalChunks: number;
 }
 
 export interface WebBackend {
@@ -107,6 +122,22 @@ export interface WebBackend {
   unlockIdentity(password: string): Promise<IdentityUnlock>;
   /** Clear the server-side unlocked flag. */
   lockIdentity(): void;
+  /**
+   * Recover an identity from a 12-word recovery phrase and persist it
+   * under a new password. If a keystore already exists, `confirmReplace`
+   * must be true or the call is rejected (409). Private material is
+   * wiped before returning.
+   */
+  recoverIdentity(
+    phrase: string[],
+    password: string,
+    confirmReplace?: boolean,
+  ): Promise<IdentityRecovery>;
+  /**
+   * Upload a file through the encrypted upload pipeline.
+   * Returns safe metadata only; the encryption key never surfaces.
+   */
+  uploadFile(filename: string, data: Buffer): Promise<UploadFileResult>;
 }
 
 export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
@@ -273,6 +304,58 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
 
     lockIdentity(): void {
       unlockedPublicKey = null;
+    },
+
+    async recoverIdentity(
+      phrase: string[],
+      password: string,
+      confirmReplace?: boolean,
+    ): Promise<IdentityRecovery> {
+      if (!keystorePath) {
+        throw new Error("identity management is not configured on this server");
+      }
+      assertPassword(password);
+      if (!Array.isArray(phrase) || phrase.length !== 12) {
+        throw new Error("recovery phrase must have exactly 12 words");
+      }
+      if (existsSync(keystorePath) && !confirmReplace) {
+        throw new Error("keystore already exists; set confirmReplace to true to overwrite");
+      }
+      let identity: ReturnType<typeof recoverIdentity> extends infer R ? R : never;
+      try {
+        identity = recoverIdentity(phrase);
+      } catch (err) {
+        throw new Error(`invalid recovery phrase: ${(err as Error).message}`);
+      }
+      const publicKey = identity.publicKey.toString("base64");
+      try {
+        await saveIdentity(identity, password, keystorePath);
+      } finally {
+        identity.privateKey.fill(0);
+        identity.recoveryPhrase.fill("");
+      }
+      unlockedPublicKey = publicKey;
+      return { publicKey };
+    },
+
+    async uploadFile(filename: string, data: Buffer): Promise<UploadFileResult> {
+      if (!catalog) {
+        throw new Error("manifest store is not configured on this server");
+      }
+      const nodeSnapshot = registry ? registry.list().map(toWebNode) : [];
+      if (nodeSnapshot.length === 0) {
+        throw new Error("no storage nodes available");
+      }
+      const endpoints: StorageNodeEndpoint[] = nodeSnapshot.map((n) => ({ id: n.id, baseUrl: n.baseUrl }));
+      const { manifest } = await uploadBuffer(data, filename, endpoints, {
+        manifestStore: catalog.store,
+      });
+      return {
+        fileId: manifest.fileId,
+        filename: manifest.filename,
+        size: manifest.size,
+        totalChunks: manifest.totalChunks,
+      };
     },
   };
 }

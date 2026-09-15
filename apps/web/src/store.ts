@@ -11,7 +11,7 @@
 import { DEMO_MODE, MOCK_FILES, MOCK_IDENTITY, MOCK_NODES } from "./mock.js";
 import type { DashboardStats, WebIdentityStatus, WebNode } from "./types.js";
 import type { CatalogEntry } from "../../client/catalog.js";
-import type { BackendSnapshot, IdentityCreation } from "../backend.js";
+import type { BackendSnapshot, IdentityCreation, UploadFileResult } from "../backend.js";
 
 export type ViewId = "dashboard" | "files" | "upload" | "nodes" | "settings";
 
@@ -23,7 +23,7 @@ export const VIEWS: { id: ViewId; label: string; hash: string }[] = [
   { id: "settings", label: "Settings", hash: "#/settings" },
 ];
 
-export type UploadStatus = "idle" | "ready" | "blocked";
+export type UploadStatus = "idle" | "ready" | "encrypting" | "storing" | "complete" | "failed";
 
 export interface UploadDraft {
   status: UploadStatus;
@@ -86,23 +86,67 @@ export function selectFileForUpload(state: WebState, fileName: string, fileSize:
       status: "ready",
       fileName,
       fileSize,
-      note: "Demo build: the upload backend is not connected yet. Picking a file stages it locally only.",
+      note: null,
     },
   };
 }
 
 /**
- * Attempt an upload. Always honest: with no backend wired, nothing is
- * stored and the file list never changes.
+ * Transition to the encrypting stage. The actual upload happens in app.ts
+ * after this pure state transition.
  */
 export function attemptUpload(state: WebState): WebState {
   if (state.upload.status === "idle") {
     return { ...state, notice: "Select a file first." };
   }
+  if (state.upload.status !== "ready") {
+    return state;
+  }
   return {
     ...state,
-    upload: { ...state.upload, status: "blocked" },
-    notice: "Upload not performed — backend integration is pending. Your file was not stored anywhere.",
+    upload: { ...state.upload, status: "encrypting", note: "Encrypting and chunking file..." },
+    notice: null,
+  };
+}
+
+/** Transition to storing (replication in progress). */
+export function uploadEncrypting(state: WebState): WebState {
+  if (state.upload.status !== "encrypting") return state;
+  return {
+    ...state,
+    upload: { ...state.upload, status: "storing", note: "Storing encrypted replicas on nodes..." },
+  };
+}
+
+/** Transition to storing (replication in progress). */
+export function uploadStoring(state: WebState): WebState {
+  if (state.upload.status !== "storing") return state;
+  return state;
+}
+
+/** Transition to complete after successful upload. */
+export function uploadComplete(
+  state: WebState,
+  result: UploadFileResult,
+): WebState {
+  return {
+    ...state,
+    upload: {
+      status: "complete",
+      fileName: result.filename,
+      fileSize: result.size,
+      note: `Uploaded ${result.filename} (${result.totalChunks} chunk(s)).`,
+    },
+    notice: null,
+  };
+}
+
+/** Transition to failed after upload error. */
+export function uploadFailed(state: WebState, error: string): WebState {
+  return {
+    ...state,
+    upload: { ...state.upload, status: "failed", note: `Upload failed: ${error}` },
+    notice: null,
   };
 }
 
@@ -179,6 +223,18 @@ export function identityLocked(state: WebState): WebState {
   return {
     ...state,
     identity: { ...state.identity, unlocked: false },
+    notice: null,
+  };
+}
+
+/** Reflect a successful identity recovery (public metadata only). */
+export function identityRecovered(state: WebState, publicKey: string): WebState {
+  if (typeof publicKey !== "string" || publicKey === "") {
+    throw new TypeError("publicKey must be a non-empty string");
+  }
+  return {
+    ...state,
+    identity: { configured: true, unlocked: true, label: "local keystore", publicKey },
     notice: null,
   };
 }

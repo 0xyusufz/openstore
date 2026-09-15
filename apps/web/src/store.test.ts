@@ -14,6 +14,9 @@ import {
   parseHash,
   resetUploadDraft,
   selectFileForUpload,
+  uploadComplete,
+  uploadEncrypting,
+  uploadFailed,
 } from "./store.js";
 
 describe("web UI store", () => {
@@ -37,7 +40,7 @@ describe("web UI store", () => {
     expect(moved.view).toBe("nodes");
   });
 
-  it("stages uploads without reading contents, never reports success", () => {
+  it("stages uploads without reading contents, progresses through states", () => {
     let state = createInitialState();
     const fileCount = state.files.length;
     state = selectFileForUpload(state, "report.pdf", 1024);
@@ -46,9 +49,20 @@ describe("web UI store", () => {
     expect(state.files).toHaveLength(fileCount);
 
     state = attemptUpload(state);
-    expect(state.upload.status).toBe("blocked");
+    expect(state.upload.status).toBe("encrypting");
     expect(state.files).toHaveLength(fileCount);
-    expect(state.notice).toMatch(/not performed/i);
+    expect(state.notice).toBeNull();
+
+    state = uploadEncrypting(state);
+    expect(state.upload.status).toBe("storing");
+
+    state = uploadComplete(state, { fileId: "abc123", filename: "report.pdf", size: 1024, totalChunks: 1 });
+    expect(state.upload.status).toBe("complete");
+    expect(state.upload.fileName).toBe("report.pdf");
+
+    state = uploadFailed(state, "node unreachable");
+    expect(state.upload.status).toBe("failed");
+    expect(state.upload.note).toMatch(/node unreachable/i);
 
     // Upload with nothing staged asks for a file first
     const idle = attemptUpload(createInitialState());

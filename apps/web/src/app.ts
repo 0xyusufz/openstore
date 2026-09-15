@@ -16,11 +16,15 @@ import {
   identityCreationDismissed,
   identityCreationReceived,
   identityLocked,
+  identityRecovered,
   identityUnlocked,
   navigate,
   parseHash,
   resetUploadDraft,
   selectFileForUpload,
+  uploadComplete,
+  uploadEncrypting,
+  uploadFailed,
 } from "./store.js";
 import { applyBackendSnapshot } from "./store.js";
 import type { BackendSnapshot } from "../backend.js";
@@ -89,6 +93,7 @@ async function loadLiveData(state: WebState): Promise<WebState> {
 
 export function startApp(): void {
   let state: WebState = syncFromHash(createInitialState());
+  let stagedFile: File | null = null;
   render(state);
   void loadLiveData(state).then((next) => {
     state = syncFromHash(next);
@@ -126,7 +131,12 @@ export function startApp(): void {
   document.addEventListener("submit", (event) => {
     const form = event.target as HTMLFormElement | null;
     if (!form || form.tagName !== "FORM") return;
-    if (form.id !== "identity-create-form" && form.id !== "identity-unlock-form") return;
+    if (
+      form.id !== "identity-create-form" &&
+      form.id !== "identity-unlock-form" &&
+      form.id !== "identity-recover-form"
+    )
+      return;
     event.preventDefault();
     void (async () => {
       try {
@@ -148,6 +158,41 @@ export function startApp(): void {
             state = { ...state, notice: "An identity is already configured on this server." };
           } else {
             state = { ...state, notice: `Identity creation failed: ${errorText(json, status)}` };
+          }
+        } else if (form.id === "identity-recover-form") {
+          const password = inputValue("recover-password");
+          const confirm = inputValue("recover-confirm");
+          if (password === "" || password !== confirm) {
+            state = { ...state, notice: "Passwords do not match or are empty." };
+            render(state);
+            return;
+          }
+          const words: string[] = [];
+          for (let i = 1; i <= 12; i++) {
+            const w = inputValue(`recovery-word-${i}`).trim().toLowerCase();
+            words.push(w);
+          }
+          if (words.some((w) => w === "")) {
+            state = { ...state, notice: "All 12 recovery words are required." };
+            render(state);
+            return;
+          }
+          const replaceEl = document.getElementById("recover-confirm-replace");
+          const confirmReplace = replaceEl instanceof HTMLInputElement && replaceEl.checked;
+          const { status, json } = await postIdentity("/api/identity/recover", {
+            phrase: words,
+            password,
+            confirmReplace,
+          });
+          if (status === 200 && typeof json["publicKey"] === "string") {
+            state = identityRecovered(state, json["publicKey"] as string);
+            state = { ...state, notice: "Identity recovered successfully." };
+          } else if (status === 409) {
+            state = { ...state, notice: "A keystore already exists. Check 'Replace existing keystore' to overwrite." };
+          } else if (status === 400) {
+            state = { ...state, notice: `Recovery failed: ${errorText(json, status)}` };
+          } else {
+            state = { ...state, notice: `Recovery failed: ${errorText(json, status)}` };
           }
         } else {
           const password = inputValue("unlock-password");
@@ -200,8 +245,39 @@ export function startApp(): void {
         render(state);
       })();
     } else if (action === "upload-attempt") {
+      if (!stagedFile || state.upload.status !== "ready") return;
       state = attemptUpload(state);
       render(state);
+      void (async () => {
+        try {
+          state = uploadEncrypting(state);
+          render(state);
+          const form = new FormData();
+          form.append("file", stagedFile, stagedFile.name);
+          const res = await fetch("/api/files/upload", { method: "POST", body: form });
+          let json: Record<string, unknown> = {};
+          try { json = (await res.json()) as Record<string, unknown>; } catch {}
+          if (res.ok && typeof json["fileId"] === "string") {
+            state = uploadComplete(state, {
+              fileId: json["fileId"] as string,
+              filename: json["filename"] as string,
+              size: json["size"] as number,
+              totalChunks: json["totalChunks"] as number,
+            });
+            stagedFile = null;
+            const refreshed = await loadLiveData(state);
+            state = syncFromHash(refreshed);
+          } else {
+            const errText = typeof json["error"] === "string" ? (json["error"] as string) : `status ${res.status}`;
+            state = uploadFailed(state, errText);
+            stagedFile = null;
+          }
+        } catch (err) {
+          state = uploadFailed(state, err instanceof Error ? err.message : "network error");
+          stagedFile = null;
+        }
+        render(state);
+      })();
     } else if (action === "delete-attempt" || action === "download-attempt") {
       const fileId = actionEl.getAttribute("data-file-id") ?? "";
       state = action === "delete-attempt" ? attemptDelete(state, fileId) : attemptDownload(state, fileId);
@@ -214,7 +290,7 @@ export function startApp(): void {
     if (target?.id === "upload-input" && target instanceof HTMLInputElement) {
       const picked = target.files?.[0];
       if (picked) {
-        // Name + size only. Contents are never read in this demo build.
+        stagedFile = picked;
         state = resetUploadDraft(selectFileForUpload(state, picked.name, picked.size));
         render(state);
       }

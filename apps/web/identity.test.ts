@@ -3,6 +3,7 @@ import { mkdtemp, rm, readFile, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomBytes } from "crypto";
+import { createIdentity } from "../../packages/identity/index.js";
 import { loadIdentity } from "../../packages/identity/keystore.js";
 import { createWebBackend } from "./backend.js";
 import { createWebServer } from "./server.js";
@@ -251,6 +252,209 @@ describe("frontend identity & local unlock (OPENSTORE-025)", () => {
       // Lock is harmless without management
       const lock = await postJson(base, "/api/identity/lock", {});
       expect(lock.status).toBe(200);
+    } finally {
+      await web.close();
+    }
+  });
+
+  it("8. recovery from phrase restores identity", async () => {
+    const { dir, path } = await tempKeystorePath();
+    const web = createWebServer({ keystorePath: path });
+    const port = await web.listen(0, "127.0.0.1");
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      const id = createIdentity();
+      const phrase = id.recoveryPhrase;
+      const password = randomTestInput();
+
+      // No keystore: recovery succeeds
+      const recovered = await postJson(base, "/api/identity/recover", { phrase, password });
+      expect(recovered.status).toBe(200);
+      expect(typeof recovered.json["publicKey"]).toBe("string");
+
+      // Keystore decrypts with the new password
+      const loaded = await loadIdentity(password, path);
+      expect(loaded.publicKey.toString("base64")).toBe(recovered.json["publicKey"]);
+
+      // Public key matches the deterministic derivation from the phrase
+      expect(recovered.json["publicKey"]).toBe(id.publicKey.toString("base64"));
+
+      // Identity is now configured + unlocked
+      const status = (await (await fetch(`${base}/api/identity`)).json()) as {
+        identity: { configured: boolean; unlocked: boolean; publicKey: string };
+      };
+      expect(status.identity.configured).toBe(true);
+      expect(status.identity.unlocked).toBe(true);
+      expect(status.identity.publicKey).toBe(recovered.json["publicKey"]);
+    } finally {
+      await web.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("9. recovery with invalid phrase is rejected", async () => {
+    const { dir, path } = await tempKeystorePath();
+    const web = createWebServer({ keystorePath: path });
+    const port = await web.listen(0, "127.0.0.1");
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      const password = randomTestInput();
+
+      // Too few words
+      const short = await postJson(base, "/api/identity/recover", {
+        phrase: ["abandon", "abandon", "abandon"],
+        password,
+      });
+      expect(short.status).toBe(400);
+      expect(typeof short.json["error"]).toBe("string");
+
+      // Invalid word
+      const badWord = await postJson(base, "/api/identity/recover", {
+        phrase: [
+          "abandon", "abandon", "abandon", "abandon",
+          "abandon", "abandon", "abandon", "abandon",
+          "abandon", "abandon", "abandon", "notaword",
+        ],
+        password,
+      });
+      expect(badWord.status).toBe(400);
+
+      // Bad checksum
+      const badChecksum = await postJson(base, "/api/identity/recover", {
+        phrase: [
+          "abandon", "abandon", "abandon", "abandon",
+          "abandon", "abandon", "abandon", "abandon",
+          "abandon", "abandon", "abandon", "about",
+        ],
+        password,
+      });
+      expect(badChecksum.status).toBe(400);
+
+      // No keystore created
+      const status = (await (await fetch(`${base}/api/identity`)).json()) as {
+        identity: { configured: boolean };
+      };
+      expect(status.identity.configured).toBe(false);
+    } finally {
+      await web.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("10. recovery requires confirmReplace when keystore exists", async () => {
+    const { dir, path } = await tempKeystorePath();
+    const web = createWebServer({ keystorePath: path });
+    const port = await web.listen(0, "127.0.0.1");
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      const setup = createWebBackend({ keystorePath: path });
+      await setup.createIdentity(randomTestInput());
+
+      const id2 = createIdentity();
+      const password = randomTestInput();
+
+      // Without confirmReplace: 409
+      const denied = await postJson(base, "/api/identity/recover", {
+        phrase: id2.recoveryPhrase,
+        password,
+      });
+      expect(denied.status).toBe(409);
+      expect(typeof denied.json["error"]).toBe("string");
+
+      // With confirmReplace: 200
+      const accepted = await postJson(base, "/api/identity/recover", {
+        phrase: id2.recoveryPhrase,
+        password,
+        confirmReplace: true,
+      });
+      expect(accepted.status).toBe(200);
+      expect(accepted.json["publicKey"]).toBe(id2.publicKey.toString("base64"));
+
+      // New keystore decrypts with the new password
+      const loaded = await loadIdentity(password, path);
+      expect(loaded.publicKey.toString("base64")).toBe(id2.publicKey.toString("base64"));
+    } finally {
+      await web.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("11. recovery phrase and password never leak in responses", async () => {
+    const { dir, path } = await tempKeystorePath();
+    const web = createWebServer({ keystorePath: path });
+    const port = await web.listen(0, "127.0.0.1");
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      const id = createIdentity();
+      const phrase = id.recoveryPhrase;
+      const password = randomTestInput();
+
+      const recovered = await postJson(base, "/api/identity/recover", { phrase, password });
+      expect(recovered.status).toBe(200);
+      expect(recovered.text).not.toContain(password);
+      expect(recovered.text).not.toContain(phrase.join(" "));
+
+      // Check all endpoints for leakage
+      const seen: string[] = [recovered.text];
+      const collect = async (urlPath: string, init?: RequestInit): Promise<void> => {
+        const res = await fetch(`${base}${urlPath}`, init);
+        seen.push(await res.text());
+      };
+      await collect("/api/identity");
+      await collect("/api/files");
+      await collect("/api/nodes");
+      await collect("/health");
+      const allText = seen.join("\n");
+      expect(allText).not.toContain(password);
+      expect(allText).not.toContain(phrase.join(" "));
+      expect(allText.toLowerCase()).not.toContain("privatekey");
+    } finally {
+      await web.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("12. recovery determinism: same phrase always yields same public key", async () => {
+    const { dir, path } = await tempKeystorePath();
+    const web = createWebServer({ keystorePath: path });
+    const port = await web.listen(0, "127.0.0.1");
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      const id = createIdentity();
+      const phrase = id.recoveryPhrase;
+      const pw1 = randomTestInput();
+      const pw2 = randomTestInput();
+
+      const r1 = await postJson(base, "/api/identity/recover", { phrase, password: pw1 });
+      expect(r1.status).toBe(200);
+      // Lock and recover again with a different password
+      await postJson(base, "/api/identity/lock", {});
+      const r2 = await postJson(base, "/api/identity/recover", {
+        phrase,
+        password: pw2,
+        confirmReplace: true,
+      });
+      expect(r2.status).toBe(200);
+      // Public key must be identical
+      expect(r2.json["publicKey"]).toBe(r1.json["publicKey"]);
+      expect(r2.json["publicKey"]).toBe(id.publicKey.toString("base64"));
+    } finally {
+      await web.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("13. demo mode recovery is rejected", async () => {
+    const web = createWebServer();
+    const port = await web.listen(0, "127.0.0.1");
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      const id = createIdentity();
+      const recovered = await postJson(base, "/api/identity/recover", {
+        phrase: id.recoveryPhrase,
+        password: randomTestInput(),
+      });
+      expect(recovered.status).toBe(400);
     } finally {
       await web.close();
     }
