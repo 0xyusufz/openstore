@@ -25,6 +25,8 @@ import { createServer } from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import { mkdir, readFile, stat, unlink, writeFile } from "fs/promises";
 import { join, resolve } from "path";
+import { DEFAULT_MAX_CLOCK_SKEW_MS, PUBKEY_HEADER, verifyAuthHeaders } from "../../packages/auth/index.js";
+import type { Identity } from "../../packages/identity/index.js";
 
 export const STORAGE_NODE_VERSION = 1;
 
@@ -36,6 +38,16 @@ const PIECE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
  */
 export interface StorageNodeOptions {
   storageDir: string;
+  /** Path to encrypted keystore file for the node's Ed25519 identity */
+  identityPath?: string;
+  /** Password to decrypt the keystore at {@link identityPath} */
+  identityPassword?: string;
+  /** In-memory identity (alternative to keystore path) */
+  identity?: Identity;
+  /** If true, every piece operation requires a valid signature */
+  requireAuth?: boolean;
+  /** Max clock skew for timestamp validation (ms) */
+  maxClockSkewMs?: number;
 }
 
 /**
@@ -47,6 +59,8 @@ export interface StorageNode {
   readonly version: number;
   readonly storageDir: string;
   readonly server: Server;
+  /** Node's Ed25519 identity if configured (private key stays server-side) */
+  readonly identity?: Identity;
   listen(port?: number, host?: string): Promise<number>;
   close(): Promise<void>;
 }
@@ -80,8 +94,15 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     throw new TypeError("storageDir must be a non-empty string");
   }
   const storageDir = resolve(options.storageDir);
+  const requireAuth = options.requireAuth ?? false;
+  const maxClockSkewMs = options.maxClockSkewMs ?? DEFAULT_MAX_CLOCK_SKEW_MS;
+  const seenNonces = new Map<string, number>();
+
+  let nodeIdentity: Identity | undefined = options.identity;
+  const hasKeystore = typeof options.identityPath === "string" && options.identityPath !== "";
+
   const server = createServer((req, res) => {
-    void handleRequest(req, res, storageDir).catch(() => {
+    void handleRequest(req, res, storageDir, { requireAuth, maxClockSkewMs, seenNonces }).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal error" });
       } else {
@@ -90,11 +111,22 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     });
   });
 
-  return {
+  const node: StorageNode = {
     version: STORAGE_NODE_VERSION,
     storageDir,
     server,
+    get identity(): Identity | undefined {
+      return nodeIdentity;
+    },
     async listen(port: number = 0, host: string = "127.0.0.1"): Promise<number> {
+      // Load persisted identity via encrypted keystore if configured
+      if (hasKeystore) {
+        if (typeof options.identityPassword !== "string" || options.identityPassword === "") {
+          throw new TypeError("identityPassword must be a non-empty string when identityPath is set");
+        }
+        const { loadIdentity } = await import("../../packages/identity/keystore.js");
+        nodeIdentity = await loadIdentity(options.identityPassword, options.identityPath as string);
+      }
       await mkdir(storageDir, { recursive: true });
       await new Promise<void>((resolveListen, rejectListen) => {
         server.once("error", rejectListen);
@@ -121,18 +153,28 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       });
     },
   };
+  return node;
+}
+
+interface AuthState {
+  requireAuth: boolean;
+  maxClockSkewMs: number;
+  seenNonces: Map<string, number>;
 }
 
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   storageDir: string,
+  auth: AuthState,
 ): Promise<void> {
   const method = (req.method ?? "").toUpperCase();
   const rawPath = (req.url ?? "/").split("?")[0] as string;
 
   if (method === "POST" && rawPath === "/pieces") {
-    await handlePostPiece(req, res, storageDir);
+    const rawBody = await readBody(req);
+    if (!checkAuth(req, method, rawPath, rawBody, auth, res)) return;
+    await handlePostPieceWithBody(rawBody, res, storageDir);
     return;
   }
 
@@ -143,6 +185,7 @@ async function handleRequest(
       sendJson(res, 400, { error: "invalid piece id" });
       return;
     }
+    if (!checkAuth(req, method, rawPath, undefined, auth, res)) return;
     const piecePath = join(storageDir, id);
     if (method === "GET") {
       await handleGetPiece(res, piecePath, false);
@@ -160,7 +203,73 @@ async function handleRequest(
     return;
   }
 
+  // For unknown paths, still check auth if required
+  if (auth.requireAuth) {
+    if (!checkAuth(req, method, rawPath, undefined, auth, res)) return;
+  } else {
+    // If auth headers present on unknown path, still validate to avoid bypass
+    const hasAuth = hasAuthHeaders(req.headers as Record<string, string | undefined>);
+    if (hasAuth) {
+      if (!checkAuth(req, method, rawPath, undefined, auth, res)) return;
+    }
+  }
+
   sendJson(res, 404, { error: "not found" });
+}
+
+function hasAuthHeaders(headers: Record<string, string | undefined>): boolean {
+  return (
+    headers[PUBKEY_HEADER] !== undefined ||
+    headers["x-openstore-timestamp"] !== undefined ||
+    headers["x-openstore-nonce"] !== undefined ||
+    headers["x-openstore-signature"] !== undefined
+  );
+}
+
+function checkAuth(
+  req: IncomingMessage,
+  method: string,
+  path: string,
+  body: Buffer | undefined,
+  auth: AuthState,
+  res: ServerResponse,
+): boolean {
+  const headers = req.headers as Record<string, string | undefined>;
+  const hasAuth = hasAuthHeaders(headers);
+  if (!hasAuth) {
+    if (auth.requireAuth) {
+      sendJson(res, 401, { error: "missing authentication" });
+      return false;
+    }
+    return true;
+  }
+  const result = verifyAuthHeaders(headers, method, path, body, auth.maxClockSkewMs, auth.seenNonces);
+  if (!result.valid) {
+    // Map replay/expired/malformed to 401, with error message
+    const msg = result.error ?? "invalid signature";
+    const status = 401;
+    // Use specific messages for testability
+    if (msg === "replayed nonce") {
+      sendJson(res, status, { error: "replayed request" });
+    } else if (msg === "expired timestamp") {
+      sendJson(res, status, { error: "expired timestamp" });
+    } else if (msg === "invalid signature") {
+      sendJson(res, status, { error: "invalid signature" });
+    } else {
+      sendJson(res, status, { error: msg });
+    }
+    return false;
+  }
+  return true;
+}
+
+async function handlePostPiece(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storageDir: string,
+): Promise<void> {
+  const raw = await readBody(req);
+  await handlePostPieceWithBody(raw, res, storageDir);
 }
 
 /**
@@ -169,12 +278,11 @@ async function handleRequest(
  * Bodies carrying `key`/`encryptionKey` fields are rejected: the node
  * never accepts encryption keys.
  */
-async function handlePostPiece(
-  req: IncomingMessage,
+async function handlePostPieceWithBody(
+  raw: Buffer,
   res: ServerResponse,
   storageDir: string,
 ): Promise<void> {
-  const raw = await readBody(req);
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw.toString("utf8"));

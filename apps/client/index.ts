@@ -36,6 +36,8 @@ export interface StorageNodeEndpoint {
 export interface StorePieceOptions {
   timeoutMs?: number;
   replicationFactor?: number;
+  /** Ed25519 identity to sign requests (private key stays client-side) */
+  identity?: { publicKey: Buffer; privateKey: Buffer };
 }
 
 /**
@@ -63,6 +65,8 @@ export interface StorePiecesReport {
  */
 export interface GetPieceOptions {
   timeoutMs?: number;
+  /** Ed25519 identity to sign requests */
+  identity?: { publicKey: Buffer; privateKey: Buffer };
 }
 
 /**
@@ -112,7 +116,7 @@ export async function storePieceOnNodes(
   const failed: NodeFailure[] = [];
   await Promise.all(
     selected.map(async (endpoint) => {
-      const failure = await postToNode(endpoint, body, timeoutMs);
+      const failure = await postToNode(endpoint, body, timeoutMs, options.identity);
       if (failure === null) {
         succeeded.push(endpoint);
       } else {
@@ -154,9 +158,18 @@ export async function getPieceFromNodes(
   const problems: string[] = [];
   for (const endpoint of endpoints) {
     try {
+      const path = `/pieces/${encodeURIComponent(pieceId)}`;
+      const headers: Record<string, string> = {};
+      if (options.identity) {
+        const { createAuthHeaders } = await import("../../packages/auth/index.js");
+        Object.assign(headers, createAuthHeaders(options.identity, "GET", path));
+      }
       const res = await fetch(
-        `${normalizeBaseUrl(endpoint.baseUrl)}/pieces/${encodeURIComponent(pieceId)}`,
-        { signal: AbortSignal.timeout(timeoutMs) },
+        `${normalizeBaseUrl(endpoint.baseUrl)}${path}`,
+        {
+          headers: Object.keys(headers).length > 0 ? headers : undefined,
+          signal: AbortSignal.timeout(timeoutMs),
+        },
       );
       if (res.status === 200) {
         return {
@@ -178,11 +191,17 @@ async function postToNode(
   endpoint: StorageNodeEndpoint,
   body: string,
   timeoutMs: number,
+  identity?: { publicKey: Buffer; privateKey: Buffer },
 ): Promise<NodeFailure | null> {
   try {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (identity) {
+      const { createAuthHeaders } = await import("../../packages/auth/index.js");
+      Object.assign(headers, createAuthHeaders(identity, "POST", "/pieces", Buffer.from(body, "utf8")));
+    }
     const res = await fetch(`${normalizeBaseUrl(endpoint.baseUrl)}/pieces`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body,
       signal: AbortSignal.timeout(timeoutMs),
     });
