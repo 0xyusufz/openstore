@@ -7,6 +7,7 @@
  */
 
 import type { NodeRecord, Registry } from "../../packages/registry/index.js";
+import { DEFAULT_RELIABILITY_SCORE } from "../../packages/registry/index.js";
 import type { StorageNodeEndpoint } from "./index.js";
 import { storePieceOnNodes } from "./index.js";
 import type { StorePieceOptions, StorePiecesReport } from "./index.js";
@@ -37,7 +38,15 @@ export function selectNodes(
   const suitable = candidates
     .filter((n) => n.available)
     .filter((n) => n.capacity.availableBytes >= pieceSize)
-    .sort((a, b) => b.capacity.availableBytes - a.capacity.availableBytes);
+    .sort((a, b) => {
+      const capDiff = b.capacity.availableBytes - a.capacity.availableBytes;
+      if (capDiff !== 0) return capDiff;
+      // Tie-breaker after capacity: higher reliability first.
+      // Missing reliability (legacy records) counts as neutral default.
+      const ra = a.reliability?.score ?? DEFAULT_RELIABILITY_SCORE;
+      const rb = b.reliability?.score ?? DEFAULT_RELIABILITY_SCORE;
+      return rb - ra;
+    });
 
   // Ensure uniqueness (candidates should already be unique, but dedup by nodeId)
   const seen = new Set<string>();
@@ -74,7 +83,7 @@ export function selectEndpoints(
 ): StorageNodeEndpoint[] {
   const candidates = registry.listAvailable();
   const selected = selectNodes(candidates, pieceSize, replicationFactor);
-  return selected.map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl }));
+  return selected.map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl, reliabilityScore: r.reliability?.score ?? DEFAULT_RELIABILITY_SCORE }));
 }
 
 /**
@@ -105,7 +114,7 @@ export async function storePieceWithSelection(
     if (available.length > 0) {
       try {
         const selected = selectNodes(available, pieceSize, replicationFactor);
-        endpoints = selected.map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl }));
+        endpoints = selected.map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl, reliabilityScore: r.reliability?.score ?? DEFAULT_RELIABILITY_SCORE }));
       } catch (err) {
         // Fail clearly instead of silently reducing replication
         throw err;

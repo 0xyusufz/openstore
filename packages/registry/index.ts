@@ -22,6 +22,15 @@ export const REGISTRY_VERSION = 1;
 export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
 export const DEFAULT_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
+/** Neutral score for newly registered nodes (OPENSTORE-016). */
+export const DEFAULT_RELIABILITY_SCORE = 50;
+/**
+ * Prior weight for Bayesian reliability smoothing.
+ * Higher = slower movement. Keeps new nodes neutral and
+ * makes successful heartbeats improve gradually.
+ */
+export const RELIABILITY_PRIOR_WEIGHT = 10;
+
 const NONCE_BYTES = 16;
 
 function getAllocated(cap: NodeCapacity): number {
@@ -52,6 +61,19 @@ export interface NodeCapacity {
   totalBytes?: number;
 }
 
+/**
+ * Reliability/health tracking for a node (OPENSTORE-016).
+ * Only counters and a derived score are stored — no sensitive data.
+ */
+export interface NodeReliability {
+  /** Number of successful authenticated heartbeats observed. */
+  successfulHeartbeats: number;
+  /** Number of missed/expired heartbeat windows observed. */
+  missedHeartbeats: number;
+  /** Deterministic score from 0–100 derived from counters. */
+  score: number;
+}
+
 export interface NodeRecord {
   nodeId: string;
   publicKey: string;
@@ -59,6 +81,49 @@ export interface NodeRecord {
   available: boolean;
   lastSeen: number;
   capacity: NodeCapacity;
+  reliability: NodeReliability;
+}
+
+/**
+ * Deterministic reliability score from 0–100.
+ * Bayesian smoothing with a neutral prior keeps new nodes at 50,
+ * improves gradually with successes, and drops with misses.
+ * Identical (success, missed) inputs always produce the same score.
+ */
+export function computeReliabilityScore(successfulHeartbeats: number, missedHeartbeats: number): number {
+  const s = Math.max(0, Math.floor(successfulHeartbeats));
+  const m = Math.max(0, Math.floor(missedHeartbeats));
+  const prior = RELIABILITY_PRIOR_WEIGHT;
+  const priorSuccess = (prior * DEFAULT_RELIABILITY_SCORE) / 100;
+  const score = Math.round((100 * (s + priorSuccess)) / (s + m + prior));
+  return Math.min(100, Math.max(0, score));
+}
+
+export function defaultReliability(): NodeReliability {
+  return {
+    successfulHeartbeats: 0,
+    missedHeartbeats: 0,
+    score: DEFAULT_RELIABILITY_SCORE,
+  };
+}
+
+function validateReliability(rel: unknown): NodeReliability {
+  if (!rel || typeof rel !== "object" || Array.isArray(rel)) throw new Error("malformed node record: invalid reliability");
+  const r = rel as Record<string, unknown>;
+  for (const f of ["successfulHeartbeats", "missedHeartbeats", "score"] as const) {
+    if (typeof r[f] !== "number" || !Number.isInteger(r[f] as number) || (r[f] as number) < 0) {
+      throw new Error(`malformed node record: invalid reliability ${f}`);
+    }
+  }
+  const s = r["successfulHeartbeats"] as number;
+  const m = r["missedHeartbeats"] as number;
+  const score = r["score"] as number;
+  if (score > 100) throw new Error("malformed node record: invalid reliability score");
+  const expected = computeReliabilityScore(s, m);
+  // Tolerate legacy/rounded scores but clamp into range deterministically;
+  // recompute to keep the invariant score == f(success, missed).
+  void expected;
+  return { successfulHeartbeats: s, missedHeartbeats: m, score: computeReliabilityScore(s, m) };
 }
 
 export interface RegistryOptions {
@@ -150,6 +215,17 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     }
     // Reject if private keys present
     if ("privateKey" in r || "recoveryPhrase" in r || "signature" in r) return null;
+    // Reliability optional for backward compat (old files lack it) — never sensitive
+    let reliability: NodeReliability;
+    if (r["reliability"] !== undefined) {
+      try {
+        reliability = validateReliability(r["reliability"]);
+      } catch {
+        return null;
+      }
+    } else {
+      reliability = defaultReliability();
+    }
     return {
       nodeId: r["nodeId"] as string,
       publicKey: r["publicKey"] as string,
@@ -157,6 +233,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       available: r["available"] as boolean,
       lastSeen: r["lastSeen"] as number,
       capacity,
+      reliability,
     };
   }
 
@@ -303,11 +380,25 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
 
   function prune(): void {
     const now = Date.now();
-    for (const [id, rec] of nodes) {
+    let changed = false;
+    for (const [, rec] of nodes) {
       if (now - rec.lastSeen > heartbeatTimeoutMs) {
-        rec.available = false;
+        if (rec.available) {
+          // Single deterministic miss per available → expired transition.
+          // Repeated prune() calls while already expired do not add misses.
+          rec.available = false;
+          rec.reliability.missedHeartbeats += 1;
+          rec.reliability.score = computeReliabilityScore(
+            rec.reliability.successfulHeartbeats,
+            rec.reliability.missedHeartbeats,
+          );
+          changed = true;
+        } else {
+          rec.available = false;
+        }
       }
     }
+    if (changed) persist();
   }
 
   const registry: Registry = {
@@ -349,6 +440,11 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       // Prevent registration using another node's identity: nodeId must match publicKey
       // (already ensured by deriving nodeId from publicKey)
 
+      // Preserve reliability history on re-registration; new nodes get neutral default.
+      const existing = nodes.get(nodeId);
+      const reliability = existing
+        ? { ...existing.reliability }
+        : defaultReliability();
       const record: NodeRecord = {
         nodeId,
         publicKey,
@@ -356,10 +452,11 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         available: true,
         lastSeen: Date.now(),
         capacity: cap ?? { allocatedBytes: 0, totalBytes: 0, usedBytes: 0, availableBytes: 0 },
+        reliability,
       };
       nodes.set(nodeId, record);
       persist();
-      return { ...record };
+      return { ...record, capacity: { ...record.capacity }, reliability: { ...record.reliability } };
     },
 
     heartbeat(nodeId: string, identity: Identity, capacity?: NodeCapacity): NodeRecord {
@@ -398,8 +495,14 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       existing.lastSeen = Date.now();
       existing.available = true;
       if (cap) existing.capacity = cap;
+      // Successful authenticated heartbeat improves reliability gradually & deterministically.
+      existing.reliability.successfulHeartbeats += 1;
+      existing.reliability.score = computeReliabilityScore(
+        existing.reliability.successfulHeartbeats,
+        existing.reliability.missedHeartbeats,
+      );
       persist();
-      return { ...existing };
+      return { ...existing, capacity: { ...existing.capacity }, reliability: { ...existing.reliability } };
     },
 
     unregister(nodeId: string, identity: Identity): void {
@@ -436,24 +539,25 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
 
     list(): NodeRecord[] {
       prune();
-      return Array.from(nodes.values()).map((r) => ({ ...r }));
+      return Array.from(nodes.values()).map((r) => ({ ...r, capacity: { ...r.capacity }, reliability: { ...r.reliability } }));
     },
 
     listAvailable(): NodeRecord[] {
       prune();
       return Array.from(nodes.values())
         .filter((r) => r.available)
-        .map((r) => ({ ...r }));
+        .map((r) => ({ ...r, capacity: { ...r.capacity }, reliability: { ...r.reliability } }));
     },
 
     get(nodeId: string): NodeRecord | undefined {
       prune();
       const rec = nodes.get(nodeId);
-      return rec ? { ...rec } : undefined;
+      return rec ? { ...rec, capacity: { ...rec.capacity }, reliability: { ...rec.reliability } } : undefined;
     },
 
     getAvailableEndpoints(): StorageNodeEndpoint[] {
-      return registry.listAvailable().map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl }));
+      // Discovery metadata exposes reliability via the endpoint's optional score.
+      return registry.listAvailable().map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl, reliabilityScore: r.reliability.score }));
     },
 
     pruneExpired(): void {

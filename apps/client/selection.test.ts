@@ -9,7 +9,7 @@ import { selectNodes, selectEndpoints, storePieceWithSelection } from "./selecti
 import { storePieceOnNodes } from "./index.js";
 import type { NodeRecord } from "../../packages/registry/index.js";
 
-function makeRecord(nodeId: string, available: boolean, availableBytes: number, totalBytes = 1000): NodeRecord {
+function makeRecord(nodeId: string, available: boolean, availableBytes: number, totalBytes = 1000, reliabilityScore = 50): NodeRecord {
   return {
     nodeId,
     publicKey: nodeId,
@@ -17,6 +17,7 @@ function makeRecord(nodeId: string, available: boolean, availableBytes: number, 
     available,
     lastSeen: Date.now(),
     capacity: { totalBytes, usedBytes: totalBytes - availableBytes, availableBytes },
+    reliability: { successfulHeartbeats: 0, missedHeartbeats: 0, score: reliabilityScore },
   };
 }
 
