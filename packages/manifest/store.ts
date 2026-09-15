@@ -21,7 +21,7 @@
  */
 
 import { randomBytes } from "crypto";
-import { chmod, mkdir, readdir, readFile, rename, unlink, writeFile } from "fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "fs/promises";
 import { join, resolve } from "path";
 import { buildManifest } from "./index.js";
 import type { FileManifest } from "./index.js";
@@ -47,6 +47,8 @@ export interface ManifestSummary {
   filename: string;
   size: number;
   totalChunks: number;
+  /** Epoch millis when the manifest file was created (falls back to mtime). */
+  createdAt: number;
 }
 
 /**
@@ -203,11 +205,17 @@ export function createManifestStore(options: ManifestStoreOptions): ManifestStor
         try {
           const text = await readFile(join(dir, entry), "utf8");
           const manifest = parseStored(text);
+          let createdAt = 0;
+          try {
+            const s = await stat(join(dir, entry));
+            createdAt = Math.floor(s.birthtimeMs > 0 ? s.birthtimeMs : s.mtimeMs);
+          } catch {}
           summaries.push({
             fileId: manifest.fileId,
             filename: manifest.filename,
             size: manifest.size,
             totalChunks: manifest.totalChunks,
+            createdAt,
           });
         } catch {
           // Skip malformed files safely; load() surfaces them explicitly.
