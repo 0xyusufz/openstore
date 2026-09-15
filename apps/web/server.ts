@@ -14,7 +14,7 @@ import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
-import { createWebBackend } from "./backend.js";
+import { createWebBackend, MAX_UPLOAD_BYTES } from "./backend.js";
 import type { WebBackend, WebBackendOptions, UploadFileResult } from "./backend.js";
 
 export const WEB_SERVER_VERSION = 1;
@@ -198,18 +198,28 @@ async function handleRequest(
       sendJson(res, 400, { error: "missing boundary in content-type" }, headOnly);
       return;
     }
-    const parts = await readMultipartBody(req, res, boundaryMatch[1] as string);
+    // Boundaries may be quoted per RFC 2046 (e.g. boundary="abc123").
+    const boundary = (boundaryMatch[1] as string).replace(/^"|"$/g, "");
+    if (boundary === "") {
+      sendJson(res, 400, { error: "missing boundary in content-type" }, headOnly);
+      return;
+    }
+    const parts = await readMultipartBody(req, res, boundary);
     if (!parts) return;
     if (parts.filename === null || parts.file === null) {
       sendJson(res, 400, { error: "missing file or filename in form data" }, headOnly);
       return;
     }
-    if (parts.file.length > 100 * 1024 * 1024) {
+    if (parts.file.length === 0) {
+      sendJson(res, 400, { error: "file is empty: empty files are rejected" }, headOnly);
+      return;
+    }
+    if (parts.file.length > MAX_UPLOAD_BYTES) {
       sendJson(res, 413, { error: "file too large (100 MB limit)" }, headOnly);
       return;
     }
     try {
-      const result = await backend.uploadFile(parts.filename, parts.file);
+      const result: UploadFileResult = await backend.uploadFile(parts.filename, parts.file);
       sendJson(res, 200, {
         fileId: result.fileId,
         filename: result.filename,
@@ -217,7 +227,8 @@ async function handleRequest(
         totalChunks: result.totalChunks,
       });
     } catch (err) {
-      sendJson(res, 500, { error: (err as Error).message });
+      const message = (err as Error).message;
+      sendJson(res, uploadErrorStatus(message), { error: toSafeUploadError(message) });
     }
     return;
   }
@@ -265,6 +276,33 @@ async function sendFile(res: ServerResponse, path: string, contentType: string, 
   res.end(headOnly ? undefined : bytes);
 }
 
+/**
+ * Map upload errors to safe statuses without changing the historically
+ * documented backend failures: unconfigured storage and unavailable
+ * nodes remain 500 so existing clients keep their behavior, while
+ * caller-fixable input problems are 400/413.
+ */
+function uploadErrorStatus(message: string): number {
+  if (/file too large/i.test(message)) return 413;
+  if (/file is empty|invalid filename|filename must|invalid upload|data must be a Buffer/i.test(message)) return 400;
+  return 500;
+}
+
+/**
+ * Strip any secret-adjacent content from upload error messages before
+ * they cross the API boundary. Upload failures legitimately mention
+ * piece IDs (content hashes) and node IDs (public keys), but must never
+ * carry key material, phrases, passwords, or plaintext.
+ */
+function toSafeUploadError(message: string): string {
+  if (typeof message !== "string" || message === "") return "upload failed";
+  if (/privatekey|recoveryphrase|mnemonic|encryptionkey|decryptionkey|password|plaintext|auth\s*tag|authTag|ciphertext/i.test(message)) {
+    return "upload failed";
+  }
+  // Bound message length so oversized internals never leak wholesale.
+  return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+}
+
 /** Map identity errors to safe statuses. Messages never carry secrets. */
 function identityErrorStatus(message: string): number {
   if (/already configured/i.test(message)) return 409;
@@ -301,8 +339,8 @@ async function readMultipartBody(
     for await (const chunk of req) {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
       size += buf.length;
-      if (size > 100 * 1024 * 1024) {
-        sendJson(res, 413, { error: "request body too large" });
+      if (size > MAX_UPLOAD_BYTES) {
+        sendJson(res, 413, { error: "file too large (100 MB limit)" });
         req.resume();
         return null;
       }
@@ -349,23 +387,23 @@ function splitMultipartParts(body: Buffer, boundaryBuf: Buffer): Buffer[] {
   return parts;
 }
 
+/**
+ * Binary-safe subsequence search using the native Buffer implementation
+ * (O(n) memchr-style scan instead of a JS-level O(n*m) loop, which
+ * matters for multi-megabyte uploads). Returns -1 when absent.
+ */
 function indexOf(haystack: Buffer, needle: Buffer, fromIndex = 0): number {
-  for (let i = fromIndex; i <= haystack.length - needle.length; i += 1) {
-    let found = true;
-    for (let j = 0; j < needle.length; j += 1) {
-      if (haystack[i + j] !== needle[j]) { found = false; break; }
-    }
-    if (found) return i;
-  }
-  return -1;
+  return haystack.indexOf(needle, fromIndex);
 }
 
+/**
+ * Take a multipart filename verbatim: browsers transmit it raw, so
+ * URL-decoding would corrupt legitimate names (`a+b.txt` → `a b.txt`).
+ * Only strip CR/LF to block header injection; deeper sanitization
+ * (traversal, controls, length) happens in the backend boundary.
+ */
 function decodeMultipartFilename(value: string): string {
-  try {
-    return decodeURIComponent(value.replace(/\+/g, " "));
-  } catch {
-    return value;
-  }
+  return value.replace(/[\r\n]/g, "");
 }
 
 async function readJsonBody(

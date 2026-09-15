@@ -109,7 +109,7 @@ export function renderUpload(state: WebState): string {
   return `
   <section aria-label="Upload">
     <h2>Upload</h2>
-    <p class="muted">Pick a file to upload. It is encrypted and chunked before storage — the server never sees plaintext.</p>
+    <p class="muted">Pick a file to upload. Your browser sends it to the client backend on this server, which encrypts and chunks it before storage — storage nodes only ever receive encrypted data.</p>
     <div class="upload-box">
       <label class="file-label">Choose file
         <input id="upload-input" type="file" />

@@ -13,7 +13,8 @@
  * Safety: snapshots expose safe metadata only. Private keys, recovery
  * phrases, encryption keys, passwords, plaintext, and piece bytes can
  * never pass this boundary — the underlying types simply lack them.
- * Real uploads/downloads are NOT implemented here (next milestone).
+ * Real uploads go through the encrypted client pipeline here
+ * (OPENSTORE-027); downloads land in a later milestone.
  */
 
 import { existsSync } from "fs";
@@ -32,6 +33,60 @@ import { toWebNode } from "./src/types.js";
 import type { WebIdentityStatus, WebNode } from "./src/types.js";
 
 export const WEB_BACKEND_VERSION = 1;
+
+/**
+ * Maximum accepted upload size (100 MiB). Enforced in the web backend
+ * as defense-in-depth; the HTTP layer enforces the same limit while
+ * streaming so oversized bodies are rejected before buffering.
+ */
+export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+/** Maximum stored filename length after sanitization. */
+export const MAX_FILENAME_LENGTH = 255;
+
+/**
+ * Sanitize an upload filename so it can never escape into paths or
+ * carry control characters into manifests/catalogs.
+ *
+ * - Takes the basename (strips any directory components, defeating
+ *   `../`, absolute paths, and Windows drive segments).
+ * - Rejects null bytes, empty results, and `.`/`..`.
+ * - Replaces C0/C1 control characters and DEL with `_`.
+ * - Truncates to {@link MAX_FILENAME_LENGTH} characters.
+ *
+ * @throws If the filename is not a string or sanitizes to nothing usable.
+ */
+export function sanitizeUploadFilename(filename: unknown): string {
+  if (typeof filename !== "string") {
+    throw new Error("invalid filename: must be a string");
+  }
+  if (filename.includes("\0")) {
+    throw new Error("invalid filename: null bytes are not allowed");
+  }
+  // Basename: drop everything up to the last / or \ (path traversal,
+  // absolute paths, drive letters all collapse to a bare name).
+  const segments = filename.split(/[/\\]/);
+  let base = segments[segments.length - 1] ?? "";
+  // Strip header-injection leftovers and surrounding whitespace.
+  base = base.replace(/[\r\n]/g, "").trim();
+  if (base === "" || base === "." || base === "..") {
+    throw new Error("invalid filename: name is empty after sanitization");
+  }
+  // Replace control characters (they corrupt displays/logs and can
+  // smuggle terminal escapes) with a harmless placeholder.
+  // eslint-disable-next-line no-control-regex
+  base = base.replace(/[\u0000-\u001F\u007F-\u009F]/g, "_");
+  if (base === "" || base === "." || base === "..") {
+    throw new Error("invalid filename: name is empty after sanitization");
+  }
+  if (base.length > MAX_FILENAME_LENGTH) {
+    base = base.slice(0, MAX_FILENAME_LENGTH);
+  }
+  if (base.includes("/") || base.includes("\\")) {
+    throw new Error("invalid filename: path separators are not allowed");
+  }
+  return base;
+}
 
 export type DataSource = "live" | "demo";
 
@@ -342,20 +397,41 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
       if (!catalog) {
         throw new Error("manifest store is not configured on this server");
       }
+      if (!Buffer.isBuffer(data)) {
+        throw new Error("invalid upload: data must be a Buffer");
+      }
+      if (data.length === 0) {
+        throw new Error("file is empty: empty files are rejected");
+      }
+      if (data.length > MAX_UPLOAD_BYTES) {
+        throw new Error("file too large (100 MB limit)");
+      }
+      const safeFilename = sanitizeUploadFilename(filename);
       const nodeSnapshot = registry ? registry.list().map(toWebNode) : [];
       if (nodeSnapshot.length === 0) {
         throw new Error("no storage nodes available");
       }
       const endpoints: StorageNodeEndpoint[] = nodeSnapshot.map((n) => ({ id: n.id, baseUrl: n.baseUrl }));
-      const { manifest } = await uploadBuffer(data, filename, endpoints, {
+      // The pipeline encrypts every chunk with a fresh per-file DEK and
+      // fresh IVs, stores only ciphertext on the nodes, and persists the
+      // manifest only after every chunk lands on at least one node. The
+      // DEK is discarded with the returned UploadResult here — only safe
+      // metadata crosses this boundary.
+      const { manifest, encryptionKey } = await uploadBuffer(data, safeFilename, endpoints, {
         manifestStore: catalog.store,
       });
-      return {
-        fileId: manifest.fileId,
-        filename: manifest.filename,
-        size: manifest.size,
-        totalChunks: manifest.totalChunks,
-      };
+      try {
+        return {
+          fileId: manifest.fileId,
+          filename: manifest.filename,
+          size: manifest.size,
+          totalChunks: manifest.totalChunks,
+        };
+      } finally {
+        // The per-file DEK must never linger in server memory: the
+        // caller only ever receives safe metadata above.
+        encryptionKey.fill(0);
+      }
     },
   };
 }

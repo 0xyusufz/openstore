@@ -69,6 +69,19 @@ describe("web UI store", () => {
     const idle = attemptUpload(createInitialState());
     expect(idle.notice).toMatch(/select a file/i);
 
+    // Duplicate submission is impossible: only a "ready" draft starts an
+    // upload; every other state is a no-op returning the same state.
+    const ready = selectFileForUpload(createInitialState(), "dup.bin", 10);
+    const active = attemptUpload(ready);
+    expect(active.upload.status).toBe("encrypting");
+    expect(attemptUpload(active)).toBe(active);
+    const storing = uploadEncrypting(active);
+    expect(attemptUpload(storing)).toBe(storing);
+    const done = uploadComplete(storing, { fileId: "x", filename: "dup.bin", size: 10, totalChunks: 1 });
+    expect(attemptUpload(done)).toBe(done);
+    const failed = uploadFailed(storing, "boom");
+    expect(attemptUpload(failed)).toBe(failed);
+
     // Invalid staging is rejected clearly
     expect(selectFileForUpload(createInitialState(), "", 10).notice).toMatch(/valid file/i);
     expect(dismissNotice(state).notice).toBeNull();

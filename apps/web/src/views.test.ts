@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  attemptUpload,
   createInitialState,
   dashboardStats,
   identityCreationReceived,
   identityLocked,
   identityUnlocked,
   navigate,
+  selectFileForUpload,
   toggleRecoveryPhraseReveal,
+  uploadEncrypting,
 } from "./store.js";
 import { renderApp, renderDashboard, renderFiles, renderNodes, renderSettings, renderUpload } from "./views.js";
 
@@ -41,8 +44,19 @@ describe("web views", () => {
   it("upload view stages honestly without claiming success", () => {
     const idle = renderUpload(createInitialState());
     expect(idle).toContain("No file staged");
-    expect(idle).toContain("never sees plaintext");
+    expect(idle).toContain("only ever receive encrypted data");
     expect(idle).toContain("disabled");
+  });
+
+  it("upload button is disabled while an upload is active", () => {
+    const ready = selectFileForUpload(createInitialState(), "dup.bin", 10);
+    expect(renderUpload(ready)).not.toContain("disabled");
+    const encrypting = attemptUpload(ready);
+    expect(renderUpload(encrypting)).toContain("disabled");
+    expect(renderUpload(encrypting)).toContain("Encrypting...");
+    const storing = uploadEncrypting(encrypting);
+    expect(renderUpload(storing)).toContain("disabled");
+    expect(renderUpload(storing)).toContain("Storing replicas...");
   });
 
   it("nodes view shows capacity and both health scores", () => {
