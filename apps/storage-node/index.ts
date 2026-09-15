@@ -23,7 +23,7 @@
 
 import { createServer } from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
-import { mkdir, readFile, stat, unlink, writeFile } from "fs/promises";
+import { mkdir, readFile, readdir, stat, unlink, writeFile } from "fs/promises";
 import { join, resolve } from "path";
 import { DEFAULT_MAX_CLOCK_SKEW_MS, PUBKEY_HEADER, verifyAuthHeaders } from "../../packages/auth/index.js";
 import type { Identity } from "../../packages/identity/index.js";
@@ -33,6 +33,7 @@ export const STORAGE_NODE_VERSION = 1;
 
 const MAX_PIECE_ID_LENGTH = 128;
 const PIECE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const DEFAULT_CAPACITY_BYTES = 1 * 1024 * 1024 * 1024;
 
 /**
  * Options for {@link createStorageNode}.
@@ -53,6 +54,14 @@ export interface StorageNodeOptions {
   registry?: Registry;
   /** Heartbeat interval for registry (ms). Defaults to 10s or 1/3 of registry timeout */
   registryHeartbeatIntervalMs?: number;
+  /** Total allocated bytes for this node (capacity). Defaults to 1 GiB */
+  capacityBytes?: number;
+}
+
+export interface NodeCapacity {
+  totalBytes: number;
+  usedBytes: number;
+  availableBytes: number;
 }
 
 /**
@@ -66,6 +75,10 @@ export interface StorageNode {
   readonly server: Server;
   /** Node's Ed25519 identity if configured (private key stays server-side) */
   readonly identity?: Identity;
+  /** Total capacity limit in bytes */
+  readonly capacityBytes: number;
+  /** Get current capacity/health info */
+  getCapacity(): Promise<NodeCapacity>;
   listen(port?: number, host?: string): Promise<number>;
   close(): Promise<void>;
 }
@@ -102,12 +115,16 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   const requireAuth = options.requireAuth ?? false;
   const maxClockSkewMs = options.maxClockSkewMs ?? DEFAULT_MAX_CLOCK_SKEW_MS;
   const seenNonces = new Map<string, number>();
+  const capacityBytes = options.capacityBytes ?? DEFAULT_CAPACITY_BYTES;
+  if (!Number.isInteger(capacityBytes) || capacityBytes <= 0) {
+    throw new TypeError("capacityBytes must be a positive integer");
+  }
 
   let nodeIdentity: Identity | undefined = options.identity;
   const hasKeystore = typeof options.identityPath === "string" && options.identityPath !== "";
 
   const server = createServer((req, res) => {
-    void handleRequest(req, res, storageDir, { requireAuth, maxClockSkewMs, seenNonces }).catch(() => {
+    void handleRequest(req, res, storageDir, capacityBytes, { requireAuth, maxClockSkewMs, seenNonces }).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal error" });
       } else {
@@ -120,12 +137,38 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   let registeredBaseUrl: string | undefined;
   let registeredNodeId: string | undefined;
 
+  async function getUsedBytes(): Promise<number> {
+    try {
+      const entries = await readdir(storageDir);
+      let total = 0;
+      for (const e of entries) {
+        try {
+          const s = await stat(join(storageDir, e));
+          if (s.isFile()) total += s.size;
+        } catch {}
+      }
+      return total;
+    } catch {
+      return 0;
+    }
+  }
+
+  async function getCapacity(): Promise<NodeCapacity> {
+    const used = await getUsedBytes();
+    const available = Math.max(0, capacityBytes - used);
+    return { totalBytes: capacityBytes, usedBytes: used, availableBytes: available };
+  }
+
   const node: StorageNode = {
     version: STORAGE_NODE_VERSION,
     storageDir,
     server,
+    capacityBytes,
     get identity(): Identity | undefined {
       return nodeIdentity;
+    },
+    async getCapacity(): Promise<NodeCapacity> {
+      return getCapacity();
     },
     async listen(port: number = 0, host: string = "127.0.0.1"): Promise<number> {
       // Load persisted identity via encrypted keystore if configured
@@ -159,7 +202,8 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
         registeredNodeId = nodeIdentity.publicKey.toString("base64");
         try {
           const { createSignedRegistration } = await import("../../packages/registry/index.js");
-          const signed = createSignedRegistration(nodeIdentity, baseUrl);
+          const cap = await getCapacity();
+          const signed = createSignedRegistration(nodeIdentity, baseUrl, { capacity: cap });
           // Never send private key — only signed payload with publicKey
           options.registry.registerSigned(signed);
         } catch (err) {
@@ -171,19 +215,14 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
         const intervalMs = options.registryHeartbeatIntervalMs ?? 10_000;
         heartbeatTimer = setInterval(() => {
           if (!nodeIdentity || !registeredNodeId || !options.registry) return;
-          try {
-            // Use signed heartbeat to avoid exposing private key
-            import("../../packages/registry/index.js")
-              .then(({ createSignedHeartbeat }) => {
-                const signed = createSignedHeartbeat(nodeIdentity as Identity, registeredNodeId as string);
-                (options.registry as Registry).heartbeatSigned(signed);
-              })
-              .catch(() => {
-                // Heartbeat failures are non-fatal but should be visible
-              });
-          } catch {
-            // ignore
-          }
+          void (async () => {
+            try {
+              const cap = await getCapacity();
+              const { createSignedHeartbeat } = await import("../../packages/registry/index.js");
+              const signed = createSignedHeartbeat(nodeIdentity as Identity, registeredNodeId as string, { capacity: cap });
+              (options.registry as Registry).heartbeatSigned(signed);
+            } catch {}
+          })();
         }, intervalMs);
         // Don't keep process alive just for heartbeat
         if (heartbeatTimer && typeof (heartbeatTimer as unknown as { unref?: () => void }).unref === "function") {
@@ -234,6 +273,7 @@ async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   storageDir: string,
+  capacityBytes: number,
   auth: AuthState,
 ): Promise<void> {
   const method = (req.method ?? "").toUpperCase();
@@ -242,7 +282,7 @@ async function handleRequest(
   if (method === "POST" && rawPath === "/pieces") {
     const rawBody = await readBody(req);
     if (!checkAuth(req, method, rawPath, rawBody, auth, res)) return;
-    await handlePostPieceWithBody(rawBody, res, storageDir);
+    await handlePostPieceWithBody(rawBody, res, storageDir, capacityBytes);
     return;
   }
 
@@ -335,9 +375,10 @@ async function handlePostPiece(
   req: IncomingMessage,
   res: ServerResponse,
   storageDir: string,
+  capacityBytes: number = DEFAULT_CAPACITY_BYTES,
 ): Promise<void> {
   const raw = await readBody(req);
-  await handlePostPieceWithBody(raw, res, storageDir);
+  await handlePostPieceWithBody(raw, res, storageDir, capacityBytes);
 }
 
 /**
@@ -350,6 +391,7 @@ async function handlePostPieceWithBody(
   raw: Buffer,
   res: ServerResponse,
   storageDir: string,
+  capacityBytes: number = DEFAULT_CAPACITY_BYTES,
 ): Promise<void> {
   let parsed: unknown;
   try {
@@ -381,13 +423,23 @@ async function handlePostPieceWithBody(
   const piecePath = join(storageDir, id);
 
   let existed = false;
+  let existingSize = 0;
   try {
-    await stat(piecePath);
+    const st = await stat(piecePath);
     existed = true;
+    existingSize = st.size;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
       throw err;
     }
+  }
+
+  // Enforce capacity: only counts OpenStore storage directory
+  const used = await getUsedBytesForDir(storageDir);
+  const projected = existed ? used - existingSize + bytes.length : used + bytes.length;
+  if (projected > capacityBytes) {
+    sendJson(res, 507, { error: "insufficient storage", capacity: { totalBytes: capacityBytes, usedBytes: used, availableBytes: Math.max(0, capacityBytes - used) } });
+    return;
   }
 
   await mkdir(storageDir, { recursive: true });
@@ -448,6 +500,22 @@ function decodeSegment(segment: string): string | null {
 
 function isBase64(value: string): boolean {
   return value.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(value);
+}
+
+async function getUsedBytesForDir(dir: string): Promise<number> {
+  try {
+    const entries = await readdir(dir);
+    let total = 0;
+    for (const e of entries) {
+      try {
+        const s = await stat(join(dir, e));
+        if (s.isFile()) total += s.size;
+      } catch {}
+    }
+    return total;
+  } catch {
+    return 0;
+  }
 }
 
 function readBody(req: IncomingMessage): Promise<Buffer> {

@@ -17,12 +17,33 @@ export const DEFAULT_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 const NONCE_BYTES = 16;
 
+function registrationPayload(baseUrl: string, capacity: NodeCapacity | undefined, timestamp: string, nonce: string): string {
+  if (capacity) {
+    return `REGISTER\n${baseUrl}\n${capacity.totalBytes}\n${capacity.usedBytes}\n${capacity.availableBytes}\n${timestamp}\n${nonce}`;
+  }
+  return `REGISTER\n${baseUrl}\n${timestamp}\n${nonce}`;
+}
+
+function heartbeatPayload(nodeId: string, capacity: NodeCapacity | undefined, timestamp: string, nonce: string): string {
+  if (capacity) {
+    return `HEARTBEAT\n${nodeId}\n${capacity.totalBytes}\n${capacity.usedBytes}\n${capacity.availableBytes}\n${timestamp}\n${nonce}`;
+  }
+  return `HEARTBEAT\n${nodeId}\n${timestamp}\n${nonce}`;
+}
+
+export interface NodeCapacity {
+  totalBytes: number;
+  usedBytes: number;
+  availableBytes: number;
+}
+
 export interface NodeRecord {
   nodeId: string;
   publicKey: string;
   baseUrl: string;
   available: boolean;
   lastSeen: number;
+  capacity: NodeCapacity;
 }
 
 export interface RegistryOptions {
@@ -51,6 +72,7 @@ export interface SignedRegistration {
   timestamp: string;
   nonce: string;
   signature: string;
+  capacity?: NodeCapacity;
 }
 
 export interface SignedHeartbeat {
@@ -59,6 +81,7 @@ export interface SignedHeartbeat {
   timestamp: string;
   nonce: string;
   signature: string;
+  capacity?: NodeCapacity;
 }
 
 export interface SignedUnregister {
@@ -140,6 +163,26 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     return pubkeyB64;
   }
 
+  function validateCapacity(cap: unknown): NodeCapacity {
+    if (!cap || typeof cap !== "object" || Array.isArray(cap)) throw new Error("malformed node record: invalid capacity");
+    const c = cap as Record<string, unknown>;
+    for (const f of ["totalBytes", "usedBytes", "availableBytes"] as const) {
+      if (typeof c[f] !== "number" || !Number.isInteger(c[f] as number) || (c[f] as number) < 0) {
+        throw new Error(`malformed node record: invalid capacity ${f}`);
+      }
+    }
+    const total = c["totalBytes"] as number;
+    const used = c["usedBytes"] as number;
+    const available = c["availableBytes"] as number;
+    if (used + available !== total && total !== 0) {
+      // Allow total=0 as unlimited, otherwise check consistency
+      if (used > total || available !== total - used) {
+        throw new Error("malformed node record: capacity inconsistent");
+      }
+    }
+    return { totalBytes: total, usedBytes: used, availableBytes: available };
+  }
+
   function prune(): void {
     const now = Date.now();
     for (const [id, rec] of nodes) {
@@ -152,21 +195,21 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
   const registry: Registry = {
     version: REGISTRY_VERSION,
 
-    register(baseUrl: string, identity: Identity): NodeRecord {
+    register(baseUrl: string, identity: Identity, capacity?: NodeCapacity): NodeRecord {
       if (!identity || typeof identity !== "object" || !Buffer.isBuffer(identity.publicKey) || !Buffer.isBuffer(identity.privateKey)) {
         throw new Error("invalid identity");
       }
       const publicKey = identity.publicKey.toString("base64");
       const timestamp = String(Date.now());
       const nonce = randomBytes(NONCE_BYTES).toString("hex");
-      const payload = `REGISTER\n${baseUrl}\n${timestamp}\n${nonce}`;
+      const payload = registrationPayload(baseUrl, capacity, timestamp, nonce);
       const sig = signMessage(identity.privateKey, Buffer.from(payload, "utf8")).toString("base64");
-      return registry.registerSigned({ baseUrl, publicKey, timestamp, nonce, signature: sig });
+      return registry.registerSigned(capacity ? { baseUrl, publicKey, timestamp, nonce, signature: sig, capacity } : { baseUrl, publicKey, timestamp, nonce, signature: sig });
     },
 
     registerSigned(signed: SignedRegistration): NodeRecord {
       if (!signed || typeof signed !== "object") throw new Error("malformed node record");
-      const { baseUrl, publicKey, timestamp, nonce, signature } = signed as unknown as Record<string, unknown>;
+      const { baseUrl, publicKey, timestamp, nonce, signature, capacity } = signed as unknown as Record<string, unknown>;
       if (typeof baseUrl !== "string" || typeof publicKey !== "string" || typeof timestamp !== "string" || typeof nonce !== "string" || typeof signature !== "string") {
         throw new Error("malformed node record");
       }
@@ -178,7 +221,11 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       const ts = validateTimestamp(timestamp);
       const now = Date.now();
       validateNonce(nonce, now, ts);
-      const payload = `REGISTER\n${baseUrl}\n${timestamp}\n${nonce}`;
+      let cap: NodeCapacity | undefined;
+      if (capacity !== undefined) {
+        cap = validateCapacity(capacity);
+      }
+      const payload = registrationPayload(baseUrl, cap, timestamp, nonce);
       verifySignature(pubkeyBuf, payload, signature);
       const nodeId = nodeIdFromPublicKey(publicKey);
       // Prevent registration using another node's identity: nodeId must match publicKey
@@ -190,26 +237,27 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         baseUrl,
         available: true,
         lastSeen: Date.now(),
+        capacity: cap ?? { totalBytes: 0, usedBytes: 0, availableBytes: 0 },
       };
       nodes.set(nodeId, record);
       return { ...record };
     },
 
-    heartbeat(nodeId: string, identity: Identity): NodeRecord {
+    heartbeat(nodeId: string, identity: Identity, capacity?: NodeCapacity): NodeRecord {
       if (!identity || typeof identity !== "object" || !Buffer.isBuffer(identity.publicKey) || !Buffer.isBuffer(identity.privateKey)) {
         throw new Error("invalid identity");
       }
       const publicKey = identity.publicKey.toString("base64");
       const timestamp = String(Date.now());
       const nonce = randomBytes(NONCE_BYTES).toString("hex");
-      const payload = `HEARTBEAT\n${nodeId}\n${timestamp}\n${nonce}`;
+      const payload = heartbeatPayload(nodeId, capacity, timestamp, nonce);
       const sig = signMessage(identity.privateKey, Buffer.from(payload, "utf8")).toString("base64");
-      return registry.heartbeatSigned({ nodeId, publicKey, timestamp, nonce, signature: sig });
+      return registry.heartbeatSigned(capacity ? { nodeId, publicKey, timestamp, nonce, signature: sig, capacity } : { nodeId, publicKey, timestamp, nonce, signature: sig });
     },
 
     heartbeatSigned(signed: SignedHeartbeat): NodeRecord {
       if (!signed || typeof signed !== "object") throw new Error("malformed node record");
-      const { nodeId, publicKey, timestamp, nonce, signature } = signed as unknown as Record<string, unknown>;
+      const { nodeId, publicKey, timestamp, nonce, signature, capacity } = signed as unknown as Record<string, unknown>;
       if (typeof nodeId !== "string" || typeof publicKey !== "string" || typeof timestamp !== "string" || typeof nonce !== "string" || typeof signature !== "string") {
         throw new Error("malformed node record");
       }
@@ -218,7 +266,11 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       const ts = validateTimestamp(timestamp as string);
       const now = Date.now();
       validateNonce(nonce as string, now, ts);
-      const payload = `HEARTBEAT\n${nodeId}\n${timestamp}\n${nonce}`;
+      let cap: NodeCapacity | undefined;
+      if (capacity !== undefined) {
+        cap = validateCapacity(capacity);
+      }
+      const payload = heartbeatPayload(nodeId as string, cap, timestamp as string, nonce as string);
       verifySignature(pubkeyBuf, payload, signature as string);
       const expectedId = nodeIdFromPublicKey(publicKey as string);
       if (nodeId !== expectedId) throw new Error("invalid signature: nodeId does not match publicKey");
@@ -226,6 +278,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       if (!existing) throw new Error("node not found");
       existing.lastSeen = Date.now();
       existing.available = true;
+      if (cap) existing.capacity = cap;
       return { ...existing };
     },
 
@@ -297,25 +350,29 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
 export function createSignedRegistration(
   identity: Identity,
   baseUrl: string,
-  opts: { timestamp?: number; nonce?: string } = {},
+  opts: { timestamp?: number; nonce?: string; capacity?: NodeCapacity } = {},
 ): SignedRegistration {
   const timestamp = String(opts.timestamp ?? Date.now());
   const nonce = opts.nonce ?? randomBytes(NONCE_BYTES).toString("hex");
-  const payload = `REGISTER\n${baseUrl}\n${timestamp}\n${nonce}`;
+  const payload = registrationPayload(baseUrl, opts.capacity, timestamp, nonce);
   const sig = signMessage(identity.privateKey, Buffer.from(payload, "utf8")).toString("base64");
-  return { baseUrl, publicKey: identity.publicKey.toString("base64"), timestamp, nonce, signature: sig };
+  return opts.capacity
+    ? { baseUrl, publicKey: identity.publicKey.toString("base64"), timestamp, nonce, signature: sig, capacity: opts.capacity }
+    : { baseUrl, publicKey: identity.publicKey.toString("base64"), timestamp, nonce, signature: sig };
 }
 
 export function createSignedHeartbeat(
   identity: Identity,
   nodeId: string,
-  opts: { timestamp?: number; nonce?: string } = {},
+  opts: { timestamp?: number; nonce?: string; capacity?: NodeCapacity } = {},
 ): SignedHeartbeat {
   const timestamp = String(opts.timestamp ?? Date.now());
   const nonce = opts.nonce ?? randomBytes(NONCE_BYTES).toString("hex");
-  const payload = `HEARTBEAT\n${nodeId}\n${timestamp}\n${nonce}`;
+  const payload = heartbeatPayload(nodeId, opts.capacity, timestamp, nonce);
   const sig = signMessage(identity.privateKey, Buffer.from(payload, "utf8")).toString("base64");
-  return { nodeId, publicKey: identity.publicKey.toString("base64"), timestamp, nonce, signature: sig };
+  return opts.capacity
+    ? { nodeId, publicKey: identity.publicKey.toString("base64"), timestamp, nonce, signature: sig, capacity: opts.capacity }
+    : { nodeId, publicKey: identity.publicKey.toString("base64"), timestamp, nonce, signature: sig };
 }
 
 export function createSignedUnregister(
