@@ -83,7 +83,12 @@ export function selectEndpoints(
 ): StorageNodeEndpoint[] {
   const candidates = registry.listAvailable();
   const selected = selectNodes(candidates, pieceSize, replicationFactor);
-  return selected.map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl, reliabilityScore: r.reliability?.score ?? DEFAULT_RELIABILITY_SCORE }));
+  return selected.map((r) => ({
+    id: r.nodeId,
+    baseUrl: r.baseUrl,
+    reliabilityScore: r.reliability?.score ?? DEFAULT_RELIABILITY_SCORE,
+    storageScore: r.reliability?.storageScore,
+  }));
 }
 
 /**
@@ -114,7 +119,12 @@ export async function storePieceWithSelection(
     if (available.length > 0) {
       try {
         const selected = selectNodes(available, pieceSize, replicationFactor);
-        endpoints = selected.map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl, reliabilityScore: r.reliability?.score ?? DEFAULT_RELIABILITY_SCORE }));
+        endpoints = selected.map((r) => ({
+          id: r.nodeId,
+          baseUrl: r.baseUrl,
+          reliabilityScore: r.reliability?.score ?? DEFAULT_RELIABILITY_SCORE,
+          storageScore: r.reliability?.storageScore,
+        }));
       } catch (err) {
         // Fail clearly instead of silently reducing replication
         throw err;

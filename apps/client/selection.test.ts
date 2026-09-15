@@ -17,7 +17,7 @@ function makeRecord(nodeId: string, available: boolean, availableBytes: number, 
     available,
     lastSeen: Date.now(),
     capacity: { totalBytes, usedBytes: totalBytes - availableBytes, availableBytes },
-    reliability: { successfulHeartbeats: 0, missedHeartbeats: 0, score: reliabilityScore },
+    reliability: { successfulHeartbeats: 0, missedHeartbeats: 0, score: reliabilityScore, successfulAudits: 0, failedAudits: 0, storageScore: 50 },
   };
 }
 

@@ -62,16 +62,29 @@ export interface NodeCapacity {
 }
 
 /**
- * Reliability/health tracking for a node (OPENSTORE-016).
- * Only counters and a derived score are stored — no sensitive data.
+ * Reliability/health tracking for a node (OPENSTORE-016, extended by OPENSTORE-018).
+ * Only counters and derived scores are stored — no sensitive data.
+ *
+ * Heartbeat health and storage-audit health are tracked SEPARATELY:
+ * - `successfulHeartbeats`/`missedHeartbeats`/`score` reflect only
+ *   heartbeat/availability history. Storage audits never touch them.
+ * - `successfulAudits`/`failedAudits`/`storageScore` reflect only
+ *   metadata-only piece verification results. Heartbeats never touch them.
+ * This keeps either signal from silently distorting the other.
  */
 export interface NodeReliability {
   /** Number of successful authenticated heartbeats observed. */
   successfulHeartbeats: number;
   /** Number of missed/expired heartbeat windows observed. */
   missedHeartbeats: number;
-  /** Deterministic score from 0–100 derived from counters. */
+  /** Deterministic heartbeat score from 0–100 derived from heartbeat counters. */
   score: number;
+  /** Number of pieces that verified healthy during storage audits. */
+  successfulAudits: number;
+  /** Number of pieces that verified missing/corrupted during storage audits. */
+  failedAudits: number;
+  /** Deterministic storage score from 0–100 derived from audit counters. */
+  storageScore: number;
 }
 
 export interface NodeRecord {
@@ -99,11 +112,25 @@ export function computeReliabilityScore(successfulHeartbeats: number, missedHear
   return Math.min(100, Math.max(0, score));
 }
 
+/**
+ * Deterministic storage-health score from 0–100.
+ * Same neutral-prior smoothing as heartbeats, applied to audit counters.
+ */
+export function computeStorageScore(successfulAudits: number, failedAudits: number): number {
+  return computeReliabilityScore(successfulAudits, failedAudits);
+}
+
+/** Neutral storage health for nodes with no audit history. */
+export const DEFAULT_STORAGE_SCORE = DEFAULT_RELIABILITY_SCORE;
+
 export function defaultReliability(): NodeReliability {
   return {
     successfulHeartbeats: 0,
     missedHeartbeats: 0,
     score: DEFAULT_RELIABILITY_SCORE,
+    successfulAudits: 0,
+    failedAudits: 0,
+    storageScore: DEFAULT_STORAGE_SCORE,
   };
 }
 
@@ -119,11 +146,36 @@ function validateReliability(rel: unknown): NodeReliability {
   const m = r["missedHeartbeats"] as number;
   const score = r["score"] as number;
   if (score > 100) throw new Error("malformed node record: invalid reliability score");
-  const expected = computeReliabilityScore(s, m);
-  // Tolerate legacy/rounded scores but clamp into range deterministically;
-  // recompute to keep the invariant score == f(success, missed).
-  void expected;
-  return { successfulHeartbeats: s, missedHeartbeats: m, score: computeReliabilityScore(s, m) };
+  // Audit fields optional for backward compat (pre-018 files lack them).
+  let sA = 0;
+  let fA = 0;
+  if (r["successfulAudits"] !== undefined) {
+    if (typeof r["successfulAudits"] !== "number" || !Number.isInteger(r["successfulAudits"] as number) || (r["successfulAudits"] as number) < 0) {
+      throw new Error("malformed node record: invalid reliability successfulAudits");
+    }
+    sA = r["successfulAudits"] as number;
+  }
+  if (r["failedAudits"] !== undefined) {
+    if (typeof r["failedAudits"] !== "number" || !Number.isInteger(r["failedAudits"] as number) || (r["failedAudits"] as number) < 0) {
+      throw new Error("malformed node record: invalid reliability failedAudits");
+    }
+    fA = r["failedAudits"] as number;
+  }
+  if (r["storageScore"] !== undefined) {
+    if (typeof r["storageScore"] !== "number" || !Number.isInteger(r["storageScore"] as number) || (r["storageScore"] as number) < 0 || (r["storageScore"] as number) > 100) {
+      throw new Error("malformed node record: invalid reliability storageScore");
+    }
+  }
+  // Recompute both scores deterministically from counters so the
+  // invariant score == f(counters) always holds.
+  return {
+    successfulHeartbeats: s,
+    missedHeartbeats: m,
+    score: computeReliabilityScore(s, m),
+    successfulAudits: sA,
+    failedAudits: fA,
+    storageScore: computeStorageScore(sA, fA),
+  };
 }
 
 export interface RegistryOptions {
@@ -131,6 +183,21 @@ export interface RegistryOptions {
   maxClockSkewMs?: number;
   /** Optional file path for persistent storage. If omitted, registry is in-memory only. */
   persistencePath?: string;
+}
+
+/**
+ * Aggregated result of one storage audit for one node (OPENSTORE-018).
+ * Counts only pieces that produced a verification response; transport
+ * errors and unreachable nodes are excluded by the audit module and
+ * must not be recorded here.
+ */
+export interface StorageAuditResult {
+  /** Unique ID of the audit run (used for idempotency). */
+  auditId: string;
+  /** Pieces that verified healthy (existed and hashed to the expected ID). */
+  healthy: number;
+  /** Pieces that verified missing or corrupted. */
+  unhealthy: number;
 }
 
 export interface Registry {
@@ -141,6 +208,13 @@ export interface Registry {
   heartbeatSigned(signed: SignedHeartbeat): NodeRecord;
   unregister(nodeId: string, identity: Identity): void;
   unregisterSigned(signed: SignedUnregister): void;
+  /**
+   * Record a storage-audit outcome into a node's storage health.
+   * Updates ONLY audit counters/storageScore — heartbeat statistics
+   * are never touched. Recording the same `auditId` twice for the
+   * same node is a no-op (no double-counting).
+   */
+  recordStorageAudit(nodeId: string, result: StorageAuditResult): NodeRecord;
   list(): NodeRecord[];
   listAvailable(): NodeRecord[];
   get(nodeId: string): NodeRecord | undefined;
@@ -180,6 +254,9 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
   const persistencePath = options.persistencePath;
   const nodes = new Map<string, NodeRecord>();
   const seenNonces = new Map<string, number>();
+  /** Idempotency keys `${auditId}:${nodeId}` for recorded storage audits. */
+  const seenAuditIds = new Set<string>();
+  const MAX_SEEN_AUDIT_IDS = 1000;
 
   // --- Persistence helpers ---
   function isValidPersistedRecord(obj: unknown): NodeRecord | null {
@@ -249,6 +326,15 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         const rec = isValidPersistedRecord(raw);
         if (rec) nodes.set(rec.nodeId, rec);
       }
+      // Recorded-audit idempotency keys (optional, backward compatible).
+      const rawSeen = parsed["seenAuditIds"];
+      if (Array.isArray(rawSeen)) {
+        for (const entry of rawSeen) {
+          if (typeof entry === "string" && entry !== "" && entry.length <= 256 && seenAuditIds.size < MAX_SEEN_AUDIT_IDS) {
+            seenAuditIds.add(entry);
+          }
+        }
+      }
     } catch {
       // Ignore malformed or missing file safely
     }
@@ -257,7 +343,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
   function persist(): void {
     if (!persistencePath) return;
     const payload = JSON.stringify(
-      { version: REGISTRY_VERSION, nodes: Array.from(nodes.values()) },
+      { version: REGISTRY_VERSION, nodes: Array.from(nodes.values()), seenAuditIds: Array.from(seenAuditIds) },
       null,
       2,
     );
@@ -537,6 +623,37 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       persist();
     },
 
+    recordStorageAudit(nodeId: string, result: StorageAuditResult): NodeRecord {
+      if (typeof nodeId !== "string" || nodeId === "") throw new TypeError("nodeId must be a non-empty string");
+      if (!result || typeof result !== "object") throw new TypeError("result must be an object");
+      const { auditId, healthy, unhealthy } = result;
+      if (typeof auditId !== "string" || auditId === "") throw new TypeError("result.auditId must be a non-empty string");
+      if (!Number.isInteger(healthy) || healthy < 0) throw new TypeError("result.healthy must be a non-negative integer");
+      if (!Number.isInteger(unhealthy) || unhealthy < 0) throw new TypeError("result.unhealthy must be a non-negative integer");
+      const existing = nodes.get(nodeId);
+      if (!existing) throw new Error("node not found");
+      const dedupKey = `${auditId}:${nodeId}`;
+      if (seenAuditIds.has(dedupKey)) {
+        // Same audit already recorded — return current state unchanged.
+        return { ...existing, capacity: { ...existing.capacity }, reliability: { ...existing.reliability } };
+      }
+      // Update ONLY storage-audit health; heartbeat counters/score untouched.
+      existing.reliability.successfulAudits += healthy;
+      existing.reliability.failedAudits += unhealthy;
+      existing.reliability.storageScore = computeStorageScore(
+        existing.reliability.successfulAudits,
+        existing.reliability.failedAudits,
+      );
+      seenAuditIds.add(dedupKey);
+      while (seenAuditIds.size > MAX_SEEN_AUDIT_IDS) {
+        const oldest = seenAuditIds.values().next();
+        if (oldest.done) break;
+        seenAuditIds.delete(oldest.value as string);
+      }
+      persist();
+      return { ...existing, capacity: { ...existing.capacity }, reliability: { ...existing.reliability } };
+    },
+
     list(): NodeRecord[] {
       prune();
       return Array.from(nodes.values()).map((r) => ({ ...r, capacity: { ...r.capacity }, reliability: { ...r.reliability } }));
@@ -556,8 +673,13 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     },
 
     getAvailableEndpoints(): StorageNodeEndpoint[] {
-      // Discovery metadata exposes reliability via the endpoint's optional score.
-      return registry.listAvailable().map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl, reliabilityScore: r.reliability.score }));
+      // Discovery metadata exposes heartbeat + storage health via optional scores.
+      return registry.listAvailable().map((r) => ({
+        id: r.nodeId,
+        baseUrl: r.baseUrl,
+        reliabilityScore: r.reliability.score,
+        storageScore: r.reliability.storageScore,
+      }));
     },
 
     pruneExpired(): void {

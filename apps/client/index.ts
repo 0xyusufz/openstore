@@ -28,8 +28,10 @@ export const DEFAULT_TIMEOUT_MS = 5000;
 export interface StorageNodeEndpoint {
   id: string;
   baseUrl: string;
-  /** Optional reliability score (0–100) from registry discovery metadata. */
+  /** Optional heartbeat reliability score (0–100) from registry discovery metadata. */
   reliabilityScore?: number;
+  /** Optional storage-audit health score (0–100) from registry discovery metadata. */
+  storageScore?: number;
 }
 
 /**
