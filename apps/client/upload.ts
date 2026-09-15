@@ -33,6 +33,7 @@ import type { FileManifest, ManifestChunk } from "../../packages/manifest/index.
 import { storePieceOnNodes } from "./index.js";
 import type { StorageNodeEndpoint } from "./index.js";
 import type { Registry } from "../../packages/registry/index.js";
+import type { ManifestStore } from "../../packages/manifest/store.js";
 
 /**
  * Options for {@link uploadBuffer}.
@@ -43,6 +44,12 @@ export interface UploadOptions {
   replicationFactor?: number;
   /** Optional registry for intelligent node selection (capacity/availability aware) */
   registry?: Registry;
+  /**
+   * Optional local manifest store. When provided, the resulting manifest
+   * is atomically persisted via the store after a successful upload.
+   * The encryption key is never persisted — only manifest metadata.
+   */
+  manifestStore?: ManifestStore;
 }
 
 /**
@@ -138,5 +145,10 @@ export async function uploadBuffer(
     cryptoVersion: CRYPTO_VERSION,
     chunks: manifestChunks,
   });
+  if (options.manifestStore) {
+    // Persist manifest metadata only; the key stays with the caller.
+    // A persistence failure surfaces explicitly instead of silently losing the manifest.
+    await options.manifestStore.save(manifest);
+  }
   return { manifest, encryptionKey };
 }
