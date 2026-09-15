@@ -22,7 +22,7 @@ describe("upload file staging (file-input regression)", () => {
     expect(staged.upload.fileSize).toBe(12345);
     expect(staged.notice).toBeNull();
     // Only metadata enters state — exact key set, no blob/data/file fields.
-    expect(Object.keys(staged.upload).sort()).toEqual(["fileName", "fileSize", "note", "status"]);
+    expect(Object.keys(staged.upload).sort()).toEqual(["fileName", "fileSize", "note", "retryable", "status"]);
   });
 
   it("staging never resets back to idle (the reported bug)", () => {

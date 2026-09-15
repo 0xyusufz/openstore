@@ -383,15 +383,27 @@ function uploadErrorStatus(message: string): number {
  * Strip any secret-adjacent content from upload error messages before
  * they cross the API boundary. Upload failures legitimately mention
  * piece IDs (content hashes) and node IDs (public keys), but must never
- * carry key material, phrases, passwords, or plaintext.
+ * carry key material, phrases, passwords, plaintext, filesystem paths,
+ * or stack traces. Where possible, map to actionable messages.
  */
 function toSafeUploadError(message: string): string {
-  if (typeof message !== "string" || message === "") return "upload failed";
+  if (typeof message !== "string" || message === "") return "Upload failed. Please try again.";
   if (/privatekey|recoveryphrase|mnemonic|encryptionkey|decryptionkey|password|plaintext|auth\s*tag|authTag|ciphertext/i.test(message)) {
-    return "upload failed";
+    return "Upload failed. Please try again.";
   }
+  if (/\/[^\s]*\.(?:json|txt|log|db)|ENOENT|EACCES|statfs|\bat .*:\d+:\d+|\bstack\b/i.test(message)) {
+    return "Storage error. Please try again.";
+  }
+  let safe = message;
+  if (/no storage nodes available/i.test(safe)) return "No storage nodes are available. Try again when a node is online.";
+  if (/insufficient storage|quota/i.test(safe)) return "Storage is full. Free up space or increase your allocation.";
+  if (/file is empty/i.test(safe)) return "File is empty and cannot be uploaded.";
+  if (/file too large/i.test(safe)) return "File is too large (100 MB limit).";
+  if (/invalid filename/i.test(safe)) return "Filename is not valid.";
+  if (/draining/i.test(safe)) return "A storage node is draining and not accepting new data. Try again shortly.";
   // Bound message length so oversized internals never leak wholesale.
-  return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+  safe = safe.replace(/\s+/g, " ").trim();
+  return safe.length > 500 ? `${safe.slice(0, 500)}…` : safe;
 }
 
 /**
@@ -407,12 +419,16 @@ function providerErrorStatus(message: string): number {
 
 /**
  * Sanitize provider error messages. Counts and plain-English reasons
- * pass through; key material, phrases, passwords, and piece bytes never do.
+ * pass through; key material, phrases, passwords, piece bytes, paths
+ * and stacks never do.
  */
 function toSafeProviderError(message: string): string {
-  if (typeof message !== "string" || message === "") return "provider request failed";
+  if (typeof message !== "string" || message === "") return "Provider request failed. Please try again.";
   if (/privatekey|recoveryphrase|mnemonic|encryptionkey|decryptionkey|\bdek\b|password|plaintext|auth\s*tag|authTag|ciphertext/i.test(message)) {
-    return "provider request failed";
+    return "Provider request failed. Please try again.";
+  }
+  if (/\/[^\s]*\.(?:json|txt|log|db)|ENOENT|EACCES|statfs|\bat .*:\d+:\d+/i.test(message)) {
+    return "Storage error. Please try again.";
   }
   return message.length > 500 ? `${message.slice(0, 500)}…` : message;
 }
@@ -431,14 +447,22 @@ function downloadErrorStatus(message: string): number {
 /**
  * Sanitize download error messages. Piece IDs (hashes) and node IDs
  * (public keys) may pass through; key material, phrases, passwords,
- * and plaintext never do.
+ * plaintext, paths and stacks never do.
  */
 function toSafeDownloadError(message: string): string {
-  if (typeof message !== "string" || message === "") return "download failed";
+  if (typeof message !== "string" || message === "") return "Download failed. Please try again.";
   if (/privatekey|recoveryphrase|mnemonic|encryptionkey|decryptionkey|\bdek\b|password|plaintext|auth\s*tag|authTag|ciphertext/i.test(message)) {
-    return "download failed";
+    return "Download failed. Please try again.";
   }
-  return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+  if (/\/[^\s]*\.(?:json|txt|log|db)|ENOENT|EACCES|statfs|\bat .*:\d+:\d+/i.test(message)) {
+    return "Storage error. Please try again.";
+  }
+  let safe = message;
+  if (/file not found|file key unavailable|not found/i.test(safe)) return "File not found or is unavailable.";
+  if (/corrupt|hash mismatch|size mismatch|decryption failed|wrong key/i.test(safe)) return "File appears corrupted or the key is wrong. Download failed safely.";
+  if (/piece.*unavailable/i.test(safe)) return "File pieces are temporarily unavailable. Try again shortly.";
+  safe = safe.replace(/\s+/g, " ").trim();
+  return safe.length > 500 ? `${safe.slice(0, 500)}…` : safe;
 }
 
 /**

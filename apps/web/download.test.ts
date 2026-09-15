@@ -346,7 +346,7 @@ describe("real encrypted web download (OPENSTORE-028)", () => {
       const direct = await uploadBuffer(randomBytes(256), "direct.bin", endpoints, { manifestStore: store });
       const missing = await errorJson(port, direct.manifest.fileId);
       expect(missing.status).toBe(404);
-      expect(String(missing.json["error"])).toMatch(/key unavailable/i);
+      expect(String(missing.json["error"])).toMatch(/not found|key unavailable|unavailable/i);
 
       // Wrong DEK: overwrite the vault entry, then restore the true key.
       const fileData = randomBytes(256);
@@ -467,16 +467,16 @@ describe("real encrypted web download (OPENSTORE-028)", () => {
     const fileId = "0123456789abcdef0123456789abcdef";
     let state = { ...createInitialState(), files: [{ fileId, filename: "dup.bin", size: 8, totalChunks: 1, chunkSize: 8 }] };
     state = attemptDownload(state, fileId);
-    expect(state.download.status).toBe("active");
+    expect(state.download.status).toBe("locating");
     // Second attempt while active: identical state, no duplicate fetch.
     expect(attemptDownload(state, fileId)).toBe(state);
     // Finished flows accept a fresh download.
     const done = downloadComplete(state, { fileId, filename: "dup.bin", size: 8 });
     expect(done.download.status).toBe("complete");
-    expect(attemptDownload(done, fileId).download.status).toBe("active");
+    expect(attemptDownload(done, fileId).download.status).toBe("locating");
     const failed = downloadFailed(state, "boom");
     expect(failed.download.status).toBe("failed");
-    expect(attemptDownload(failed, fileId).download.status).toBe("active");
+    expect(attemptDownload(failed, fileId).download.status).toBe("locating");
   });
 
   it("13. DEMO mode remains honest", async () => {

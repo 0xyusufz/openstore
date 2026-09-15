@@ -139,9 +139,57 @@ export async function storePieceOnNodes(
 }
 
 /**
+ * Delete a piece from a set of nodes (best-effort, never throws).
+ * Used to clean up partially stored uploads — only deletes pieceIds
+ * that belong to the failed file, never other files.
+ */
+export async function deletePieceFromNodes(
+  pieceId: string,
+  endpoints: StorageNodeEndpoint[],
+  options: GetPieceOptions = {},
+): Promise<void> {
+  assertValidPieceIdArg(pieceId);
+  if (!Array.isArray(endpoints) || endpoints.length === 0) return;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  await Promise.all(
+    endpoints.map(async (endpoint) => {
+      try {
+        const path = `/pieces/${encodeURIComponent(pieceId)}`;
+        const headers: Record<string, string> = {};
+        if (options.identity) {
+          const { createAuthHeaders } = await import("../../packages/auth/index.js");
+          Object.assign(headers, createAuthHeaders(options.identity, "DELETE", path));
+        }
+        await fetch(`${normalizeBaseUrl(endpoint.baseUrl)}${path}`, {
+          method: "DELETE",
+          headers: Object.keys(headers).length > 0 ? headers : undefined,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+      } catch {}
+    }),
+  );
+}
+
+/**
+ * Whether an error message looks like a transient network/5xx failure
+ * that is worth retrying. Permanent failures (400, 404, 413, 507 quota,
+ * draining, auth) are never retried.
+ */
+export function isTransientError(message: string): boolean {
+  const lower = message.toLowerCase();
+  if (/507|413|400|401|404|insufficient storage|draining|quota|invalid piece|invalid file id|malformed/i.test(lower)) return false;
+  return /timeout|network|econn|eai_again|ecanceled|aborted|fetch failed|500|502|503|504|unavailable|failed to store piece|unreachable/i.test(lower);
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((r) => setTimeout(r, ms));
+}
+
+/**
  * Retrieve a piece by trying each configured replica in order until
  * one returns the bytes. Unreachable nodes and error statuses are
- * skipped; only total failure throws.
+ * skipped; only total failure throws. Transient failures are retried
+ * once with backoff before moving to the next replica.
  *
  * @param pieceId Piece ID to fetch.
  * @param endpoints Replica nodes to try in order.
@@ -161,30 +209,49 @@ export async function getPieceFromNodes(
 
   const problems: string[] = [];
   for (const endpoint of endpoints) {
-    try {
-      const path = `/pieces/${encodeURIComponent(pieceId)}`;
-      const headers: Record<string, string> = {};
-      if (options.identity) {
-        const { createAuthHeaders } = await import("../../packages/auth/index.js");
-        Object.assign(headers, createAuthHeaders(options.identity, "GET", path));
+    let lastErr: string | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const path = `/pieces/${encodeURIComponent(pieceId)}`;
+        const headers: Record<string, string> = {};
+        if (options.identity) {
+          const { createAuthHeaders } = await import("../../packages/auth/index.js");
+          Object.assign(headers, createAuthHeaders(options.identity, "GET", path));
+        }
+        const res = await fetch(
+          `${normalizeBaseUrl(endpoint.baseUrl)}${path}`,
+          {
+            headers: Object.keys(headers).length > 0 ? headers : undefined,
+            signal: AbortSignal.timeout(timeoutMs),
+          },
+        );
+        if (res.status === 200) {
+          return {
+            bytes: Buffer.from(await res.arrayBuffer()),
+            from: endpoint,
+          };
+        }
+        if (res.status >= 500 && res.status !== 507 && attempt === 0) {
+          lastErr = `${endpoint.id}: unexpected status ${res.status}`;
+          await delay(100 * (attempt + 1));
+          continue;
+        }
+        problems.push(`${endpoint.id}: unexpected status ${res.status}`);
+        lastErr = null;
+        break;
+      } catch (err) {
+        const msg = toErrorMessage(err);
+        if (isTransientError(msg) && attempt === 0) {
+          lastErr = `${endpoint.id}: ${msg}`;
+          await delay(100 * (attempt + 1));
+          continue;
+        }
+        problems.push(`${endpoint.id}: ${msg}`);
+        lastErr = null;
+        break;
       }
-      const res = await fetch(
-        `${normalizeBaseUrl(endpoint.baseUrl)}${path}`,
-        {
-          headers: Object.keys(headers).length > 0 ? headers : undefined,
-          signal: AbortSignal.timeout(timeoutMs),
-        },
-      );
-      if (res.status === 200) {
-        return {
-          bytes: Buffer.from(await res.arrayBuffer()),
-          from: endpoint,
-        };
-      }
-      problems.push(`${endpoint.id}: unexpected status ${res.status}`);
-    } catch (err) {
-      problems.push(`${endpoint.id}: ${toErrorMessage(err)}`);
     }
+    if (lastErr) problems.push(lastErr);
   }
   throw new Error(
     `piece "${pieceId}" unavailable from ${endpoints.length} node(s): ${problems.join("; ")}`,

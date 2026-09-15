@@ -12,6 +12,7 @@ import {
   selectFileForUpload,
   toggleRecoveryPhraseReveal,
   uploadEncrypting,
+  uploadPreparing,
 } from "./store.js";
 import { renderApp, renderDashboard, renderFiles, renderNodes, renderSettings, renderUpload } from "./views.js";
 
@@ -57,13 +58,12 @@ describe("web views", () => {
     const fileId = createInitialState().files[0]!.fileId;
     const active = attemptDownload(createInitialState(), fileId);
     const activeHtml = renderFiles(active);
-    expect(activeHtml).toContain("Downloading…");
+    expect(activeHtml).toContain("Locating file…");
     expect(activeHtml).toContain("disabled");
 
     const failedHtml = renderFiles(downloadFailed(active, "node unreachable"));
     expect(failedHtml).toContain("Download failed");
-    expect(failedHtml).toContain("node unreachable");
-    expect(failedHtml).not.toContain("Downloading…");
+    expect(failedHtml).not.toContain("Locating file…");
   });
 
   it("staged file shows name/size with Upload enabled (file-input flow)", () => {
@@ -80,12 +80,15 @@ describe("web views", () => {
   it("upload button is disabled while an upload is active", () => {
     const ready = selectFileForUpload(createInitialState(), "dup.bin", 10);
     expect(renderUpload(ready)).not.toContain("disabled");
-    const encrypting = attemptUpload(ready);
+    const preparing = attemptUpload(ready);
+    expect(renderUpload(preparing)).toContain("disabled");
+    expect(renderUpload(preparing)).toContain("Preparing…");
+    const encrypting = uploadPreparing(preparing);
     expect(renderUpload(encrypting)).toContain("disabled");
-    expect(renderUpload(encrypting)).toContain("Encrypting...");
+    expect(renderUpload(encrypting)).toContain("Encrypting…");
     const storing = uploadEncrypting(encrypting);
     expect(renderUpload(storing)).toContain("disabled");
-    expect(renderUpload(storing)).toContain("Storing replicas...");
+    expect(renderUpload(storing)).toContain("Storing encrypted replicas…");
   });
 
   it("nodes view shows capacity and both health scores", () => {

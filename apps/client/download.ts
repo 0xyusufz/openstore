@@ -83,45 +83,85 @@ export async function downloadBuffer(
 
   const fileChunks: FileChunk[] = await Promise.all(
     checked.chunks.map(async (chunk) => {
-      const { bytes } = await getPieceFromNodes(chunk.pieceId, endpoints, {
-        timeoutMs: options.timeoutMs,
-      });
-      if (hashPieceId(bytes) !== chunk.pieceId) {
-        throw new Error(
-          `piece ${chunk.index} ("${chunk.pieceId}") hash mismatch: stored bytes do not match manifest`,
-        );
+      // Try every replica in order with FULL verification per replica.
+      // Transport failures fall through via getPieceFromNodes, while
+      // integrity failures (hash/envelope/decrypt/size) move to the
+      // next replica instead of failing the whole download. A corrupt
+      // piece is never accepted just because a request succeeded.
+      const problems: string[] = [];
+      for (const endpoint of endpoints) {
+        let bytes: Buffer;
+        try {
+          const got = await getPieceFromNodes(chunk.pieceId, [endpoint], {
+            timeoutMs: options.timeoutMs,
+          });
+          bytes = got.bytes;
+        } catch (err) {
+          problems.push(`${endpoint.id}: ${toErrorMessage(err)}`);
+          continue;
+        }
+        try {
+          const data = verifyChunkBytes(chunk, bytes, encryptionKey);
+          return {
+            version: CHUNKING_VERSION,
+            index: chunk.index,
+            total: checked.totalChunks,
+            data,
+            hash: chunk.plaintextHash,
+          };
+        } catch (err) {
+          problems.push(`${endpoint.id}: ${toErrorMessage(err)}`);
+          continue;
+        }
       }
-      const encrypted = decodeEncryptedPiece(bytes);
-      let plaintext: Uint8Array;
-      try {
-        plaintext = decryptChunk(encrypted, encryptionKey);
-      } catch (err) {
-        throw new Error(
-          `piece ${chunk.index} ("${chunk.pieceId}") decryption failed: ${toErrorMessage(err)}`,
-        );
-      }
-      const data = Buffer.from(plaintext);
-      if (data.length !== chunk.plaintextSize) {
-        throw new Error(
-          `piece ${chunk.index} ("${chunk.pieceId}") plaintext size mismatch: expected ${chunk.plaintextSize}, got ${data.length}`,
-        );
-      }
-      if (hashPieceId(data) !== chunk.plaintextHash) {
-        throw new Error(
-          `piece ${chunk.index} ("${chunk.pieceId}") plaintext hash mismatch: decrypted bytes do not match manifest`,
-        );
-      }
-      return {
-        version: CHUNKING_VERSION,
-        index: chunk.index,
-        total: checked.totalChunks,
-        data,
-        hash: chunk.plaintextHash,
-      };
+      throw new Error(
+        `piece ${chunk.index} ("${chunk.pieceId}") failed on all ${endpoints.length} replica(s): ${problems.join("; ")}`,
+      );
     }),
   );
 
   return reassembleChunks(fileChunks);
+}
+
+/**
+ * Verify fetched piece bytes against every manifest check for one chunk:
+ * piece ID/hash, envelope decoding, authenticated decryption, plaintext
+ * size, plaintext hash, and chunk index/order metadata.
+ *
+ * @throws With the same specific messages callers already rely on
+ *         (hash mismatch, decryption failed, size mismatch, ...).
+ */
+function verifyChunkBytes(
+  chunk: { index: number; pieceId: string; plaintextHash: string; plaintextSize: number },
+  bytes: Buffer,
+  encryptionKey: Uint8Array,
+): Buffer {
+  if (hashPieceId(bytes) !== chunk.pieceId) {
+    throw new Error(
+      `piece ${chunk.index} ("${chunk.pieceId}") hash mismatch: stored bytes do not match manifest`,
+    );
+  }
+  const encrypted = decodeEncryptedPiece(bytes);
+  let plaintext: Uint8Array;
+  try {
+    plaintext = decryptChunk(encrypted, encryptionKey);
+  } catch (err) {
+    throw new Error(
+      `piece ${chunk.index} ("${chunk.pieceId}") decryption failed: ${toErrorMessage(err)}`,
+    );
+  }
+  const data = Buffer.from(plaintext);
+  if (data.length !== chunk.plaintextSize) {
+    throw new Error(
+      `piece ${chunk.index} ("${chunk.pieceId}") plaintext size mismatch: expected ${chunk.plaintextSize}, got ${data.length}`,
+    );
+  }
+  if (hashPieceId(data) !== chunk.plaintextHash) {
+    throw new Error(
+      `piece ${chunk.index} ("${chunk.pieceId}") plaintext hash mismatch: decrypted bytes do not match manifest`,
+    );
+  }
+  return data;
 }
 
 function toErrorMessage(err: unknown): string {

@@ -144,10 +144,12 @@ button.danger:hover { background: var(--danger); color: #fff; }
 .file-label { display: inline-block; border: 1px solid var(--accent); border-radius: 8px; padding: 0.5rem 1rem; cursor: pointer; margin-bottom: 1rem; }
 .file-label input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .staged { margin: 1rem 0; }
-.progress { height: 8px; background: var(--panel-2); border-radius: 999px; overflow: hidden; margin: 0.75rem 0; }
+.progress { height: 8px; background: var(--panel-2); border-radius: 999px; overflow: hidden; margin: 0.75rem 0; position: relative; }
 .progress-fill { display: block; height: 100%; background: var(--accent); transition: width 0.3s ease; }
 .progress-fill.progress-good { background: var(--good); }
 .progress-fill.progress-bad { background: var(--bad); }
+.progress-fill.progress-active { width: 40%; animation: progress-indeterminate 1.1s infinite ease-in-out; }
+@keyframes progress-indeterminate { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
 .row { margin-top: 1rem; }
 
 ul { padding-left: 1.25rem; }

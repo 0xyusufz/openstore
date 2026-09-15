@@ -7,7 +7,10 @@ import {
   dashboardStats,
   dismissNotice,
   downloadComplete,
+  downloadDecrypting,
+  downloadDownloading,
   downloadFailed,
+  downloadLocating,
   identityCreationDismissed,
   identityCreationReceived,
   identityLocked,
@@ -15,11 +18,14 @@ import {
   navigate,
   parseHash,
   resetUploadDraft,
+  retryDownload,
+  retryUpload,
   selectFileForUpload,
   toggleRecoveryPhraseReveal,
   uploadComplete,
   uploadEncrypting,
   uploadFailed,
+  uploadPreparing,
 } from "./store.js";
 
 describe("web UI store", () => {
@@ -52,9 +58,12 @@ describe("web UI store", () => {
     expect(state.files).toHaveLength(fileCount);
 
     state = attemptUpload(state);
-    expect(state.upload.status).toBe("encrypting");
+    expect(state.upload.status).toBe("preparing");
     expect(state.files).toHaveLength(fileCount);
     expect(state.notice).toBeNull();
+
+    state = uploadPreparing(state);
+    expect(state.upload.status).toBe("encrypting");
 
     state = uploadEncrypting(state);
     expect(state.upload.status).toBe("storing");
@@ -75,9 +84,10 @@ describe("web UI store", () => {
     // upload; every other state is a no-op returning the same state.
     const ready = selectFileForUpload(createInitialState(), "dup.bin", 10);
     const active = attemptUpload(ready);
-    expect(active.upload.status).toBe("encrypting");
+    expect(active.upload.status).toBe("preparing");
     expect(attemptUpload(active)).toBe(active);
-    const storing = uploadEncrypting(active);
+    const encrypting = uploadPreparing(active);
+    const storing = uploadEncrypting(encrypting);
     expect(attemptUpload(storing)).toBe(storing);
     const done = uploadComplete(storing, { fileId: "x", filename: "dup.bin", size: 10, totalChunks: 1 });
     expect(attemptUpload(done)).toBe(done);
@@ -109,13 +119,21 @@ describe("web UI store", () => {
 
     state = attemptDownload(state, file.fileId);
     expect(state.files.map((f) => f.fileId)).toEqual(snapshot);
-    expect(state.download.status).toBe("active");
+    expect(state.download.status).toBe("locating");
     expect(state.download.fileId).toBe(file.fileId);
     expect(state.download.filename).toBe(file.filename);
     expect(state.notice).toBeNull();
 
-    // Duplicate attempts while active are a no-op (same state reference).
+    // Duplicate attempts while locating/downloading are a no-op
     expect(attemptDownload(state, file.fileId)).toBe(state);
+
+    // Locating → downloading → decrypting → verifying chain
+    state = downloadLocating(state);
+    expect(state.download.status).toBe("downloading");
+    state = downloadDownloading(state);
+    expect(state.download.status).toBe("decrypting");
+    state = downloadDecrypting(state);
+    expect(state.download.status).toBe("verifying");
 
     state = downloadComplete(state, { fileId: file.fileId, filename: file.filename, size: 12 });
     expect(state.download.status).toBe("complete");
@@ -123,11 +141,11 @@ describe("web UI store", () => {
 
     state = downloadFailed(state, "node unreachable");
     expect(state.download.status).toBe("failed");
-    expect(state.download.note).toMatch(/node unreachable/i);
+    expect(state.download.note).toMatch(/temporarily unavailable|node unreachable/i);
 
     // A finished flow accepts a fresh download; unknown IDs warn cleanly.
     const retry = attemptDownload(state, file.fileId);
-    expect(retry.download.status).toBe("active");
+    expect(retry.download.status).toBe("locating");
     expect(attemptDownload(state, "missing-id").notice).toMatch(/no file/i);
   });
 

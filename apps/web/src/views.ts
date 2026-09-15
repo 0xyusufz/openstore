@@ -51,19 +51,38 @@ export function renderDashboard(state: WebState, stats: DashboardStats): string 
 }
 
 export function renderFiles(state: WebState): string {
+  const isUploadActive =
+    state.upload.status === "preparing" ||
+    state.upload.status === "encrypting" ||
+    state.upload.status === "storing";
   const rows =
     state.files.length === 0
       ? `<tr><td colspan="5" class="empty">No files yet. Uploads land here once the backend is connected.</td></tr>`
       : state.files
           .map((f) => {
-            const downloading = state.download.status === "active" && state.download.fileId === f.fileId;
+            const isThisDownloading =
+              (state.download.status === "locating" ||
+                state.download.status === "downloading" ||
+                state.download.status === "decrypting" ||
+                state.download.status === "verifying" ||
+                state.download.status === "active") &&
+              state.download.fileId === f.fileId;
+            const isAnyDownloading =
+              state.download.status === "locating" ||
+              state.download.status === "downloading" ||
+              state.download.status === "decrypting" ||
+              state.download.status === "verifying" ||
+              state.download.status === "active";
+            const busy = isUploadActive || isAnyDownloading;
+            const retryThis = state.download.status === "failed" && state.download.retryable && state.download.fileId === f.fileId;
             return `<tr>
         <td data-label="Name">${esc(f.filename)}<br><span class="muted">${esc(truncateId(f.fileId, 18))}</span></td>
         <td data-label="Size">${esc(formatBytes(f.size))}</td>
         <td data-label="Chunks">${f.totalChunks}</td>
         <td data-label="Created">${esc(formatDateTime(f.createdAt ?? 0))}</td>
         <td data-label="Actions" class="actions">
-          <button type="button" data-action="download-attempt" data-file-id="${esc(f.fileId)}"${downloading ? " disabled" : ""}>${downloading ? "Downloading…" : "Download"}</button>
+          <button type="button" data-action="download-attempt" data-file-id="${esc(f.fileId)}"${isThisDownloading || busy ? " disabled" : ""}>${isThisDownloading ? esc(state.download.note ?? "Downloading…") : "Download"}</button>
+          ${retryThis ? `<button type="button" data-action="download-retry" data-file-id="${esc(f.fileId)}">Retry</button>` : ""}
           <button type="button" data-action="delete-attempt" data-file-id="${esc(f.fileId)}" class="danger">Delete</button>
         </td>
       </tr>`;
@@ -72,7 +91,7 @@ export function renderFiles(state: WebState): string {
   const downloadLine =
     state.download.status === "idle"
       ? ""
-      : `<p class="muted" role="status">${esc(state.download.note ?? "")}</p>`;
+      : `<p class="muted" role="status">${esc(state.download.note ?? "")}${state.download.status === "failed" && state.download.retryable ? " — retry available." : ""}</p>`;
   return `
   <section aria-label="My files">
     <h2>My Files</h2>
@@ -87,14 +106,21 @@ export function renderFiles(state: WebState): string {
 
 export function renderUpload(state: WebState): string {
   const draft = state.upload;
-  const progressPct =
-    draft.status === "encrypting" ? 25 :
-    draft.status === "storing" ? 60 :
-    draft.status === "complete" ? 100 :
-    draft.status === "failed" ? 100 : 0;
-  const progressLabel =
-    draft.status === "encrypting" ? "Encrypting..." :
-    draft.status === "storing" ? "Storing replicas..." :
+  const isPreparing = draft.status === "preparing";
+  const isEncrypting = draft.status === "encrypting";
+  const isStoring = draft.status === "storing";
+  const isUploadActive = isPreparing || isEncrypting || isStoring;
+  const isDownloadActive =
+    state.download.status === "locating" ||
+    state.download.status === "downloading" ||
+    state.download.status === "decrypting" ||
+    state.download.status === "verifying" ||
+    state.download.status === "active";
+  const anyActive = isUploadActive || isDownloadActive;
+  const stageLabel =
+    isPreparing ? "Preparing…" :
+    isEncrypting ? "Encrypting…" :
+    isStoring ? "Storing encrypted replicas…" :
     draft.status === "complete" ? "Complete" :
     draft.status === "failed" ? "Failed" : "";
   const staged =
@@ -104,14 +130,17 @@ export function renderUpload(state: WebState): string {
           <p><strong>${esc(draft.fileName)}</strong> (${esc(formatBytes(draft.fileSize))})</p>
           ${draft.note ? `<p class="muted">${esc(draft.note)}</p>` : ""}
           ${draft.status !== "ready" ? `
-          <div class="progress" role="progressbar" aria-valuenow="${progressPct}" aria-valuemin="0" aria-valuemax="100">
-            <span class="progress-fill${draft.status === "complete" ? " progress-good" : draft.status === "failed" ? " progress-bad" : ""}" style="width:${progressPct}%"></span>
+          <div class="progress" role="progressbar" aria-label="${esc(stageLabel)}">
+            <span class="progress-fill${draft.status === "complete" ? " progress-good" : draft.status === "failed" ? " progress-bad" : " progress-active"}"></span>
           </div>
-          <p class="muted">${esc(progressLabel)}</p>` : ""}
+          <p class="muted">${esc(stageLabel)}</p>` : ""}
           ${draft.status === "ready" ? `<p class="muted">Ready to upload.</p>` : ""}
           ${draft.status === "complete" ? `<p class="muted">File encrypted, chunked, and stored on nodes.</p>` : ""}
-          ${draft.status === "failed" ? `<p class="muted">Upload failed. Check that storage nodes are running.</p>` : ""}
+          ${draft.status === "failed" ? `<p class="muted">${esc(draft.note ?? "Upload failed.")}${draft.retryable ? " You can retry." : " Check that storage nodes are running."}</p>` : ""}
         </div>`;
+  // Conflicting actions stay disabled while ANY transfer is active:
+  // an upload must not start during a download and vice versa.
+  const uploadDisabled = draft.status === "idle" || isUploadActive || isDownloadActive;
   return `
   <section aria-label="Upload">
     <h2>Upload</h2>
@@ -122,7 +151,9 @@ export function renderUpload(state: WebState): string {
       </label>
       ${staged}
       <div class="row">
-        <button type="button" data-action="upload-attempt" ${draft.status === "idle" || draft.status === "encrypting" || draft.status === "storing" ? "disabled" : ""}>Upload</button>
+        <button type="button" data-action="upload-attempt" ${uploadDisabled ? "disabled" : ""}>Upload</button>
+        ${draft.status === "failed" && draft.retryable ? `<button type="button" data-action="upload-retry">Retry</button>` : ""}
+        ${draft.status === "failed" || draft.status === "complete" ? `<button type="button" data-action="upload-reset">Clear</button>` : ""}
       </div>
     </div>
   </section>`;

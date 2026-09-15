@@ -588,13 +588,13 @@ describe("real web file upload (OPENSTORE-026, hardened OPENSTORE-027)", () => {
   it("18. upload progress reaches correct terminal state", async () => {
     const { uploadComplete, uploadFailed, createInitialState } = await import("./src/store.js");
     let state = createInitialState();
-    state = { ...state, upload: { status: "storing", fileName: "test.bin", fileSize: 100, note: null } };
+    state = { ...state, upload: { status: "storing", fileName: "test.bin", fileSize: 100, note: null, retryable: false } };
     state = uploadComplete(state, { fileId: "abc", filename: "test.bin", size: 100, totalChunks: 1 });
     expect(state.upload.status).toBe("complete");
     expect(state.upload.note).toContain("test.bin");
     expect(state.upload.note).toContain("1 chunk");
     state = createInitialState();
-    state = { ...state, upload: { status: "storing", fileName: "fail.bin", fileSize: 50, note: null } };
+    state = { ...state, upload: { status: "storing", fileName: "fail.bin", fileSize: 50, note: null, retryable: false } };
     state = uploadFailed(state, "insufficient nodes");
     expect(state.upload.status).toBe("failed");
     expect(state.upload.note).toMatch(/insufficient nodes/);

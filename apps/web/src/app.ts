@@ -14,19 +14,27 @@ import {
   dashboardStats,
   dismissNotice,
   downloadComplete,
+  downloadDecrypting,
+  downloadDownloading,
   downloadFailed,
+  downloadLocating,
   identityCreationDismissed,
   identityCreationReceived,
   identityLocked,
   identityRecovered,
   identityUnlocked,
+  isTransferActive,
   navigate,
   parseHash,
+  retryDownload,
+  retryUpload,
   selectFileForUpload,
   toggleRecoveryPhraseReveal,
   uploadComplete,
   uploadEncrypting,
   uploadFailed,
+  uploadPreparing,
+  resetUploadDraft,
 } from "./store.js";
 import { applyBackendSnapshot } from "./store.js";
 import type { BackendSnapshot } from "../backend.js";
@@ -384,40 +392,84 @@ export function startApp(): void {
       const isPassword = input.type === "password";
       input.type = isPassword ? "text" : "password";
       actionEl.textContent = isPassword ? "Hide" : "Show";
-    } else if (action === "upload-attempt") {
-      if (!stagedFile || state.upload.status !== "ready") return;
+    } else if (action === "upload-attempt" || action === "upload-retry") {
+      const isRetry = action === "upload-retry";
+      if (isRetry) {
+        if (state.upload.status !== "failed" || !state.upload.retryable || !stagedFile) return;
+        state = retryUpload(state);
+        if (state.upload.status !== "ready") return;
+        render(state);
+      } else {
+        if (!stagedFile || state.upload.status !== "ready") return;
+        if (isTransferActive(state)) return;
+      }
+      // attemptUpload is a no-op (same reference) when idle, non-ready,
+      // or when any transfer is already active — never start a duplicate.
+      const beforeUpload = state;
       state = attemptUpload(state);
+      if (state === beforeUpload || state.upload.status !== "preparing") return;
       render(state);
       void (async () => {
-        try {
+        let uploadController: AbortController | null = new AbortController();
+        const doUploadOnce = async (): Promise<{ ok: boolean; json: Record<string, unknown>; status: number }> => {
+          state = uploadPreparing(state);
+          render(state);
+          await new Promise((r) => setTimeout(r, 50));
           state = uploadEncrypting(state);
           render(state);
           const form = new FormData();
-          form.append("file", stagedFile, stagedFile.name);
-          const res = await fetch("/api/files/upload", { method: "POST", body: form });
+          const fileToSend = stagedFile as File;
+          form.append("file", fileToSend, fileToSend.name);
+          const res = await fetch("/api/files/upload", { method: "POST", body: form, signal: uploadController!.signal });
           let json: Record<string, unknown> = {};
           try { json = (await res.json()) as Record<string, unknown>; } catch {}
-          if (res.ok && typeof json["fileId"] === "string") {
+          return { ok: res.ok, json, status: res.status };
+        };
+        try {
+          let result = await doUploadOnce();
+          // One automatic retry for transient failures (network, 5xx, timeout)
+          if (!result.ok) {
+            const errText = typeof result.json["error"] === "string" ? (result.json["error"] as string) : `status ${result.status}`;
+            const lower = errText.toLowerCase();
+            const isTransient = /timeout|network|econn|fetch failed|aborted|interrupted|503|502|504|500|temporarily unavailable/i.test(lower) && !/insufficient storage|quota|draining/i.test(lower);
+            if (isTransient) {
+              await new Promise((r) => setTimeout(r, 300));
+              // Back to preparing for the retry so progress is truthful
+              state = { ...state, upload: { ...state.upload, status: "preparing", note: "Retrying upload…" } };
+              render(state);
+              result = await doUploadOnce();
+            }
+          }
+          if (result.ok && typeof result.json["fileId"] === "string") {
             state = uploadComplete(state, {
-              fileId: json["fileId"] as string,
-              filename: json["filename"] as string,
-              size: json["size"] as number,
-              totalChunks: json["totalChunks"] as number,
+              fileId: result.json["fileId"] as string,
+              filename: result.json["filename"] as string,
+              size: result.json["size"] as number,
+              totalChunks: result.json["totalChunks"] as number,
             });
             stagedFile = null;
+            uploadController = null;
             const refreshed = await loadLiveData(state);
             state = syncFromHash(refreshed);
           } else {
-            const errText = typeof json["error"] === "string" ? (json["error"] as string) : `status ${res.status}`;
+            const errText = typeof result.json["error"] === "string" ? (result.json["error"] as string) : `status ${result.status}`;
             state = uploadFailed(state, errText);
-            stagedFile = null;
+            if (!state.upload.retryable) stagedFile = null;
+            uploadController = null;
           }
         } catch (err) {
-          state = uploadFailed(state, err instanceof Error ? err.message : "network error");
-          stagedFile = null;
+          const msg = err instanceof Error ? err.message : "network error";
+          const isAbort = err instanceof DOMException && err.name === "AbortError";
+          state = uploadFailed(state, isAbort ? "Upload interrupted. Please try again." : msg);
+          if (!state.upload.retryable && !(isAbort)) stagedFile = null;
+          uploadController = null;
         }
         render(state);
       })();
+    } else if (action === "upload-reset") {
+      stagedFile = null;
+      state = resetUploadDraft(state);
+      render(state);
     } else if (action === "provider-start" || action === "provider-stop" || action === "provider-release") {
       if (action === "provider-release") {
         const confirmed = typeof confirm === "function"
@@ -449,28 +501,95 @@ export function startApp(): void {
           render(state);
         }
       })();
-    } else if (action === "download-attempt") {
+    } else if (action === "download-attempt" || action === "download-retry") {
       const fileId = actionEl.getAttribute("data-file-id") ?? "";
-      state = attemptDownload(state, fileId);
-      render(state);
-      // Missing file (or a download already running): nothing to fetch.
-      if (state.download.status !== "active" || state.download.fileId !== fileId) return;
+      const isRetry = action === "download-retry";
+      // attemptDownload/retryDownload return the same reference when
+      // blocked (another transfer active, unknown file, non-retryable) —
+      // never start a duplicate fetch.
+      const beforeDownload = state;
+      if (isRetry) {
+        state = retryDownload(state);
+        if (state === beforeDownload) return;
+        if (state.download.status !== "locating" || state.download.fileId !== fileId) return;
+        render(state);
+      } else {
+        state = attemptDownload(state, fileId);
+        if (state === beforeDownload) return;
+        render(state);
+        if (
+          state.download.status !== "locating" &&
+          state.download.status !== "active" &&
+          state.download.fileId !== fileId
+        )
+          return;
+        if (state.download.status === "active") {
+          // Backward compat: treat active as locating for new flow
+          state = { ...state, download: { ...state.download, status: "locating" as const } };
+          render(state);
+        }
+      }
+      // Prevent concurrent transfers
+      if (
+        state.upload.status === "preparing" ||
+        state.upload.status === "encrypting" ||
+        state.upload.status === "storing"
+      )
+        return;
       const activeFileId = fileId;
       void (async () => {
-        try {
-          const res = await fetch(`/api/files/${encodeURIComponent(activeFileId)}/download`);
+        let downloadController: AbortController | null = new AbortController();
+        const doDownloadOnce = async (): Promise<{ ok: boolean; blob?: Blob; error?: string }> => {
+          // Locating (manifest + key lookup) happens server-side before bytes stream;
+          // downloading is the actual piece fetch. Keep the truthful stage order:
+          // locating → downloading → decrypting → verifying
+          if (state.download.status === "locating") {
+            state = downloadLocating(state);
+            render(state);
+          }
+          const res = await fetch(`/api/files/${encodeURIComponent(activeFileId)}/download`, {
+            signal: downloadController!.signal,
+          });
           if (!res.ok) {
             let errText = `status ${res.status}`;
             try {
               const errJson = (await res.json()) as Record<string, unknown>;
               if (typeof errJson["error"] === "string") errText = errJson["error"] as string;
             } catch {}
-            state = downloadFailed(state, errText);
+            return { ok: false, error: errText };
+          }
+          const blob = await res.blob();
+          // Server already verified piece hashes and decrypted before sending;
+          // frontend shows decrypting→verifying briefly as truthful stages
+          // before handing bytes to the browser.
+          state = downloadDownloading(state);
+          render(state);
+          await new Promise((r) => setTimeout(r, 30));
+          state = downloadDecrypting(state);
+          render(state);
+          await new Promise((r) => setTimeout(r, 30));
+          return { ok: true, blob };
+        };
+        try {
+          let result = await doDownloadOnce();
+          if (!result.ok) {
+            const lower = (result.error ?? "").toLowerCase();
+            const isTransient = /timeout|network|econn|fetch failed|aborted|interrupted|503|502|504|500|temporarily unavailable|unavailable from/i.test(lower) && !/corrupt|hash mismatch|size mismatch|decryption failed|wrong key|invalid file id|not found|key unavailable/i.test(lower);
+            if (isTransient) {
+              await new Promise((r) => setTimeout(r, 300));
+              state = { ...state, download: { ...state.download, status: "locating", note: "Retrying download…" } };
+              render(state);
+              result = await doDownloadOnce();
+            }
+          }
+          if (!result.ok || !result.blob) {
+            state = downloadFailed(state, result.error ?? "download failed");
+            downloadController = null;
             render(state);
             return;
           }
-          const blob = await res.blob();
-          const filename = state.download.status === "active" ? state.download.filename : "download";
+          const blob = result.blob;
+          const filename = state.download.filename || "download";
           const url = URL.createObjectURL(blob);
           try {
             const anchor = document.createElement("a");
@@ -480,13 +599,14 @@ export function startApp(): void {
             anchor.click();
             anchor.remove();
           } finally {
-            // The bytes now belong to the browser download manager;
-            // release the temporary object URL promptly.
             setTimeout(() => URL.revokeObjectURL(url), 5000);
           }
           state = downloadComplete(state, { fileId: activeFileId, filename, size: blob.size });
+          downloadController = null;
         } catch (err) {
-          state = downloadFailed(state, err instanceof Error ? err.message : "network error");
+          const isAbort = err instanceof DOMException && err.name === "AbortError";
+          state = downloadFailed(state, isAbort ? "Download interrupted. Please try again." : err instanceof Error ? err.message : "network error");
+          downloadController = null;
         }
         render(state);
       })();
