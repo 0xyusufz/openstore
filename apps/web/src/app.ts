@@ -22,6 +22,7 @@ import {
   parseHash,
   resetUploadDraft,
   selectFileForUpload,
+  toggleRecoveryPhraseReveal,
   uploadComplete,
   uploadEncrypting,
   uploadFailed,
@@ -177,6 +178,12 @@ export function startApp(): void {
             render(state);
             return;
           }
+          const invalidWord = words.find((w) => !/^[a-z]+$/.test(w));
+          if (invalidWord) {
+            state = { ...state, notice: `Invalid recovery word: "${invalidWord}". Words must be lowercase letters only.` };
+            render(state);
+            return;
+          }
           const replaceEl = document.getElementById("recover-confirm-replace");
           const confirmReplace = replaceEl instanceof HTMLInputElement && replaceEl.checked;
           const { status, json } = await postIdentity("/api/identity/recover", {
@@ -244,6 +251,38 @@ export function startApp(): void {
         state = identityLocked(state);
         render(state);
       })();
+    } else if (action === "reveal-phrase") {
+      state = toggleRecoveryPhraseReveal(state);
+      render(state);
+    } else if (action === "copy-phrase") {
+      if (state.identityCreation) {
+        const text = state.identityCreation.recoveryPhrase.join(" ");
+        void navigator.clipboard.writeText(text).then(() => {
+          actionEl.textContent = "Copied!";
+          setTimeout(() => {
+            actionEl.textContent = "Copy phrase";
+          }, 1500);
+        }).catch(() => {
+          // Clipboard API unavailable (e.g. non-HTTPS) — ignore silently
+        });
+      }
+    } else if (action === "toggle-word-reveal") {
+      const slot = actionEl.getAttribute("data-word-slot");
+      if (!slot) return;
+      const input = document.getElementById(`recovery-word-${slot}`) as HTMLInputElement | null;
+      if (!input) return;
+      const isPassword = input.type === "password";
+      input.type = isPassword ? "text" : "password";
+      actionEl.textContent = isPassword ? "Hide" : "Show";
+      actionEl.setAttribute("aria-label", isPassword ? `Hide word ${slot}` : `Show word ${slot}`);
+    } else if (action === "toggle-password") {
+      const targetId = actionEl.getAttribute("data-target");
+      if (!targetId) return;
+      const input = document.getElementById(targetId) as HTMLInputElement | null;
+      if (!input) return;
+      const isPassword = input.type === "password";
+      input.type = isPassword ? "text" : "password";
+      actionEl.textContent = isPassword ? "Hide" : "Show";
     } else if (action === "upload-attempt") {
       if (!stagedFile || state.upload.status !== "ready") return;
       state = attemptUpload(state);
@@ -295,6 +334,41 @@ export function startApp(): void {
         render(state);
       }
     }
+  });
+
+  document.addEventListener("paste", (event) => {
+    const target = event.target as HTMLInputElement | null;
+    if (!target || !target.matches("[data-word-input]")) return;
+    const pasted = event.clipboardData?.getData("text") ?? "";
+    if (!pasted) return;
+    const words = pasted
+      .trim()
+      .split(/\s+/)
+      .map((w) => w.toLowerCase())
+      .filter(Boolean);
+    const errorEl = document.getElementById("phrase-validation-error");
+    if (words.length > 12) {
+      if (errorEl) {
+        errorEl.textContent = `Too many words (${words.length}). Recovery phrases must be exactly 12 words.`;
+        errorEl.hidden = false;
+      }
+      event.preventDefault();
+      return;
+    }
+    if (errorEl) {
+      errorEl.textContent = "";
+      errorEl.hidden = true;
+    }
+    event.preventDefault();
+    for (let i = 0; i < 12; i++) {
+      const input = document.getElementById(`recovery-word-${i + 1}`) as HTMLInputElement | null;
+      if (input) {
+        input.value = i < words.length ? (words[i] ?? "") : "";
+      }
+    }
+    const nextEmpty = words.length < 12 ? words.length + 1 : 12;
+    const focusTarget = document.getElementById(`recovery-word-${nextEmpty}`);
+    if (focusTarget) focusTarget.focus();
   });
 }
 

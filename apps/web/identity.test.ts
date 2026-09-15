@@ -459,4 +459,99 @@ describe("frontend identity & local unlock (OPENSTORE-025)", () => {
       await web.close();
     }
   });
+
+  it("14. create -> recover -> same public key", async () => {
+    const { dir, path } = await tempKeystorePath();
+    const web = createWebServer({ keystorePath: path });
+    const port = await web.listen(0, "127.0.0.1");
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      const pw1 = randomTestInput();
+      const created = await postJson(base, "/api/identity/create", { password: pw1 });
+      expect(created.status).toBe(200);
+      const phrase = created.json["recoveryPhrase"] as string[];
+      const originalPubKey = created.json["publicKey"];
+
+      // Lock and recover with new password
+      await postJson(base, "/api/identity/lock", {});
+      const pw2 = randomTestInput();
+      const recovered = await postJson(base, "/api/identity/recover", {
+        phrase,
+        password: pw2,
+        confirmReplace: true,
+      });
+      expect(recovered.status).toBe(200);
+      expect(recovered.json["publicKey"]).toBe(originalPubKey);
+
+      // New password unlocks
+      const unlocked = await postJson(base, "/api/identity/unlock", { password: pw2 });
+      expect(unlocked.status).toBe(200);
+      expect(unlocked.json["publicKey"]).toBe(originalPubKey);
+    } finally {
+      await web.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("15. forgot password -> recover with phrase -> new password unlocks", async () => {
+    const { dir, path } = await tempKeystorePath();
+    const web = createWebServer({ keystorePath: path });
+    const port = await web.listen(0, "127.0.0.1");
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      const id = createIdentity();
+      const phrase = id.recoveryPhrase;
+      const oldPw = randomTestInput();
+      const newPw = randomTestInput();
+
+      // Create with old password, then "forget" it
+      await postJson(base, "/api/identity/create", { password: oldPw });
+      await postJson(base, "/api/identity/lock", {});
+
+      // Recover with phrase + new password
+      const recovered = await postJson(base, "/api/identity/recover", {
+        phrase,
+        password: newPw,
+        confirmReplace: true,
+      });
+      expect(recovered.status).toBe(200);
+      expect(recovered.json["publicKey"]).toBe(id.publicKey.toString("base64"));
+
+      // Old password no longer works
+      const oldPwAttempt = await postJson(base, "/api/identity/unlock", { password: oldPw });
+      expect(oldPwAttempt.status).toBe(401);
+
+      // New password works
+      const newPwAttempt = await postJson(base, "/api/identity/unlock", { password: newPw });
+      expect(newPwAttempt.status).toBe(200);
+      expect(newPwAttempt.json["publicKey"]).toBe(id.publicKey.toString("base64"));
+    } finally {
+      await web.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("16. recovery phrase never persists in URL or storage after dismiss", async () => {
+    const { dir, path } = await tempKeystorePath();
+    const web = createWebServer({ keystorePath: path });
+    const port = await web.listen(0, "127.0.0.1");
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      const created = await postJson(base, "/api/identity/create", { password: randomTestInput() });
+      const phrase = (created.json["recoveryPhrase"] as string[]).join(" ");
+
+      // After any subsequent API call, phrase never appears
+      await postJson(base, "/api/identity/lock", {});
+      const afterLock = await (await fetch(`${base}/api/identity`)).text();
+      expect(afterLock).not.toContain(phrase);
+
+      const unlock = await postJson(base, "/api/identity/unlock", { password: randomTestInput() });
+      expect(unlock.text).not.toContain(phrase);
+      const afterUnlock = await (await fetch(`${base}/api/identity`)).text();
+      expect(afterUnlock).not.toContain(phrase);
+    } finally {
+      await web.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

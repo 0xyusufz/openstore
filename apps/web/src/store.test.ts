@@ -14,6 +14,7 @@ import {
   parseHash,
   resetUploadDraft,
   selectFileForUpload,
+  toggleRecoveryPhraseReveal,
   uploadComplete,
   uploadEncrypting,
   uploadFailed,
@@ -129,5 +130,31 @@ describe("web UI store", () => {
     expect(locked.identity.publicKey).toBe("cHVi");
 
     expect(() => identityUnlocked(createInitialState(), "")).toThrow(/publicKey/i);
+  });
+
+  it("recovery phrase reveal toggles correctly", () => {
+    const withCreation = identityCreationReceived(createInitialState(), {
+      publicKey: "cHVi",
+      recoveryPhrase: ["alpha", "bravo"],
+    });
+    expect(withCreation.recoveryPhraseRevealed).toBe(false);
+
+    const revealed = toggleRecoveryPhraseReveal(withCreation);
+    expect(revealed.recoveryPhraseRevealed).toBe(true);
+
+    const maskedAgain = toggleRecoveryPhraseReveal(revealed);
+    expect(maskedAgain.recoveryPhraseRevealed).toBe(false);
+  });
+
+  it("identityCreationDismissed clears reveal flag", () => {
+    const withCreation = identityCreationReceived(createInitialState(), {
+      publicKey: "cHVi",
+      recoveryPhrase: ["alpha", "bravo"],
+    });
+    const revealed = toggleRecoveryPhraseReveal(withCreation);
+    expect(revealed.recoveryPhraseRevealed).toBe(true);
+    const dismissed = identityCreationDismissed(revealed);
+    expect(dismissed.identityCreation).toBeNull();
+    expect(dismissed.recoveryPhraseRevealed).toBe(false);
   });
 });

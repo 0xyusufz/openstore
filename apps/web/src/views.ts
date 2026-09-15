@@ -146,8 +146,12 @@ export function renderNodes(state: WebState): string {
 
 export function renderSettings(state: WebState): string {
   if (state.identityCreation) {
+    const revealed = state.recoveryPhraseRevealed;
     const words = state.identityCreation.recoveryPhrase
-      .map((word, index) => `<li><span class="word-index">${index + 1}</span> ${esc(word)}</li>`)
+      .map(
+        (word, index) =>
+          `<li><span class="word-index">${index + 1}</span> <span class="${revealed ? "word-revealed" : "word-masked"}">${revealed ? esc(word) : "••••••••"}</span></li>`,
+      )
       .join("");
     return `
   <section aria-label="Settings">
@@ -155,9 +159,14 @@ export function renderSettings(state: WebState): string {
     <div class="card">
       <h3>Back up your recovery phrase</h3>
       <p class="warning" role="alert"><strong>Write these ${state.identityCreation.recoveryPhrase.length} words down now.</strong>
+      If you lose both your password AND this phrase, your identity is permanently unrecoverable.
       This is the only time they are shown. They are never stored on disk and cannot be recovered if lost.
       Never share them with anyone.</p>
       <ol class="phrase">${words}</ol>
+      <div class="phrase-actions">
+        <button type="button" data-action="reveal-phrase" class="btn-copy">${revealed ? "Hide phrase" : "Reveal phrase"}</button>
+        <button type="button" data-action="copy-phrase" class="btn-copy">Copy phrase</button>
+      </div>
       <p class="muted">Public key: ${esc(truncateId(state.identityCreation.publicKey, 20))}</p>
       <div class="row"><button type="button" data-action="creation-dismiss">I have backed it up</button></div>
     </div>
@@ -175,27 +184,40 @@ export function renderSettings(state: WebState): string {
   const form = !state.identity.configured
     ? `<form id="identity-create-form" autocomplete="off">
         <h3>Create identity (first run)</h3>
-        <div class="form-row"><label>Password <input id="create-password" name="password" type="password" autocomplete="new-password" required minlength="1" /></label></div>
-        <div class="form-row"><label>Confirm password <input id="create-confirm" name="confirm" type="password" autocomplete="new-password" required minlength="1" /></label></div>
+        <div class="form-row"><label>Password
+          <div class="input-wrap"><input id="create-password" name="password" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="create-password" class="btn-reveal">Show</button></div>
+        </label></div>
+        <div class="form-row"><label>Confirm password
+          <div class="input-wrap"><input id="create-confirm" name="confirm" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="create-confirm" class="btn-reveal">Show</button></div>
+        </label></div>
         <div class="row"><button type="submit">Create identity</button></div>
       </form>`
     : !state.identity.unlocked
       ? `<form id="identity-unlock-form" autocomplete="off">
           <h3>Unlock keystore</h3>
-          <div class="form-row"><label>Password <input id="unlock-password" name="password" type="password" autocomplete="current-password" required minlength="1" /></label></div>
+          <div class="form-row"><label>Password
+            <div class="input-wrap"><input id="unlock-password" name="password" type="password" autocomplete="current-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="unlock-password" class="btn-reveal">Show</button></div>
+          </label></div>
           <div class="row"><button type="submit">Unlock</button></div>
         </form>`
       : `<div class="row"><button type="button" data-action="identity-lock">Lock identity</button></div>`;
   const wordInputs = Array.from({ length: 12 }, (_, i) => {
     const n = i + 1;
-    return `<div class="form-row phrase-input"><label>${n} <input id="recovery-word-${n}" name="word${n}" type="text" autocomplete="off" required minlength="1" placeholder="word ${n}" /></label></div>`;
+    return `<div class="form-row phrase-input"><label>${n}
+      <div class="input-wrap"><input id="recovery-word-${n}" name="word${n}" type="password" autocomplete="off" required minlength="1" placeholder="word ${n}" data-word-input="${n}" /><button type="button" data-action="toggle-word-reveal" data-word-slot="${n}" class="btn-reveal">Show</button></div>
+    </label></div>`;
   }).join("");
   const recoveryForm = `<form id="identity-recover-form" autocomplete="off">
         <h3>Recover from phrase</h3>
-        <p class="muted">Enter your 12-word recovery phrase to restore an existing identity.</p>
+        <p class="muted">Enter your 12-word recovery phrase. You can paste all words at once into any field.</p>
+        <div id="phrase-validation-error" class="validation-error" hidden></div>
         <div class="phrase-inputs">${wordInputs}</div>
-        <div class="form-row"><label>New password <input id="recover-password" name="password" type="password" autocomplete="new-password" required minlength="1" /></label></div>
-        <div class="form-row"><label>Confirm password <input id="recover-confirm" name="confirm" type="password" autocomplete="new-password" required minlength="1" /></label></div>
+        <div class="form-row"><label>New password
+          <div class="input-wrap"><input id="recover-password" name="password" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="recover-password" class="btn-reveal">Show</button></div>
+        </label></div>
+        <div class="form-row"><label>Confirm password
+          <div class="input-wrap"><input id="recover-confirm" name="confirm" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="recover-confirm" class="btn-reveal">Show</button></div>
+        </label></div>
         ${state.identity.configured ? `<div class="form-row"><label class="checkbox-label"><input id="recover-confirm-replace" type="checkbox" /> Replace existing keystore</label></div>` : ""}
         <div class="row"><button type="submit">Recover identity</button></div>
       </form>`;
@@ -209,6 +231,7 @@ export function renderSettings(state: WebState): string {
       ${publicKeyLine}
       ${form}
       <p class="muted">Passwords are asked only when needed and never stored — not in this page, not in the backend, nowhere.
+      If you lose both your password and recovery phrase, your identity is permanently unrecoverable.
       Identity management requires a server started with identity support; otherwise these actions report an error.</p>
     </div>
     <div class="card">
@@ -219,7 +242,9 @@ export function renderSettings(state: WebState): string {
       <ul>
         <li>Client-side encryption stays in the audited library packages.</li>
         <li>This dashboard renders metadata only — never file contents, private keys, or encryption keys.</li>
-        <li>Downloads and deletes are disabled until their backend integrations land.</li>
+        <li>Recovery phrases are shown once during creation, then immediately cleared from memory.</li>
+        <li>Passwords are never stored — not in this page, not in the backend, nowhere.</li>
+        <li>If you lose both your password and recovery phrase, your identity is permanently unrecoverable.</li>
       </ul>
     </div>
   </section>`;

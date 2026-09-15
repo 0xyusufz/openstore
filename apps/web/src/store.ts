@@ -43,6 +43,8 @@ export interface WebState {
    * dismiss. No other private material ever enters UI state.
    */
   identityCreation: IdentityCreation | null;
+  /** Whether the recovery phrase in the creation backup is revealed. */
+  recoveryPhraseRevealed: boolean;
   upload: UploadDraft;
   notice: string | null;
   demoMode: boolean;
@@ -55,6 +57,7 @@ export function createInitialState(): WebState {
     nodes: MOCK_NODES.map((n) => ({ ...n })),
     identity: { ...MOCK_IDENTITY },
     identityCreation: null,
+    recoveryPhraseRevealed: false,
     upload: { status: "idle", fileName: "", fileSize: 0, note: null },
     notice: null,
     demoMode: DEMO_MODE,
@@ -203,7 +206,12 @@ export function identityCreationReceived(
 
 /** Drop the displayed recovery phrase (backup confirmed by the user). */
 export function identityCreationDismissed(state: WebState): WebState {
-  return { ...state, identityCreation: null };
+  return { ...state, identityCreation: null, recoveryPhraseRevealed: false };
+}
+
+/** Toggle visibility of the recovery phrase in the creation backup display. */
+export function toggleRecoveryPhraseReveal(state: WebState): WebState {
+  return { ...state, recoveryPhraseRevealed: !state.recoveryPhraseRevealed };
 }
 
 /** Reflect a successful keystore unlock (public metadata only). */

@@ -6,6 +6,7 @@ import {
   identityLocked,
   identityUnlocked,
   navigate,
+  toggleRecoveryPhraseReveal,
 } from "./store.js";
 import { renderApp, renderDashboard, renderFiles, renderNodes, renderSettings, renderUpload } from "./views.js";
 
@@ -97,32 +98,55 @@ describe("web views", () => {
   });
 
   it("settings shows creation, unlock, and lock states safely", () => {
-    // Unconfigured: creation form, empty password fields
+    // Unconfigured: creation form, password fields with show/hide toggles
     const fresh = renderSettings(createInitialState());
     expect(fresh).toContain('id="identity-create-form"');
     expect(fresh).toContain('type="password"');
     expect(fresh).not.toContain("value=");
+    expect(fresh).toContain('data-action="toggle-password"');
 
-    // Creation result: phrase words + strong warning + dismiss
+    // Creation result: phrase masked by default, warning, reveal/copy buttons
     const created = identityCreationReceived(createInitialState(), {
       publicKey: "cHVi",
       recoveryPhrase: ["alpha", "bravo"],
     });
     const creationHtml = renderSettings(created);
-    expect(creationHtml).toContain("alpha");
-    expect(creationHtml).toContain("bravo");
+    expect(creationHtml).toContain("••••••••");
+    expect(creationHtml).not.toContain(">alpha<");
+    expect(creationHtml).not.toContain(">bravo<");
     expect(creationHtml).toMatch(/only time|back up/i);
+    expect(creationHtml).toContain('data-action="reveal-phrase"');
+    expect(creationHtml).toContain('data-action="copy-phrase"');
     expect(creationHtml).toContain('data-action="creation-dismiss"');
     expect(creationHtml).not.toContain("privateKey");
 
-    // Locked: unlock form
+    // When revealed, words appear
+    const revealedState = toggleRecoveryPhraseReveal(created);
+    expect(revealedState.recoveryPhraseRevealed).toBe(true);
+    const revealedHtml = renderSettings(revealedState);
+    expect(revealedHtml).toContain(">alpha<");
+    expect(revealedHtml).toContain(">bravo<");
+    expect(revealedHtml).toContain("Hide phrase");
+
+    // Locked: unlock form with password toggle
     const locked = identityLocked(identityUnlocked(createInitialState(), "cHVi"));
     const lockedHtml = renderSettings(locked);
     expect(lockedHtml).toContain('id="identity-unlock-form"');
+    expect(lockedHtml).toContain('data-action="toggle-password"');
 
     // Unlocked: lock button, truncated public key
     const unlockedHtml = renderSettings(identityUnlocked(createInitialState(), "cHVi"));
     expect(unlockedHtml).toContain('data-action="identity-lock"');
     expect(unlockedHtml).toContain("cHVi");
+  });
+
+  it("recovery form has masked word inputs with reveal toggles and paste hint", () => {
+    const html = renderSettings(createInitialState());
+    expect(html).toContain('id="identity-recover-form"');
+    expect(html).toContain('data-word-input="1"');
+    expect(html).toContain('data-action="toggle-word-reveal"');
+    expect(html).toContain('type="password"');
+    expect(html).toContain("paste all words at once");
+    expect(html).toContain('id="phrase-validation-error"');
   });
 });

@@ -177,6 +177,49 @@ li { margin-bottom: 0.4rem; }
   font-variant-numeric: tabular-nums;
 }
 .word-index { color: var(--muted); margin-right: 0.4rem; font-size: 0.85rem; }
+.word-masked { letter-spacing: 0.15em; color: var(--muted); font-family: monospace; }
+.word-revealed { font-weight: 600; }
+
+.input-wrap {
+  position: relative;
+  display: flex;
+  max-width: 22rem;
+  margin-top: 0.3rem;
+}
+.input-wrap input {
+  flex: 1;
+  padding-right: 3rem;
+  min-width: 0;
+}
+.btn-reveal {
+  position: absolute;
+  right: 0.3rem;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 0.3rem 0.4rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-reveal:hover { color: var(--text); }
+
+.btn-copy { font-size: 0.85rem; }
+
+.phrase-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+  flex-wrap: wrap;
+}
+
+.validation-error {
+  color: var(--bad);
+  font-size: 0.9rem;
+  margin: 0.5rem 0;
+}
 
 .form-row { margin: 0.6rem 0; }
 .form-row label { display: block; }
@@ -202,6 +245,7 @@ li { margin-bottom: 0.4rem; }
 }
 .phrase-input { margin: 0; }
 .phrase-input label { font-size: 0.85rem; }
+.phrase-input .input-wrap { max-width: 100%; }
 .checkbox-label { display: inline-flex; align-items: center; gap: 0.5rem; cursor: pointer; }
 
 
@@ -215,4 +259,6 @@ li { margin-bottom: 0.4rem; }
   main { padding: 1rem 0.75rem 2.5rem; }
   .table th:nth-child(4), .table td:nth-child(4) { white-space: nowrap; }
   .phrase { grid-template-columns: repeat(2, 1fr); }
+  .phrase-inputs { grid-template-columns: repeat(2, 1fr); }
+  .input-wrap { max-width: 100%; }
 }
