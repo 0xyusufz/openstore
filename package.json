@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx",
+    "openstore": "tsx apps/client/cli.ts",
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
