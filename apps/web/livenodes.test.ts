@@ -18,7 +18,7 @@ import { createStorageNode } from "../storage-node/index.js";
 import type { StorageNode } from "../storage-node/index.js";
 import { createWebBackend } from "./backend.js";
 import { createWebServer } from "./server.js";
-import { parseCsvList, parseStorageCapacityBytes, parseStoragePorts } from "./server.js";
+import { parseCsvList, parseStorageCapacityBytes, parseStoragePorts, shouldEnableRegistry } from "./server.js";
 
 interface LiveNode {
   node: StorageNode;
@@ -219,5 +219,15 @@ describe("live node integration", () => {
     expect(() => parseStorageCapacityBytes("0")).toThrow(/invalid/i);
     expect(() => parseStorageCapacityBytes("-5")).toThrow(/invalid/i);
     expect(() => parseStorageCapacityBytes("big")).toThrow(/invalid/i);
+  });
+
+  it("7. live registry is explicit: storage dirs or opt-in flag", () => {
+    expect(shouldEnableRegistry({}, 0)).toBe(false);
+    expect(shouldEnableRegistry({ OPENSTORE_WEB_REGISTRY: "0" }, 0)).toBe(false);
+    expect(shouldEnableRegistry({ OPENSTORE_WEB_REGISTRY: "1" }, 0)).toBe(true);
+    expect(shouldEnableRegistry({ OPENSTORE_WEB_REGISTRY: "true" }, 0)).toBe(true);
+    expect(shouldEnableRegistry({ OPENSTORE_WEB_REGISTRY: "TRUE" }, 0)).toBe(true);
+    expect(shouldEnableRegistry({ OPENSTORE_WEB_REGISTRY: "yes" }, 0)).toBe(false);
+    expect(shouldEnableRegistry({}, 2)).toBe(true);
   });
 });

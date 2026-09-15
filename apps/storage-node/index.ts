@@ -82,6 +82,20 @@ export interface StorageNode {
   readonly capacityBytes: number;
   /** Get current capacity/health info */
   getCapacity(): Promise<NodeCapacity>;
+  /**
+   * Resize the allocation quota (OPENSTORE-029). Pieces already stored
+   * are untouched; shrinking below current usage is rejected so stored
+   * data is never stranded over quota.
+   */
+  setCapacityBytes(capacityBytes: number): void;
+  /** Whether the node is draining (read-only decommissioning). */
+  isDraining(): boolean;
+  /**
+   * Enter/leave draining mode (OPENSTORE-029): draining nodes reject
+   * new piece stores (503) while continuing to serve existing pieces,
+   * so placement routes around them without stranding reads.
+   */
+  setDraining(draining: boolean): void;
   listen(port?: number, host?: string): Promise<number>;
   close(): Promise<void>;
 }
@@ -118,16 +132,19 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   const requireAuth = options.requireAuth ?? false;
   const maxClockSkewMs = options.maxClockSkewMs ?? DEFAULT_MAX_CLOCK_SKEW_MS;
   const seenNonces = new Map<string, number>();
-  const capacityBytes = options.capacityBytes ?? DEFAULT_CAPACITY_BYTES;
+  let capacityBytes = options.capacityBytes ?? DEFAULT_CAPACITY_BYTES;
   if (!Number.isInteger(capacityBytes) || capacityBytes <= 0) {
     throw new TypeError("capacityBytes must be a positive integer");
   }
+  // Draining mode (OPENSTORE-029): when true the node serves reads but
+  // rejects new stores so it can be decommissioned without data loss.
+  let draining = false;
 
   let nodeIdentity: Identity | undefined = options.identity;
   const hasKeystore = typeof options.identityPath === "string" && options.identityPath !== "";
 
   const server = createServer((req, res) => {
-    void handleRequest(req, res, storageDir, capacityBytes, { requireAuth, maxClockSkewMs, seenNonces }, () => nodeIdentity).catch(() => {
+    void handleRequest(req, res, storageDir, capacityBytes, { requireAuth, maxClockSkewMs, seenNonces }, () => nodeIdentity, () => draining).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal error" });
       } else {
@@ -166,7 +183,21 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     version: STORAGE_NODE_VERSION,
     storageDir,
     server,
-    capacityBytes,
+    get capacityBytes(): number {
+      return capacityBytes;
+    },
+    setCapacityBytes(next: number): void {
+      if (!Number.isInteger(next) || next <= 0) {
+        throw new TypeError("capacityBytes must be a positive integer");
+      }
+      capacityBytes = next;
+    },
+    isDraining(): boolean {
+      return draining;
+    },
+    setDraining(next: boolean): void {
+      draining = next === true;
+    },
     get identity(): Identity | undefined {
       return nodeIdentity;
     },
@@ -279,11 +310,19 @@ async function handleRequest(
   capacityBytes: number,
   auth: AuthState,
   getNodeIdentity: () => Identity | undefined,
+  isDraining: () => boolean,
 ): Promise<void> {
   const method = (req.method ?? "").toUpperCase();
   const rawPath = (req.url ?? "/").split("?")[0] as string;
 
   if (method === "POST" && rawPath === "/pieces") {
+    if (isDraining()) {
+      // Decommissioning: reads stay available, new placements are refused
+      // so replication routes around this node (callers tolerate it).
+      req.resume();
+      sendJson(res, 503, { error: "node is draining: not accepting new pieces" });
+      return;
+    }
     const rawBody = await readBody(req);
     if (!checkAuth(req, method, rawPath, rawBody, auth, res)) return;
     await handlePostPieceWithBody(rawBody, res, storageDir, capacityBytes);

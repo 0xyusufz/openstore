@@ -50,6 +50,7 @@ OpenStore web dashboard at http://127.0.0.1:4173/
 | `OPENSTORE_WEB_STORAGE_DIRS` | No | Comma-separated storage dirs — **one real storage node per dir**, sharing the web backend's registry with signed registration + heartbeat. Unset → demo nodes (uploads fail honestly). |
 | `OPENSTORE_WEB_STORAGE_PORTS` | No | Per-node ports matching `STORAGE_DIRS` (1–65535). Unset → ephemeral ports (actual URLs are logged). Count mismatch fails fast. |
 | `OPENSTORE_WEB_STORAGE_CAPACITY_BYTES` | No | Per-node quota in bytes (positive integer). Unset → 1 GiB default. |
+| `OPENSTORE_WEB_REGISTRY` | No | `1`/`true`: live (initially empty) registry without preconfigured nodes — for provider-only setups where your shared node is the first node. |
 
 ## First-run flow in the browser
 
@@ -67,12 +68,52 @@ OpenStore web dashboard at http://127.0.0.1:4173/
 6. **Download**: reconstructs the exact original bytes (verified by
    piece hash, envelope, GCM auth, and plaintext hash/size checks).
 
+## Sharing your own disk (Storage Provider)
+
+The **Storage Nodes** page has a **My Storage Node** card. Sharing flow:
+
+1. Start the server with a manifest store and a registry so the
+   provider has somewhere to register (minimal: manifest dir plus
+   `OPENSTORE_WEB_REGISTRY=1` for an explicitly live, initially empty
+   registry):
+
+   ```sh
+   OPENSTORE_WEB_MANIFEST_DIR=./data/manifests \
+   OPENSTORE_WEB_REGISTRY=1 \
+   node dist/apps/web/server.js
+   ```
+
+2. On the Storage Nodes page, **Share Storage**: enter an **empty**
+   directory path and an explicit allocation in MiB. OpenStore never
+   claims free space on its own, and refuses non-empty foreign
+   directories. This creates an isolated storage directory (marked),
+   a 0600 provider config holding the node's registry identity, and a
+   stopped node.
+3. **Start Sharing**: the node registers, heartbeats, and accepts
+   encrypted pieces up to the hard quota. The card shows location,
+   allocation/used/available, filesystem totals, piece counts, node
+   identity, uptime, and reliability scores.
+4. **Change allocation** any time: increases apply immediately;
+   decreases below current usage are refused with the usage numbers.
+5. **Stop Sharing**: enters **draining** — new pieces are refused
+   (503) while existing pieces stay served, and placement routes
+   around the node. Storage is released only afterwards.
+6. **Release storage**: allowed only when drained/stopped, explicitly
+   confirmed, and zero pieces remain. It never silently deletes
+   other users' replicas.
+
+Capacity and contribution metrics are shown for a future rewards
+system. No earnings exist yet, and no blockchain/payment is involved.
+
 ## Stopping
 
 `Ctrl-C` (SIGINT/SIGTERM) closes nodes (graceful registry unregister)
-and the dashboard. Data dirs persist across restarts; node identities
-are ephemeral per boot, which is fine because pieces are
+and the dashboard. Data dirs persist across restarts; entrypoint node
+identities are ephemeral per boot, which is fine because pieces are
 content-addressed and selection uses current registry endpoints.
+Provider node identities persist in the 0600 provider config, so a
+shared node keeps its identity (and reliability history) across
+restarts and resumes its persisted running/draining mode.
 
 ## Troubleshooting
 

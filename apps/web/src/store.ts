@@ -11,7 +11,7 @@
 import { DEMO_MODE, MOCK_FILES, MOCK_IDENTITY, MOCK_NODES } from "./mock.js";
 import type { DashboardStats, WebIdentityStatus, WebNode } from "./types.js";
 import type { CatalogEntry } from "../../client/catalog.js";
-import type { BackendSnapshot, IdentityCreation, UploadFileResult } from "../backend.js";
+import type { BackendSnapshot, IdentityCreation, ProviderStatus, UploadFileResult } from "../backend.js";
 
 export type ViewId = "dashboard" | "files" | "upload" | "nodes" | "settings";
 
@@ -60,6 +60,11 @@ export interface WebState {
    * browser receives them as a Blob handed straight to an object URL.
    */
   download: DownloadDraft;
+  /**
+   * Storage provider status (Share Storage). Null when unconfigured or
+   * in demo mode. Never carries secrets — public metadata only.
+   */
+  provider: ProviderStatus | null;
   notice: string | null;
   demoMode: boolean;
 }
@@ -74,6 +79,7 @@ export function createInitialState(): WebState {
     recoveryPhraseRevealed: false,
     upload: { status: "idle", fileName: "", fileSize: 0, note: null },
     download: { status: "idle", fileId: null, filename: "", note: null },
+    provider: null,
     notice: null,
     demoMode: DEMO_MODE,
   };
@@ -320,6 +326,7 @@ export function applyBackendSnapshot(state: WebState, snapshot: BackendSnapshot)
     files: snapshot.files.map((f) => ({ ...f })),
     nodes: snapshot.nodes.map((n) => ({ ...n })),
     identity: { ...snapshot.identity },
+    provider: snapshot.provider ? { ...snapshot.provider } : null,
     demoMode: snapshot.filesSource === "demo" && snapshot.nodesSource === "demo",
     notice: null,
   };

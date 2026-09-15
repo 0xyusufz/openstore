@@ -27,6 +27,10 @@ import { createFileCatalog } from "../client/catalog.js";
 import type { CatalogEntry } from "../client/catalog.js";
 import { uploadBuffer } from "../client/upload.js";
 import { downloadBuffer } from "../client/download.js";
+import { createProviderManager } from "./provider.js";
+import type { ProviderManager, ProviderStatus } from "./provider.js";
+
+export type { ProviderManager, ProviderStatus } from "./provider.js";
 import { createDekStore } from "./dekstore.js";
 import type { DekStore } from "./dekstore.js";
 import type { StorageNodeEndpoint } from "../client/index.js";
@@ -141,6 +145,12 @@ export interface BackendSnapshot {
   identity: WebIdentityStatus;
   filesSource: DataSource;
   nodesSource: DataSource;
+  /**
+   * Storage provider status (Share Storage). Null when unconfigured or
+   * in demo mode. Optional so older snapshot literals keep compiling;
+   * readers must treat undefined as unconfigured.
+   */
+  provider?: ProviderStatus | null;
 }
 
 export interface BackendStatus {
@@ -222,6 +232,12 @@ export interface WebBackend {
    * are returned to the owning browser.
    */
   downloadFile(fileId: string): Promise<DownloadFileResult>;
+  /**
+   * Storage provider lifecycle (Share Storage). Always present; reports
+   * unconfigured when the backend has no manifest store, and mutating
+   * calls fail clearly without a registry.
+   */
+  readonly provider: ProviderManager;
 }
 
 export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
@@ -243,6 +259,13 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
   const catalog = options.manifestDir ? createFileCatalog(createManifestStore({ dir: options.manifestDir })) : null;
   const registry = options.registry ?? null;
   const keystorePath = options.keystorePath ?? null;
+  // Provider config lives next to the manifests (sibling file, invisible
+  // to the catalog) and shares this backend's registry, so the UI's Live
+  // mode and upload/download selection all see the same real nodes.
+  const provider = createProviderManager({
+    configPath: options.manifestDir ? `${options.manifestDir}.provider.json` : null,
+    registry,
+  });
   // The DEK vault lives alongside the manifests (sibling file, never
   // inside the manifest directory) and only exists for live backends.
   const dekStore: DekStore | null = options.manifestDir
@@ -313,6 +336,7 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
   return {
     version: WEB_BACKEND_VERSION,
     status: { ...status },
+    provider,
 
     async getSnapshot(): Promise<BackendSnapshot> {
       const files = catalog ? await catalog.listEntries() : MOCK_FILES.map((f) => ({ ...f }));
@@ -330,6 +354,7 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
         identity,
         filesSource: catalog ? "live" : "demo",
         nodesSource: registry ? "live" : "demo",
+        provider: await provider.getStatus(),
       };
     },
 

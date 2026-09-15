@@ -75,23 +75,31 @@ interface ApiIdentityPayload {
   identity: BackendSnapshot["identity"];
 }
 
+interface ApiProviderPayload {
+  provider: BackendSnapshot["provider"];
+}
+
 /**
  * Fetch the live backend snapshot. Falls back to demo state (with an
  * honest notice) when the backend is unreachable or returns garbage.
  */
 async function loadLiveData(state: WebState): Promise<WebState> {
   try {
-    const [filesRes, nodesRes, identityRes] = await Promise.all([
+    const [filesRes, nodesRes, identityRes, providerRes] = await Promise.all([
       fetch("/api/files"),
       fetch("/api/nodes"),
       fetch("/api/identity"),
+      fetch("/api/provider"),
     ]);
-    if (!filesRes.ok || !nodesRes.ok || !identityRes.ok) {
-      throw new Error(`backend responded ${filesRes.status}/${nodesRes.status}/${identityRes.status}`);
+    if (!filesRes.ok || !nodesRes.ok || !identityRes.ok || !providerRes.ok) {
+      throw new Error(
+        `backend responded ${filesRes.status}/${nodesRes.status}/${identityRes.status}/${providerRes.status}`,
+      );
     }
     const filesJson = (await filesRes.json()) as Partial<ApiFilesPayload>;
     const nodesJson = (await nodesRes.json()) as Partial<ApiNodesPayload>;
     const identityJson = (await identityRes.json()) as Partial<ApiIdentityPayload>;
+    const providerJson = (await providerRes.json()) as Partial<ApiProviderPayload>;
     if (!Array.isArray(filesJson.files) || !Array.isArray(nodesJson.nodes) || typeof identityJson.identity !== "object") {
       throw new Error("malformed backend snapshot");
     }
@@ -101,6 +109,7 @@ async function loadLiveData(state: WebState): Promise<WebState> {
       identity: identityJson.identity as BackendSnapshot["identity"],
       filesSource: filesJson.source === "live" ? "live" : "demo",
       nodesSource: nodesJson.source === "live" ? "live" : "demo",
+      provider: (providerJson.provider ?? null) as BackendSnapshot["provider"],
     });
   } catch {
     return { ...state, notice: "Live backend unavailable — showing demo data." };
@@ -121,7 +130,7 @@ export function startApp(): void {
     render(state);
   });
 
-  async function postIdentity(path: string, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
+  async function postApi(path: string, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
     const res = await fetch(path, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -134,6 +143,31 @@ export function startApp(): void {
       // Non-JSON error body; status below still guides the message.
     }
     return { status: res.status, json };
+  }
+
+  async function postIdentity(path: string, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
+    return postApi(path, body);
+  }
+
+  /** Refresh the full live snapshot (files, nodes, identity, provider). */
+  async function refreshLiveData(): Promise<void> {
+    const refreshed = await loadLiveData(state);
+    state = syncFromHash(refreshed);
+    render(state);
+  }
+
+  function textValue(id: string): string {
+    const el = document.getElementById(id);
+    return el instanceof HTMLInputElement ? el.value.trim() : "";
+  }
+
+  /** MiB form field → bytes, or null when invalid. */
+  function mebibytesToBytes(id: string): number | null {
+    const raw = textValue(id);
+    if (raw === "") return null;
+    const mb = Number(raw);
+    if (!Number.isFinite(mb) || mb <= 0) return null;
+    return Math.round(mb * 1024 * 1024);
   }
 
   function inputValue(id: string): string {
@@ -150,10 +184,62 @@ export function startApp(): void {
     if (
       form.id !== "identity-create-form" &&
       form.id !== "identity-unlock-form" &&
-      form.id !== "identity-recover-form"
+      form.id !== "identity-recover-form" &&
+      form.id !== "provider-setup-form" &&
+      form.id !== "provider-allocation-form"
     )
       return;
     event.preventDefault();
+    if (form.id === "provider-setup-form" || form.id === "provider-allocation-form") {
+      void (async () => {
+        try {
+          if (form.id === "provider-setup-form") {
+            const location = textValue("provider-location");
+            const capacityBytes = mebibytesToBytes("provider-capacity-mb");
+            const portRaw = textValue("provider-port");
+            if (location === "" || capacityBytes === null) {
+              state = { ...state, notice: "Enter a storage location and a positive allocation in MiB." };
+              render(state);
+              return;
+            }
+            const body: Record<string, unknown> = { location, capacityBytes };
+            if (portRaw !== "") {
+              const port = Number(portRaw);
+              if (!Number.isInteger(port) || port < 1 || port > 65535) {
+                state = { ...state, notice: "Port must be an integer 1–65535 (or blank)." };
+                render(state);
+                return;
+              }
+              body["port"] = port;
+            }
+            const { status, json } = await postApi("/api/provider/setup", body);
+            if (status === 200) {
+              await refreshLiveData();
+              state = { ...state, notice: "Storage sharing is set up. Use Start Sharing to bring the node online." };
+            } else {
+              state = { ...state, notice: `Sharing setup failed: ${errorText(json, status)}` };
+            }
+          } else {
+            const capacityBytes = mebibytesToBytes("provider-allocation-mb");
+            if (capacityBytes === null) {
+              state = { ...state, notice: "Enter a positive allocation in MiB." };
+              render(state);
+              return;
+            }
+            const { status, json } = await postApi("/api/provider/allocation", { capacityBytes });
+            if (status === 200) {
+              await refreshLiveData();
+            } else {
+              state = { ...state, notice: `Allocation update failed: ${errorText(json, status)}` };
+            }
+          }
+        } catch {
+          state = { ...state, notice: "Provider request failed — is the server reachable?" };
+        }
+        render(state);
+      })();
+      return;
+    }
     void (async () => {
       try {
         if (form.id === "identity-create-form") {
@@ -331,6 +417,37 @@ export function startApp(): void {
           stagedFile = null;
         }
         render(state);
+      })();
+    } else if (action === "provider-start" || action === "provider-stop" || action === "provider-release") {
+      if (action === "provider-release") {
+        const confirmed = typeof confirm === "function"
+          ? confirm("Release shared storage? This is refused while any pieces remain.")
+          : true;
+        if (!confirmed) return;
+      }
+      void (async () => {
+        try {
+          const path = action === "provider-start"
+            ? "/api/provider/start"
+            : action === "provider-stop"
+              ? "/api/provider/stop"
+              : "/api/provider/release";
+          const body = action === "provider-release" ? { confirm: true } : {};
+          const { status, json } = await postApi(path, body);
+          if (status === 200) {
+            await refreshLiveData();
+            if (action === "provider-release") {
+              state = { ...state, notice: "Shared storage released." };
+              render(state);
+            }
+          } else {
+            state = { ...state, notice: `Sharing request failed: ${errorText(json, status)}` };
+            render(state);
+          }
+        } catch {
+          state = { ...state, notice: "Provider request failed — is the server reachable?" };
+          render(state);
+        }
       })();
     } else if (action === "download-attempt") {
       const fileId = actionEl.getAttribute("data-file-id") ?? "";

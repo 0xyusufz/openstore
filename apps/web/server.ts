@@ -112,12 +112,17 @@ async function handleRequest(
     sendJson(res, 200, backend.getHealth(), headOnly);
     return;
   }
-  // Identity actions and file upload are POST-only.
+  // Identity actions, provider actions, and file upload are POST-only.
   if (
     rawPath === "/api/identity/create" ||
     rawPath === "/api/identity/unlock" ||
     rawPath === "/api/identity/lock" ||
     rawPath === "/api/identity/recover" ||
+    rawPath === "/api/provider/setup" ||
+    rawPath === "/api/provider/start" ||
+    rawPath === "/api/provider/stop" ||
+    rawPath === "/api/provider/release" ||
+    rawPath === "/api/provider/allocation" ||
     rawPath === "/api/files/upload"
   ) {
     if (method !== "POST") {
@@ -168,6 +173,65 @@ async function handleRequest(
   if (rawPath === "/api/identity") {
     const snapshot = await backend.getSnapshot();
     sendJson(res, 200, { identity: snapshot.identity }, headOnly);
+    return;
+  }
+  if (rawPath === "/api/provider") {
+    const snapshot = await backend.getSnapshot();
+    sendJson(res, 200, { provider: snapshot.provider ?? null }, headOnly);
+    return;
+  }
+  if (rawPath === "/api/provider/setup" && method === "POST") {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) return;
+    const fields = body.value as Record<string, unknown>;
+    try {
+      const status = await backend.provider.setup(fields["location"], fields["capacityBytes"], fields["port"]);
+      sendJson(res, 200, { provider: status });
+    } catch (err) {
+      sendJson(res, providerErrorStatus((err as Error).message), { error: toSafeProviderError((err as Error).message) });
+    }
+    return;
+  }
+  if (rawPath === "/api/provider/start" && method === "POST") {
+    try {
+      const status = await backend.provider.start();
+      sendJson(res, 200, { provider: status });
+    } catch (err) {
+      sendJson(res, providerErrorStatus((err as Error).message), { error: toSafeProviderError((err as Error).message) });
+    }
+    return;
+  }
+  if (rawPath === "/api/provider/stop" && method === "POST") {
+    try {
+      const status = await backend.provider.stop();
+      sendJson(res, 200, { provider: status });
+    } catch (err) {
+      sendJson(res, providerErrorStatus((err as Error).message), { error: toSafeProviderError((err as Error).message) });
+    }
+    return;
+  }
+  if (rawPath === "/api/provider/release" && method === "POST") {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) return;
+    const fields = body.value as Record<string, unknown>;
+    try {
+      const result = await backend.provider.release(fields["confirm"]);
+      sendJson(res, 200, { released: result.released, storageDir: result.storageDir });
+    } catch (err) {
+      sendJson(res, providerErrorStatus((err as Error).message), { error: toSafeProviderError((err as Error).message) });
+    }
+    return;
+  }
+  if (rawPath === "/api/provider/allocation" && method === "POST") {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) return;
+    const fields = body.value as Record<string, unknown>;
+    try {
+      const status = await backend.provider.setAllocation(fields["capacityBytes"]);
+      sendJson(res, 200, { provider: status });
+    } catch (err) {
+      sendJson(res, providerErrorStatus((err as Error).message), { error: toSafeProviderError((err as Error).message) });
+    }
     return;
   }
   if (rawPath === "/api/identity/create" && method === "POST") {
@@ -327,6 +391,29 @@ function toSafeUploadError(message: string): string {
     return "upload failed";
   }
   // Bound message length so oversized internals never leak wholesale.
+  return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+}
+
+/**
+ * Map provider errors to safe statuses. Messages never carry secrets
+ * (see {@link toSafeProviderError}).
+ */
+function providerErrorStatus(message: string): number {
+  if (/already configured|pieces .*remain/i.test(message)) return 409;
+  if (/not configured/i.test(message)) return 404;
+  if (/must be|invalid|requir|empty|not a directory|exceeds free|confirm|below current usage/i.test(message)) return 400;
+  return 500;
+}
+
+/**
+ * Sanitize provider error messages. Counts and plain-English reasons
+ * pass through; key material, phrases, passwords, and piece bytes never do.
+ */
+function toSafeProviderError(message: string): string {
+  if (typeof message !== "string" || message === "") return "provider request failed";
+  if (/privatekey|recoveryphrase|mnemonic|encryptionkey|decryptionkey|\bdek\b|password|plaintext|auth\s*tag|authTag|ciphertext/i.test(message)) {
+    return "provider request failed";
+  }
   return message.length > 500 ? `${message.slice(0, 500)}…` : message;
 }
 
@@ -561,6 +648,18 @@ export function parseStoragePorts(value: string | undefined, expectedCount: numb
 }
 
 /**
+ * Whether the standalone server should back the backend with a real
+ * (initially empty) registry: true when storage dirs are configured,
+ * or when explicitly opted in via OPENSTORE_WEB_REGISTRY=1/true.
+ * Exported for unit tests.
+ */
+export function shouldEnableRegistry(env: NodeJS.ProcessEnv, storageDirCount: number): boolean {
+  if (storageDirCount > 0) return true;
+  const flag = (env["OPENSTORE_WEB_REGISTRY"] ?? "").trim().toLowerCase();
+  return flag === "1" || flag === "true";
+}
+
+/**
  * Parse the per-node capacity override (bytes). Unset → node default.
  * Exported for unit tests.
  */
@@ -595,6 +694,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
  * - OPENSTORE_WEB_STORAGE_DIRS: comma-separated storage dirs, one real
  *   storage node per dir sharing the web backend's registry with signed
  *   registration + heartbeat (unset → demo nodes).
+ * - OPENSTORE_WEB_REGISTRY=1/true: back the backend with a real (empty)
+ *   registry without preconfigured nodes, for provider-only setups.
  * - OPENSTORE_WEB_STORAGE_PORTS: optional per-node ports matching DIRS
  *   (unset → ephemeral ports, actual URLs are logged).
  * - OPENSTORE_WEB_STORAGE_CAPACITY_BYTES: optional per-node quota.
@@ -617,10 +718,10 @@ export async function runStandaloneServer(env: NodeJS.ProcessEnv, args: string[]
   type StorageNode = import("../storage-node/index.js").StorageNode;
 
   const nodes: StorageNode[] = [];
-  // Only hand the backend a registry when real nodes back it: an empty
-  // registry would flip the UI to Live with zero nodes, hiding demo data
-  // without providing anything real.
-  const registry = storageDirs.length > 0 ? createRegistry() : undefined;
+  // Hand the backend a real registry when nodes back it, or when live
+  // mode is explicitly opted in. Otherwise the UI honestly stays on
+  // demo data instead of a hollow Live state.
+  const registry = shouldEnableRegistry(env, storageDirs.length) ? createRegistry() : undefined;
   try {
     for (let i = 0; i < storageDirs.length; i += 1) {
       const node = createStorageNode({
@@ -641,8 +742,11 @@ export async function runStandaloneServer(env: NodeJS.ProcessEnv, args: string[]
     });
     const actual = await web.listen(port, "127.0.0.1");
     console.log(`OpenStore web dashboard at http://127.0.0.1:${actual}/`);
-    if (storageDirs.length === 0) {
+    if (storageDirs.length === 0 && !registry) {
       console.log("No storage nodes configured (set OPENSTORE_WEB_STORAGE_DIRS) — showing demo nodes; uploads will fail.");
+    }
+    if (storageDirs.length === 0 && registry) {
+      console.log("Live registry enabled with no storage nodes yet — share storage from the Storage Nodes page.");
     }
     const shutdown = () => {
       void (async () => {

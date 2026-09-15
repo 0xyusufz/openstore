@@ -128,8 +128,111 @@ export function renderUpload(state: WebState): string {
   </section>`;
 }
 
+function formatUptime(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "—";
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes < 60) return `${minutes}m ${totalSeconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+function providerHtml(state: WebState): string {
+  const provider = state.provider;
+  if (state.demoMode || !provider) {
+    return `
+    <div class="card">
+      <h3>My Storage Node</h3>
+      <p class="muted">Sharing storage is unavailable in demo mode. Start the server with a manifest store and registry for the live provider.</p>
+    </div>`;
+  }
+  if (!provider.configured) {
+    return `
+    <div class="card">
+      <h3>Share Storage</h3>
+      <p class="muted">Contribute part of your disk to the network. You choose an explicit allocation — OpenStore never claims free space on its own — inside a dedicated directory the node cannot leave.</p>
+      <form id="provider-setup-form" autocomplete="off">
+        <div class="form-row"><label>Storage location (empty directory path)
+          <input id="provider-location" name="location" type="text" autocomplete="off" required minlength="1" placeholder="./data/share" />
+        </label></div>
+        <div class="form-row"><label>Allocation (MiB)
+          <input id="provider-capacity-mb" name="capacityMB" type="number" min="1" step="1" required placeholder="512" />
+        </label></div>
+        <div class="form-row"><label>Port (optional, blank for ephemeral)
+          <input id="provider-port" name="port" type="number" min="1" max="65535" step="1" placeholder="4101" />
+        </label></div>
+        <div class="row"><button type="submit">Set up sharing</button></div>
+      </form>
+      <p class="muted">Capacity and contribution metrics feed a future rewards system. No earnings exist yet.</p>
+    </div>`;
+  }
+  const statePill =
+    provider.state === "running"
+      ? `<span class="pill pill-on">Sharing</span>`
+      : provider.state === "draining"
+        ? `<span class="pill pill-off">Draining</span>`
+        : provider.state === "stopped"
+          ? `<span class="pill pill-off">Stopped</span>`
+          : `<span class="pill pill-off">Offline</span>`;
+  const capacity = provider.capacity;
+  const capacityLine = capacity
+    ? `<p>Allocation: ${esc(formatBytes(capacity.allocatedBytes))} · Used: ${esc(formatBytes(capacity.usedBytes))} · Available: ${esc(formatBytes(capacity.availableBytes))}${capacityBar(capacity.usedBytes, capacity.allocatedBytes)}</p>`
+    : "";
+  const filesystemLine = provider.filesystem
+    ? `<p class="muted">Filesystem total: ${esc(formatBytes(provider.filesystem.totalBytes))} · free: ${esc(formatBytes(provider.filesystem.freeBytes))}</p>`
+    : "";
+  const piecesLine = provider.pieces
+    ? `<p class="muted">Stored pieces: ${provider.pieces.count} (${esc(formatBytes(provider.pieces.bytes))})</p>`
+    : "";
+  const nodeLine = provider.nodeId
+    ? `<p class="muted">Node: ${esc(truncateId(provider.nodeId, 16))}${provider.baseUrl ? `<br>${esc(provider.baseUrl)}` : ""}</p>`
+    : "";
+  const healthLine = provider.reliability
+    ? `<p class="muted">Reliability ${provider.reliability.score} · Storage health ${provider.reliability.storageScore} · Uptime ${esc(formatUptime(provider.uptimeMs))}</p>`
+    : `<p class="muted">Uptime ${esc(formatUptime(provider.uptimeMs))}</p>`;
+  const drainingWarning =
+    provider.state === "draining"
+      ? `<p class="warning" role="alert"><strong>Draining:</strong> this node no longer accepts new pieces. Existing pieces stay available until re-replication lands. Storage is released only after every piece is gone.</p>`
+      : "";
+  const offlineWarning =
+    provider.state === "offline"
+      ? `<p class="warning" role="alert"><strong>Offline:</strong> the provider node process is unreachable. Your pieces stay on disk; use Start Sharing to bring the node back.</p>`
+      : "";
+  const controls =
+    provider.state === "running" || provider.state === "draining"
+      ? `<div class="row"><button type="button" data-action="provider-stop">Stop Sharing</button></div>`
+      : `<div class="row"><button type="button" data-action="provider-start">Start Sharing</button></div>`;
+  return `
+    <div class="card">
+      <h3>My Storage Node</h3>
+      <p>Status: ${statePill}</p>
+      <p class="muted">Location: ${esc(provider.storageDir ?? "—")}</p>
+      ${capacityLine}
+      ${filesystemLine}
+      ${piecesLine}
+      ${nodeLine}
+      ${healthLine}
+      ${drainingWarning}
+      ${offlineWarning}
+      ${controls}
+      <form id="provider-allocation-form" autocomplete="off">
+        <h3>Change allocation (MiB)</h3>
+        <div class="form-row"><label>Allocation (MiB)
+          <input id="provider-allocation-mb" name="capacityMB" type="number" min="1" step="1" required />
+        </label></div>
+        <div class="row"><button type="submit">Update allocation</button></div>
+      </form>
+      <div class="row"><button type="button" data-action="provider-release" class="danger">Release storage</button></div>
+      <p class="muted">Release is refused while any pieces remain — replicas are never deleted silently. Capacity and contribution metrics feed a future rewards system. No earnings exist yet.</p>
+    </div>`;
+}
+
 export function renderNodes(state: WebState): string {
-  const rows = state.nodes
+  const ownNodeId = state.provider?.nodeId ?? null;
+  const remote = ownNodeId ? state.nodes.filter((n) => n.id !== ownNodeId) : state.nodes;
+  const rows = remote
     .map(
       (n) => `<tr>
       <td data-label="Node">${esc(truncateId(n.id, 16))}<br><span class="muted">${esc(n.baseUrl)}</span></td>
@@ -143,6 +246,8 @@ export function renderNodes(state: WebState): string {
   return `
   <section aria-label="Storage nodes">
     <h2>Storage Nodes</h2>
+    ${providerHtml(state)}
+    <h3>Network storage nodes</h3>
     <div class="table-wrap"><table class="table">
       <thead><tr><th>Node</th><th>Status</th><th>Capacity</th><th>Reliability</th><th>Storage health</th></tr></thead>
       <tbody>${rows}</tbody>
