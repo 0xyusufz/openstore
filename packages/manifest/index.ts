@@ -42,6 +42,8 @@ export interface ManifestChunk {
  */
 export interface FileManifest {
   version: number;
+  /** Monotonic local persistence revision; absent on legacy manifests. */
+  revision?: number;
   fileId: string;
   filename: string;
   size: number;
@@ -63,6 +65,7 @@ export interface BuildManifestInput {
   chunkSize: number;
   cryptoVersion: number;
   chunks: ManifestChunk[];
+  revision?: number;
 }
 
 /**
@@ -87,6 +90,12 @@ export function buildManifest(input: BuildManifestInput): FileManifest {
   }
   if (typeof input.filename !== "string" || input.filename === "") {
     throw new TypeError("filename must be a non-empty string");
+  }
+  if (
+    input.revision !== undefined &&
+    (!Number.isSafeInteger(input.revision) || input.revision <= 0)
+  ) {
+    throw new TypeError("revision must be a positive safe integer");
   }
   assertNonNegativeInteger(input.size, "size");
   assertPositiveInteger(input.chunkSize, "chunkSize");
@@ -136,6 +145,7 @@ export function buildManifest(input: BuildManifestInput): FileManifest {
 
   return {
     version: MANIFEST_VERSION,
+    ...(input.revision === undefined ? {} : { revision: input.revision }),
     fileId: input.fileId,
     filename: input.filename,
     size: input.size,

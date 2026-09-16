@@ -58,12 +58,46 @@ export interface ManifestStore {
   readonly dir: string;
   /** Validate and atomically persist a manifest. Returns a copy of what was stored. */
   save(manifest: FileManifest): Promise<FileManifest>;
+  /** Load a manifest together with its persistence revision. */
+  loadWithRevision(fileId: string): Promise<ManifestSnapshot | undefined>;
+  /**
+   * Atomically replace a manifest only when its current revision matches.
+   * The expected revision is 0 for a legacy manifest with no revision or
+   * to create a previously missing manifest.
+   */
+  saveIfRevision(
+    fileId: string,
+    expectedRevision: number,
+    nextManifest: FileManifest,
+  ): Promise<FileManifest>;
   /** Load and validate a manifest, or undefined when absent. Throws on malformed files. */
   load(fileId: string): Promise<FileManifest | undefined>;
   /** Delete a manifest. Returns true when a file was removed. */
   delete(fileId: string): Promise<boolean>;
   /** List summaries of all valid manifests; malformed files are skipped safely. */
   list(): Promise<ManifestSummary[]>;
+}
+
+export interface ManifestSnapshot {
+  manifest: FileManifest;
+  revision: number;
+}
+
+export class ManifestConflictError extends Error {
+  readonly fileId: string;
+  readonly expectedRevision: number;
+  readonly actualRevision: number | undefined;
+
+  constructor(fileId: string, expectedRevision: number, actualRevision: number | undefined) {
+    super(
+      `manifest "${fileId}" revision conflict: expected ${expectedRevision}, ` +
+      `found ${actualRevision === undefined ? "missing" : actualRevision}`,
+    );
+    this.name = "ManifestConflictError";
+    this.fileId = fileId;
+    this.expectedRevision = expectedRevision;
+    this.actualRevision = actualRevision;
+  }
 }
 
 /**
@@ -101,6 +135,7 @@ function validatedManifest(manifest: FileManifest): FileManifest {
     chunkSize: manifest.chunkSize,
     cryptoVersion: manifest.cryptoVersion,
     chunks: manifest.chunks,
+    ...(manifest.revision === undefined ? {} : { revision: manifest.revision }),
   });
 }
 
@@ -112,14 +147,37 @@ export function createManifestStore(options: ManifestStoreOptions): ManifestStor
     throw new TypeError("dir must be a non-empty string");
   }
   const dir = resolve(options.dir);
+  const fileLocks = new Map<string, Promise<void>>();
 
   function pathFor(fileId: string): string {
     assertValidFileId(fileId);
     return join(dir, `${fileId}${MANIFEST_FILE_SUFFIX}`);
   }
 
-  async function atomicWriteJson(targetPath: string, value: unknown): Promise<void> {
-    const payload = JSON.stringify({ version: MANIFEST_STORE_VERSION, manifest: value }, null, 2);
+  async function withFileLock<T>(fileId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = fileLocks.get(fileId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolveRelease) => {
+      release = resolveRelease;
+    });
+    const queued = previous.then(() => current);
+    fileLocks.set(fileId, queued);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (fileLocks.get(fileId) === queued) fileLocks.delete(fileId);
+    }
+  }
+
+  async function atomicWriteJson(targetPath: string, value: FileManifest, revision: number): Promise<void> {
+    const { revision: _ignoredRevision, ...revisionlessManifest } = value;
+    const payload = JSON.stringify(
+      { version: MANIFEST_STORE_VERSION, revision, manifest: revisionlessManifest },
+      null,
+      2,
+    );
     await mkdir(dir, { recursive: true });
     const tmpPath = join(dir, `.tmp.${randomBytes(8).toString("hex")}${MANIFEST_FILE_SUFFIX}`);
     try {
@@ -136,57 +194,116 @@ export function createManifestStore(options: ManifestStoreOptions): ManifestStor
     }
   }
 
-  function parseStored(text: string): FileManifest {
+  function parseStored(text: string): ManifestSnapshot {
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
       throw new Error("malformed manifest file: invalid JSON");
     }
+
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("malformed manifest file: expected an object");
     }
+
     const record = parsed as Record<string, unknown>;
     if (!("manifest" in record)) {
       throw new Error("malformed manifest file: missing manifest");
     }
     try {
-      return validatedManifest(record["manifest"] as FileManifest);
+      const storedRevision = record.revision;
+      if (
+        storedRevision !== undefined &&
+        (!Number.isSafeInteger(storedRevision) || (storedRevision as number) <= 0)
+      ) {
+        throw new Error("invalid revision");
+      }
+      const manifest = validatedManifest(record["manifest"] as FileManifest);
+      const { revision: _ignoredRevision, ...revisionlessManifest } = manifest;
+      return {
+        manifest: revisionlessManifest,
+        revision: storedRevision === undefined ? 0 : storedRevision as number,
+      };
     } catch (err) {
       throw new Error(`malformed manifest file: ${(err as Error).message}`);
     }
+  }
+
+  async function readSnapshot(fileId: string): Promise<ManifestSnapshot | undefined> {
+    const targetPath = pathFor(fileId);
+    let text: string;
+    try {
+      text = await readFile(targetPath, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw err;
+    }
+    return parseStored(text);
   }
 
   return {
     dir,
 
     async save(manifest: FileManifest): Promise<FileManifest> {
-      const checked = validatedManifest(manifest);
-      await atomicWriteJson(pathFor(checked.fileId), checked);
-      return checked;
+      const fileId = manifest?.fileId;
+      if (typeof fileId !== "string") {
+        return withFileLock("__invalid__", async () => {
+          throw new TypeError("manifest must be an object with a valid fileId");
+        });
+      }
+      return withFileLock(fileId, async () => {
+        const checked = validatedManifest(manifest);
+        const current = await readSnapshot(fileId);
+        const revision = (current?.revision ?? 0) + 1;
+        const next = validatedManifest({ ...checked, revision });
+        const { revision: _ignoredRevision, ...revisionlessManifest } = next;
+        await atomicWriteJson(pathFor(next.fileId), next, revision);
+        return revisionlessManifest;
+      });
+    },
+
+    async loadWithRevision(fileId: string): Promise<ManifestSnapshot | undefined> {
+      assertValidFileId(fileId);
+      return readSnapshot(fileId);
+    },
+
+    async saveIfRevision(fileId: string, expectedRevision: number, nextManifest: FileManifest): Promise<FileManifest> {
+      assertValidFileId(fileId);
+      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+        throw new TypeError("expectedRevision must be a non-negative safe integer");
+      }
+      return withFileLock(fileId, async () => {
+        const current = await readSnapshot(fileId);
+        const actualRevision = current?.revision;
+        const comparableRevision = actualRevision ?? 0;
+        if ((!current && expectedRevision !== 0) || (current && comparableRevision !== expectedRevision)) {
+          throw new ManifestConflictError(fileId, expectedRevision, actualRevision);
+        }
+        const checked = validatedManifest({ ...nextManifest, fileId });
+        const next = validatedManifest({ ...checked, revision: expectedRevision + 1 });
+        const { revision: _ignoredRevision, ...revisionlessManifest } = next;
+        await atomicWriteJson(pathFor(fileId), next, expectedRevision + 1);
+        return revisionlessManifest;
+      });
     },
 
     async load(fileId: string): Promise<FileManifest | undefined> {
-      const targetPath = pathFor(fileId);
-      let text: string;
-      try {
-        text = await readFile(targetPath, "utf8");
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-        throw err;
-      }
-      return parseStored(text);
+      const snapshot = await readSnapshot(fileId);
+      return snapshot?.manifest;
     },
 
     async delete(fileId: string): Promise<boolean> {
-      const targetPath = pathFor(fileId);
-      try {
-        await unlink(targetPath);
-        return true;
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
-        throw err;
-      }
+      assertValidFileId(fileId);
+      return withFileLock(fileId, async () => {
+        const targetPath = pathFor(fileId);
+        try {
+          await unlink(targetPath);
+          return true;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+          throw err;
+        }
+      });
     },
 
     async list(): Promise<ManifestSummary[]> {
@@ -204,7 +321,7 @@ export function createManifestStore(options: ManifestStoreOptions): ManifestStor
         if (!isValidManifestFileId(fileId)) continue;
         try {
           const text = await readFile(join(dir, entry), "utf8");
-          const manifest = parseStored(text);
+          const manifest = parseStored(text).manifest;
           let createdAt = 0;
           try {
             const s = await stat(join(dir, entry));

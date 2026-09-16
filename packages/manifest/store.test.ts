@@ -6,7 +6,7 @@ import { randomBytes } from "crypto";
 import { CRYPTO_VERSION } from "../crypto/index.js";
 import { buildManifest, generateFileId } from "./index.js";
 import type { FileManifest } from "./index.js";
-import { createManifestStore } from "./store.js";
+import { createManifestStore, ManifestConflictError } from "./store.js";
 
 function makeManifest(fileId: string, filename = "file.txt"): FileManifest {
   return buildManifest({
@@ -40,9 +40,10 @@ describe("local manifest store (OPENSTORE-019)", () => {
       const manifest = makeManifest(generateFileId(), "photo.png");
       const saved = await store.save(manifest);
       expect(saved).toEqual(manifest);
+      expect((await store.loadWithRevision(manifest.fileId))?.revision).toBe(1);
       // A new store instance on the same dir (simulated restart) loads it back
       const reopened = createManifestStore({ dir });
-      expect(await reopened.load(manifest.fileId)).toEqual(manifest);
+      expect(await reopened.load(manifest.fileId)).toEqual(saved);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -77,8 +78,8 @@ describe("local manifest store (OPENSTORE-019)", () => {
         [a.fileId, b.fileId, c.fileId].sort(),
       );
       expect(await store.delete(b.fileId)).toBe(true);
-      expect(await store.load(a.fileId)).toEqual(a);
-      expect(await store.load(c.fileId)).toEqual(c);
+      expect(await store.load(a.fileId)).toMatchObject(a);
+      expect(await store.load(c.fileId)).toMatchObject(c);
       expect(await store.load(b.fileId)).toBeUndefined();
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -140,7 +141,7 @@ describe("local manifest store (OPENSTORE-019)", () => {
       expect(content.toLowerCase()).not.toContain("recoveryphrase");
       // Only whitelisted manifest fields at top level
       const parsed = JSON.parse(content) as { manifest: Record<string, unknown> };
-      const allowed = new Set(["version", "fileId", "filename", "size", "chunkSize", "totalChunks", "cryptoVersion", "chunks", "pieceIds", "nodeIds"]);
+      const allowed = new Set(["version", "revision", "fileId", "filename", "size", "chunkSize", "totalChunks", "cryptoVersion", "chunks", "pieceIds", "nodeIds"]);
       for (const key of Object.keys(parsed.manifest)) {
         expect(allowed.has(key)).toBe(true);
       }
@@ -178,7 +179,7 @@ describe("local manifest store (OPENSTORE-019)", () => {
       await expect(store.save(invalid)).rejects.toThrow();
       // Previous valid manifest intact
       expect(await readFile(join(dir, `${fileId}.json`), "utf8")).toBe(before);
-      expect(await store.load(fileId)).toEqual(valid);
+      expect(await store.load(fileId)).toMatchObject(valid);
       // No tmp leftovers
       const entries = await readdir(dir);
       expect(entries.filter((e) => e.startsWith(".tmp."))).toHaveLength(0);
@@ -240,6 +241,86 @@ describe("local manifest store (OPENSTORE-019)", () => {
       await node.close();
       await rm(nodeDir, { recursive: true, force: true });
       await rm(storeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("9. legacy manifests load with revision zero and receive a revision on save", async () => {
+    const dir = await tempDir();
+    try {
+      const store = createManifestStore({ dir });
+      const manifest = makeManifest(generateFileId());
+      await writeFile(
+        join(dir, `${manifest.fileId}.json`),
+        JSON.stringify({ version: 1, manifest }),
+        { mode: 0o600 },
+      );
+      expect((await store.load(manifest.fileId))?.revision).toBeUndefined();
+      expect(await store.loadWithRevision(manifest.fileId)).toMatchObject({ revision: 0 });
+      const saved = await store.save(manifest);
+      expect(saved).toEqual(manifest);
+      expect((await store.loadWithRevision(manifest.fileId))?.revision).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("10. conditional updates increment and reject stale revisions", async () => {
+    const dir = await tempDir();
+    try {
+      const store = createManifestStore({ dir });
+      const first = await store.save(makeManifest(generateFileId(), "first"));
+      const updated = await store.saveIfRevision(first.fileId, 1, {
+        ...first,
+        filename: "second",
+      });
+      expect(updated).toEqual({ ...first, filename: "second" });
+      expect((await store.loadWithRevision(first.fileId))?.revision).toBe(2);
+      await expect(store.saveIfRevision(first.fileId, 1, first)).rejects.toBeInstanceOf(ManifestConflictError);
+      expect((await store.loadWithRevision(first.fileId))?.revision).toBe(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("11. same-file updates serialize and different files remain independent", async () => {
+    const dir = await tempDir();
+    try {
+      const store = createManifestStore({ dir });
+      const first = await store.save(makeManifest(generateFileId(), "base"));
+      const sameFile = await Promise.allSettled([
+        store.save({ ...first, filename: "one" }),
+        store.save({ ...first, filename: "two" }),
+      ]);
+      expect(sameFile.filter((result) => result.status === "fulfilled")).toHaveLength(2);
+      expect((await store.loadWithRevision(first.fileId))?.revision).toBe(3);
+
+      const a = makeManifest(generateFileId(), "a");
+      const b = makeManifest(generateFileId(), "b");
+      const [savedA, savedB] = await Promise.all([store.save(a), store.save(b)]);
+      expect((await store.loadWithRevision(savedA.fileId))?.revision).toBe(1);
+      expect((await store.loadWithRevision(savedB.fileId))?.revision).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("12. failed validation leaves the prior revision and data intact", async () => {
+    const dir = await tempDir();
+    try {
+      const store = createManifestStore({ dir });
+      const saved = await store.save(makeManifest(generateFileId()));
+      const invalid = {
+        ...saved,
+        chunks: [{ ...saved.chunks[0], pieceId: "invalid" }],
+      } as FileManifest;
+      await expect(store.saveIfRevision(saved.fileId, 1, invalid)).rejects.toThrow();
+      expect(await store.load(saved.fileId)).toEqual(saved);
+      expect((await store.loadWithRevision(saved.fileId))?.revision).toBe(1);
+      // A failed operation must not poison the per-file queue.
+      await store.save({ ...saved, filename: "after-failure" });
+      expect((await store.loadWithRevision(saved.fileId))?.revision).toBe(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

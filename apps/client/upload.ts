@@ -222,7 +222,8 @@ export async function uploadBuffer(
       // Persist manifest metadata only; the key stays with the caller.
       // A persistence failure surfaces explicitly instead of silently losing the manifest.
       try {
-        await options.manifestStore.save(manifest);
+        const persistedManifest = await options.manifestStore.save(manifest);
+        return { manifest: persistedManifest, encryptionKey };
       } catch (err) {
         // Manifest save failed after pieces were stored — remove this
         // attempt's pieces so no orphaned ciphertext remains.
