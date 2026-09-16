@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, rm, readFile, writeFile, stat } from "fs/promises";
+import { mkdtemp, mkdir, rm, readFile, writeFile, stat } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createIdentity } from "../identity/index.js";
@@ -202,6 +202,25 @@ describe("persistent node registry (OPENSTORE-014)", () => {
         expect(s.mode & 0o077).toBe(0);
       }
     } catch {}
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("10. persistence failures remain explicit without disabling in-memory operations", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openstore-reg-degraded-"));
+    const blockedPath = join(dir, "registry.json");
+    await mkdir(blockedPath);
+    const events: string[] = [];
+    const registry = createRegistry({
+      persistencePath: blockedPath,
+      onEvent: (event) => events.push(event.type === "persistence.write" ? event.outcome : event.type),
+    });
+    const identity = createIdentity();
+    const node = registry.register("http://127.0.0.1:4012", identity);
+    expect(node.nodeId).toBe(identity.publicKey.toString("base64"));
+    expect(registry.list()).toHaveLength(1);
+    expect(registry.persistenceStatus()).toMatchObject({ enabled: true, degraded: true, healthy: false, lastWriteOutcome: "error" });
+    expect(events).toContain("error");
+    expect(events.join("|")).not.toContain(blockedPath);
     await rm(dir, { recursive: true, force: true });
   });
 });

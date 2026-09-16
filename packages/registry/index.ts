@@ -8,9 +8,11 @@
 
 import { randomBytes } from "crypto";
 import {
+  chmodSync,
   mkdirSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from "fs";
 import { dirname } from "path";
@@ -203,6 +205,30 @@ export interface RegistryOptions {
   maxClockSkewMs?: number;
   /** Optional file path for persistent storage. If omitted, registry is in-memory only. */
   persistencePath?: string;
+  /** Optional safe observer for registry lifecycle and persistence events. */
+  logger?: RegistryLogger;
+  onEvent?: (event: RegistryEvent) => void;
+  onLifecycleEvent?: (event: RegistryEvent) => void;
+}
+
+export interface RegistryLogger {
+  info?: (message: string, details?: Record<string, number | string | boolean>) => void;
+  warn?: (message: string, details?: Record<string, number | string | boolean>) => void;
+  error?: (message: string, details?: Record<string, number | string | boolean>) => void;
+}
+
+export type RegistryEvent =
+  | { type: "registry.started"; persistence: "enabled" | "disabled" }
+  | { type: "persistence.load"; outcome: "success" | "missing" | "invalid" | "error"; records: number }
+  | { type: "persistence.write"; outcome: "success" | "error"; records: number }
+  | { type: "persistence.degraded"; degraded: boolean; operation: "load" | "write" };
+
+export interface PersistenceStatus {
+  enabled: boolean;
+  healthy: boolean;
+  degraded: boolean;
+  lastLoadOutcome?: "success" | "missing" | "invalid" | "error";
+  lastWriteOutcome?: "success" | "error";
 }
 
 /**
@@ -244,6 +270,7 @@ export interface Registry {
   registerDiscoveredPeer(peer: P2PPeerDescriptor, options?: { availableBytes?: number; usedBytes?: number; reliabilityScore?: number }): NodeRecord;
   removeDiscoveredPeer(nodeId: string): void;
   pruneExpired(): void;
+  persistenceStatus(): PersistenceStatus;
 }
 
 export interface SignedRegistration {
@@ -291,6 +318,21 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
   /** Idempotency keys `${auditId}:${nodeId}` for recorded storage audits. */
   const seenAuditIds = new Set<string>();
   const MAX_SEEN_AUDIT_IDS = 1000;
+  let persistenceDegraded = false;
+  let lastLoadOutcome: "success" | "missing" | "invalid" | "error" | undefined;
+  let lastWriteOutcome: PersistenceStatus["lastWriteOutcome"];
+  const emit = (event: RegistryEvent): void => {
+    try { options.onEvent?.(event); } catch {}
+    try { if (options.onLifecycleEvent && options.onLifecycleEvent !== options.onEvent) options.onLifecycleEvent(event); } catch {}
+    const level = event.type === "persistence.degraded" && event.degraded ? "warn" : event.type === "persistence.write" && event.outcome === "error" ? "error" : "info";
+    try { options.logger?.[level]?.(event.type, event.type === "persistence.load" ? { outcome: event.outcome, records: event.records } : event.type === "persistence.write" ? { outcome: event.outcome, records: event.records } : event.type === "persistence.degraded" ? { degraded: event.degraded, operation: event.operation } : { persistence: event.persistence }); } catch {}
+  };
+  const markDegraded = (degraded: boolean, operation: "load" | "write"): void => {
+    if (persistenceDegraded !== degraded) {
+      persistenceDegraded = degraded;
+      emit({ type: "persistence.degraded", degraded, operation });
+    }
+  };
 
   // --- Persistence helpers ---
   function isValidPersistedRecord(obj: unknown): NodeRecord | null {
@@ -367,13 +409,18 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
   }
 
   function loadPersisted(): void {
+    emit({ type: "registry.started", persistence: persistencePath ? "enabled" : "disabled" });
     if (!persistencePath) return;
     try {
       const data = readFileSync(persistencePath, "utf8");
       const parsed = JSON.parse(data) as Record<string, unknown>;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        lastLoadOutcome = "invalid"; markDegraded(true, "load"); emit({ type: "persistence.load", outcome: "invalid", records: 0 }); return;
+      }
       const rawNodes = parsed["nodes"];
-      if (!Array.isArray(rawNodes)) return;
+      if (!Array.isArray(rawNodes)) {
+        lastLoadOutcome = "invalid"; markDegraded(true, "load"); emit({ type: "persistence.load", outcome: "invalid", records: 0 }); return;
+      }
       for (const raw of rawNodes) {
         const rec = isValidPersistedRecord(raw);
         if (rec) nodes.set(rec.nodeId, rec);
@@ -387,8 +434,12 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
           }
         }
       }
-    } catch {
-      // Ignore malformed or missing file safely
+      lastLoadOutcome = "success"; emit({ type: "persistence.load", outcome: "success", records: nodes.size });
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? (error as { code?: string }).code : undefined;
+      lastLoadOutcome = code === "ENOENT" ? "missing" : error instanceof SyntaxError ? "invalid" : "error";
+      if (lastLoadOutcome !== "missing") markDegraded(true, "load");
+      emit({ type: "persistence.load", outcome: lastLoadOutcome, records: 0 });
     }
   }
 
@@ -407,20 +458,17 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     try {
       writeFileSync(tmpPath, payload, { mode: 0o600 });
       // Ensure restrictive perms even if file existed
-      try {
-        // chmod 0o600 where supported (ignore on Windows)
-        const { chmodSync } = require("fs");
-        chmodSync(tmpPath, 0o600);
-      } catch {}
+      try { chmodSync(tmpPath, 0o600); } catch {}
       renameSync(tmpPath, persistencePath);
+      lastWriteOutcome = "success";
+      markDegraded(false, "write");
+      emit({ type: "persistence.write", outcome: "success", records: nodes.size });
     } catch {
       // Clean up tmp on failure, previous file remains intact
-      try {
-        const { unlinkSync } = require("fs");
-        unlinkSync(tmpPath);
-      } catch {}
-      // Don't throw - persistence failure should not crash registry
-      // But for correctness, we should not silently ignore? For now, ignore
+      try { unlinkSync(tmpPath); } catch {}
+      lastWriteOutcome = "error";
+      markDegraded(true, "write");
+      emit({ type: "persistence.write", outcome: "error", records: nodes.size });
     }
   }
 
@@ -843,6 +891,10 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
 
     pruneExpired(): void {
       prune();
+    },
+    persistenceStatus(): PersistenceStatus {
+      const enabled = Boolean(persistencePath);
+      return { enabled, healthy: enabled ? !persistenceDegraded : true, degraded: enabled ? persistenceDegraded : false, lastLoadOutcome, lastWriteOutcome };
     },
   };
 

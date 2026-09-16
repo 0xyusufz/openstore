@@ -18,9 +18,14 @@ export async function runRegistryCoordinatorCli(argv: string[], io: { out?: (lin
       else throw new Error(`unknown option: ${arg}`);
     }
     if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error("port must be 0..65535");
-    const coordinator = createRegistryCoordinator({ registry: createRegistry({ persistencePath, heartbeatTimeoutMs: timeout }), token });
+    const registry = createRegistry({
+      persistencePath,
+      heartbeatTimeoutMs: timeout,
+      logger: { warn: (message, details) => err(JSON.stringify({ event: message, ...details })) },
+    });
+    const coordinator = createRegistryCoordinator({ registry, token });
     const actual = await coordinator.listen(port);
-    out(JSON.stringify({ event: "started", protocol: 1, url: `${coordinator.address}`, authenticated: Boolean(token) }));
+    out(JSON.stringify({ event: "started", protocol: 1, url: `${coordinator.address}`, authenticated: Boolean(token), persistence: registry.persistenceStatus() }));
     await new Promise<void>((resolve) => { const stop = () => { void coordinator.close().finally(resolve); }; process.once("SIGINT", stop); process.once("SIGTERM", stop); });
     return actual >= 0 ? 0 : 2;
   } catch (error) { err(error instanceof Error ? error.message : "registry coordinator failed"); return 2; }

@@ -28,11 +28,25 @@ export interface Libp2pStorageNodeRuntimeConfig {
   coordinatorToken?: string;
   heartbeatIntervalMs?: number;
   coordinatorHeartbeatIntervalMs?: number;
+  coordinatorRetryAttempts?: number;
+  coordinatorRetryBackoffMs?: number;
+  coordinatorRetryMaxBackoffMs?: number;
+  lifecycleEventCallback?: (event: Libp2pStorageNodeLifecycleEvent) => void;
+  onLifecycleEvent?: (event: Libp2pStorageNodeLifecycleEvent) => void;
+}
+
+export type Libp2pStorageNodeLifecycleState =
+  | "starting" | "registered" | "coordinator-unreachable" | "reconnecting" | "stopped";
+export interface Libp2pStorageNodeLifecycleEvent {
+  state: Libp2pStorageNodeLifecycleState;
+  previousState?: Libp2pStorageNodeLifecycleState;
+  error?: string;
 }
 
 export interface Libp2pStorageNodeRuntime {
   readonly identity: Identity;
   readonly node: Libp2pStorageNode;
+  readonly state: Libp2pStorageNodeLifecycleState;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -53,7 +67,7 @@ export function validateLibp2pStorageNodeRuntimeConfig(
     if (typeof value.coordinatorUrl !== "string" || !/^https?:\/\//.test(value.coordinatorUrl)) throw new TypeError("coordinatorUrl must be an HTTP URL");
   }
   if (value.coordinatorToken !== undefined && (typeof value.coordinatorToken !== "string" || value.coordinatorToken.length === 0)) throw new TypeError("coordinatorToken must be a non-empty string");
-  for (const field of ["capacityBytes", "maxPieceBytes", "discoveryRefreshIntervalMs", "heartbeatIntervalMs", "coordinatorHeartbeatIntervalMs"]) {
+  for (const field of ["capacityBytes", "maxPieceBytes", "discoveryRefreshIntervalMs", "heartbeatIntervalMs", "coordinatorHeartbeatIntervalMs", "coordinatorRetryAttempts", "coordinatorRetryBackoffMs", "coordinatorRetryMaxBackoffMs"]) {
     const n = value[field];
     if (n !== undefined && (!Number.isSafeInteger(n) || (n as number) <= 0)) throw new TypeError(`${field} must be a positive safe integer`);
   }
@@ -85,8 +99,14 @@ export async function createLibp2pStorageNodeRuntime(
   const coordinator: RegistryClient | undefined = input.coordinatorUrl
     ? createRegistryClient({ baseUrl: input.coordinatorUrl, token: input.coordinatorToken } satisfies RegistryClientOptions)
     : undefined;
-  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let registered = false;
+  let state: Libp2pStorageNodeLifecycleState = "stopped";
+  let startPromise: Promise<void> | undefined;
+  let stopPromise: Promise<void> | undefined;
+  let registrationPromise: Promise<void> | undefined;
+  let stopping = false;
   const descriptor = async (snapshot: { allocatedBytes: number; availableBytes: number }) => ({
     nodeId: node.peerId,
     baseUrl: `libp2p://${node.peerId}`,
@@ -95,42 +115,120 @@ export async function createLibp2pStorageNodeRuntime(
     identityBinding: node.peerId,
     capabilities: { ...node.capabilities, ...snapshot },
   });
+  const emit = (next: Libp2pStorageNodeLifecycleState, error?: unknown) => {
+    const previousState = state;
+    state = next;
+    if (previousState === next && !error) return;
+    try {
+      const event = {
+        state: next,
+        previousState,
+        ...(error === undefined ? {} : { error: safeLifecycleError(error) }),
+      };
+      input.lifecycleEventCallback?.(event);
+      if (input.onLifecycleEvent && input.onLifecycleEvent !== input.lifecycleEventCallback) input.onLifecycleEvent(event);
+    } catch { /* observers must not affect lifecycle */ }
+  };
+  const retryAttempts = input.coordinatorRetryAttempts ?? 3;
+  const retryBackoff = input.coordinatorRetryBackoffMs ?? 250;
+  const retryMaxBackoff = input.coordinatorRetryMaxBackoffMs ?? 5_000;
+  const interval = input.coordinatorHeartbeatIntervalMs ?? input.heartbeatIntervalMs ??
+    Math.max(1000, Math.floor((input.discoveryRefreshIntervalMs ?? 30_000) / 3));
+  const delay = (attempt: number) => Math.min(retryMaxBackoff, retryBackoff * 2 ** attempt);
+  const isNodeMissing = (error: unknown) => /node\s+not\s+found|not\s+registered|state\s+lost/i.test(error instanceof Error ? error.message : String(error));
+  const clearTimers = () => {
+    if (heartbeatTimer) { clearTimeout(heartbeatTimer); heartbeatTimer = undefined; }
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
+  };
+  const capacitySnapshot = async () => {
+    const usedBytes = await store.usedBytes();
+    return { allocatedBytes: capacity, usedBytes, availableBytes: Math.max(0, capacity - usedBytes) };
+  };
+  const performRegister = async () => {
+    if (!coordinator) return;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < retryAttempts; attempt++) {
+      if (stopping || state === "stopped") return;
+      try {
+        const snapshot = await capacitySnapshot();
+        await coordinator.registerLibp2pWithIdentity(identity, await descriptor(snapshot), snapshot);
+        registered = true;
+        emit("registered");
+        if (!stopping) scheduleHeartbeat();
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt + 1 < retryAttempts) await new Promise<void>((resolve) => setTimeout(resolve, delay(attempt)));
+      }
+    }
+    registered = false;
+    emit("coordinator-unreachable", lastError);
+    if (!stopping && state !== "stopped" && !reconnectTimer) {
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        if (stopping || state === "stopped") return;
+        emit("reconnecting");
+        void register();
+      }, delay(retryAttempts));
+    }
+  };
+  const register = () => registrationPromise ??= performRegister().finally(() => { registrationPromise = undefined; });
+  const scheduleHeartbeat = () => {
+    if (!coordinator || stopping || state === "stopped" || !registered) return;
+    heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = undefined;
+      void (async () => {
+        try {
+          const snapshot = await capacitySnapshot();
+          await coordinator.heartbeatLibp2pWithIdentity(identity, await descriptor(snapshot), snapshot);
+          scheduleHeartbeat();
+        } catch (error) {
+          registered = false;
+          emit(isNodeMissing(error) ? "reconnecting" : "coordinator-unreachable", error);
+          if (isNodeMissing(error)) void register();
+          else if (!reconnectTimer) {
+            reconnectTimer = setTimeout(() => { reconnectTimer = undefined; emit("reconnecting"); void register(); }, delay(0));
+          }
+        }
+      })();
+    }, interval);
+  };
+  const start = async () => {
+    if (state === "registered" || state === "coordinator-unreachable" || state === "reconnecting") return;
+    stopping = false;
+    emit("starting");
+    await node.start();
+    if (coordinator) {
+      await register();
+    } else emit("registered");
+  };
+  const stop = async () => {
+    stopping = true;
+    clearTimers();
+    if (startPromise) await startPromise;
+    if (registrationPromise) await registrationPromise;
+    if (coordinator && registered) {
+      try { await coordinator.unregisterWithIdentity(identity, node.peerId); } catch { /* coordinator may already be unavailable */ }
+      registered = false;
+    }
+    await node.stop();
+    emit("stopped");
+  };
   return {
     identity,
     node,
-    async start() {
-      await node.start();
-      if (coordinator) {
-        const capacitySnapshot = async () => {
-          const usedBytes = await store.usedBytes();
-          return { allocatedBytes: capacity, usedBytes, availableBytes: Math.max(0, capacity - usedBytes) };
-        };
-        const register = async () => {
-          const snapshot = await capacitySnapshot();
-          return coordinator.registerLibp2pWithIdentity(identity, await descriptor(snapshot), snapshot);
-        };
-        await register();
-        registered = true;
-        const interval = input.coordinatorHeartbeatIntervalMs ?? input.heartbeatIntervalMs ??
-          Math.max(1000, Math.floor((input.discoveryRefreshIntervalMs ?? 30_000) / 3));
-        heartbeatTimer = setInterval(() => {
-          void capacitySnapshot().then(async (snapshot) =>
-            coordinator.heartbeatLibp2pWithIdentity(identity, await descriptor(snapshot), snapshot),
-          ).catch(() => undefined);
-        }, interval);
-      }
-    },
-    async stop() {
-      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = undefined; }
-      if (coordinator && registered) {
-        try {
-          await coordinator.unregisterWithIdentity(identity, node.peerId);
-        } catch { /* coordinator may already be unavailable */ }
-        registered = false;
-      }
-      await node.stop();
-    },
+    get state() { return state; },
+    start() { return startPromise ??= start().finally(() => { startPromise = undefined; }); },
+    stop() { return stopPromise ??= stop().finally(() => { stopPromise = undefined; }); },
   };
+}
+
+function safeLifecycleError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw
+    .replace(/https?:\/\/[^\s]+/gi, "[coordinator]")
+    .replace(/(password|token|secret|private key|recovery phrase|seed)(?:\s*[:=]\s*)?[^\s:;,)]*/gi, "$1 [redacted]")
+    .slice(0, 300);
 }
 
 function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number) {

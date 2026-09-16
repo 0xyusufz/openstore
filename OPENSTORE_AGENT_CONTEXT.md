@@ -292,3 +292,27 @@ passed locally in approximately 9 seconds. No production runtime changes were
 needed. The current worktree still contains pre-existing untracked
 `.manual-043/` artifacts and untracked `tests/` content; do not remove or
 commit them without reviewing ownership.
+
+## 16. Milestone 045 status
+
+Milestone 045 adds operational hardening without changing the trusted
+coordinator architecture or HTTP storage behavior. Registry persistence now
+reports safe load/write/degraded status and injectable lifecycle events while
+retaining atomic temp-file plus rename writes and usable in-memory state when a
+write fails. The coordinator exposes backward-compatible health data plus
+`/v1/status`, safe lifecycle hooks, and contextual client errors classified as
+transient, authentication, configuration, or protocol failures.
+
+The standalone libp2p runtime now tracks `starting`, `registered`,
+`coordinator-unreachable`, `reconnecting`, and `stopped`; it coalesces
+registration work, retries with bounded exponential backoff, re-registers
+after coordinator state loss, resumes heartbeats after recovery, and cancels
+timers during shutdown. CLI lifecycle output is structured and sanitized.
+
+`tests/integration/milestone-045.test.ts` starts a persisted authenticated
+coordinator and two real standalone nodes, verifies replicated encrypted
+storage, stops and restarts only the coordinator, confirms metadata reload and
+node recovery, verifies expiry of a killed node, restarts that node with the
+same identity and storage, and confirms persisted retrieval. Focused tests also
+cover persistence degradation, contextual coordinator errors, and safe runtime
+lifecycle events. Full validation must be rerun after later changes.

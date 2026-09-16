@@ -24,7 +24,7 @@ function errorMessage(error: unknown): string {
 }
 
 function usage(): string {
-  return "Usage: openstore-storage-node --storage-dir <dir> --identity <keystore> --password-env <ENV> [--listen <multiaddr>] [--bootstrap <descriptor.json>] [--capacity-bytes <n>] [--max-piece-bytes <n>] [--refresh-interval-ms <n>] [--coordinator-url <url>] [--coordinator-token-env <ENV>] [--coordinator-token <token>] [--heartbeat-interval-ms <n>]";
+  return "Usage: openstore-storage-node --storage-dir <dir> --identity <keystore> --password-env <ENV> [--listen <multiaddr>] [--bootstrap <descriptor.json>] [--capacity-bytes <n>] [--max-piece-bytes <n>] [--refresh-interval-ms <n>] [--coordinator-url <url>] [--coordinator-token-env <ENV>] [--coordinator-token <token>] [--heartbeat-interval-ms <n>] [--coordinator-retry-attempts <n>] [--coordinator-retry-backoff-ms <n>] [--coordinator-retry-max-backoff-ms <n>]";
 }
 
 export async function runStorageNodeCli(argv: string[], options: StorageNodeCliOptions = {}): Promise<number> {
@@ -37,7 +37,7 @@ export async function runStorageNodeCli(argv: string[], options: StorageNodeCliO
       const arg = argv[i];
       if (arg === "--help" || arg === "-h") { out(usage()); return 0; }
       const key = arg?.replace(/^--/, "");
-      if (!key || !["storage-dir", "identity", "identity-path", "keystore", "password-env", "listen", "bootstrap", "config", "capacity-bytes", "max-piece-bytes", "refresh-interval-ms", "coordinator-url", "coordinator-token-env", "coordinator-token", "heartbeat-interval-ms"].includes(key)) throw new Error(`unknown option: ${arg}`);
+      if (!key || !["storage-dir", "identity", "identity-path", "keystore", "password-env", "listen", "bootstrap", "config", "capacity-bytes", "max-piece-bytes", "refresh-interval-ms", "coordinator-url", "coordinator-token-env", "coordinator-token", "heartbeat-interval-ms", "coordinator-retry-attempts", "coordinator-retry-backoff-ms", "coordinator-retry-max-backoff-ms"].includes(key)) throw new Error(`unknown option: ${arg}`);
       const value = argv[++i];
       if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
       if (key === "listen") listens.push(value); else parsed[key] = value;
@@ -63,9 +63,25 @@ export async function runStorageNodeCli(argv: string[], options: StorageNodeCliO
     }
     if (parsed["coordinator-token"]) config.coordinatorToken = parsed["coordinator-token"];
     if (parsed["heartbeat-interval-ms"]) config.heartbeatIntervalMs = Number(parsed["heartbeat-interval-ms"]);
+    if (parsed["coordinator-retry-attempts"]) config.coordinatorRetryAttempts = Number(parsed["coordinator-retry-attempts"]);
+    if (parsed["coordinator-retry-backoff-ms"]) config.coordinatorRetryBackoffMs = Number(parsed["coordinator-retry-backoff-ms"]);
+    if (parsed["coordinator-retry-max-backoff-ms"]) config.coordinatorRetryMaxBackoffMs = Number(parsed["coordinator-retry-max-backoff-ms"]);
     if (parsed.bootstrap) {
       config.bootstrapPeers = JSON.parse(await readFile(parsed.bootstrap, "utf8")) as P2PPeerDescriptor[];
     }
+    const configuredLifecycle = (config.lifecycleEventCallback ?? config.onLifecycleEvent) as
+      ((event: { state: string; previousState?: string; error?: unknown }) => void) | undefined;
+    const lifecycleOutput = (event: { state: string; previousState?: string; error?: unknown }) => {
+      const safe = {
+        event: "lifecycle",
+        state: event.state,
+        ...(event.previousState ? { previousState: event.previousState } : {}),
+        ...(event.error === undefined ? {} : { error: errorMessage(event.error) }),
+      };
+      out(JSON.stringify(safe));
+      configuredLifecycle?.(event);
+    };
+    config.lifecycleEventCallback = lifecycleOutput;
     validateLibp2pStorageNodeRuntimeConfig(config);
     const runtime = await createLibp2pStorageNodeRuntime(config);
     let stopping: Promise<void> | undefined;

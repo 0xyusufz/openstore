@@ -28,7 +28,24 @@ describe("cross-process registry coordinator", () => {
     await coordinator.close();
 
     const unavailable = createRegistryClient({ baseUrl: "http://127.0.0.1:1" });
-    await expect(unavailable.nodes()).rejects.toBeInstanceOf(Error);
+    await expect(unavailable.nodes()).rejects.toMatchObject({ operation: "nodes", classification: "transient" });
+  });
+
+  it("exposes safe persistence status and contextual client errors", async () => {
+    const events: string[] = [];
+    const coordinator = createRegistryCoordinator({
+      registry: createRegistry({ onEvent: (event) => events.push(event.type) }),
+      token: "secret",
+      onEvent: (event) => events.push(event.type),
+    });
+    const port = await coordinator.listen(0);
+    const client = createRegistryClient({ baseUrl: `http://127.0.0.1:${port}`, token: "secret" });
+    await expect(client.status()).resolves.toMatchObject({ status: "ok", persistence: { enabled: false, healthy: true } });
+    await coordinator.close();
+    expect(events).toContain("coordinator.started");
+    expect(events).toContain("coordinator.closed");
+    expect(events).not.toContain("secret");
+    await expect(client.nodes()).rejects.toMatchObject({ operation: "nodes", classification: "transient" });
   });
 
   it("does not allow an untrusted process to use the coordinator", async () => {

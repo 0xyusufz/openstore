@@ -35,6 +35,27 @@ describe("libp2p storage-node runtime", () => {
     await rm(dir, { recursive: true, force: true });
   }, 20_000);
 
+  it("emits safe lifecycle states and reaches stopped cleanly", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openstore-libp2p-lifecycle-"));
+    const keystore = join(dir, "identity.json");
+    await saveIdentity(createIdentity(), "test-password", keystore);
+    const events: Array<{ state: string; error?: string }> = [];
+    const runtime = await createLibp2pStorageNodeRuntime({
+      storageDir: join(dir, "pieces"),
+      identityPath: keystore,
+      identityPassword: "test-password",
+      listenAddrs: ["/ip4/127.0.0.1/tcp/0"],
+      lifecycleEventCallback: (event) => events.push({ state: event.state, error: event.error }),
+    });
+    await runtime.start();
+    expect(runtime.state).toBe("registered");
+    await runtime.stop();
+    expect(runtime.state).toBe("stopped");
+    expect(events.map((event) => event.state)).toEqual(["starting", "registered", "stopped"]);
+    expect(events.every((event) => !event.error || !/password|token|private key|recovery phrase/i.test(event.error))).toBe(true);
+    await rm(dir, { recursive: true, force: true });
+  }, 20_000);
+
   it("runs two independent CLI processes and retrieves a piece after restart", async () => {
     const dir = await mkdtemp(join(tmpdir(), "openstore-libp2p-process-"));
     const identity = createIdentity();
