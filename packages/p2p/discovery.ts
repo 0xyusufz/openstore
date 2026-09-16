@@ -1,5 +1,6 @@
 import {
   type PeerDiscovery,
+  type PeerDiscoveryOptions,
   type P2PPeerDescriptor,
   validateP2PPeerDescriptor,
 } from "./index.js";
@@ -12,15 +13,24 @@ export class StaticPeerDiscovery implements PeerDiscovery {
   private static readonly advertised = new Map<string, P2PPeerDescriptor>();
   private started = false;
   private localNodeId?: string;
+  private refreshTimer?: ReturnType<typeof setTimeout>;
+  private refreshOptions?: PeerDiscoveryOptions;
 
   constructor(private readonly bootstrapPeers: readonly P2PPeerDescriptor[] = []) {
     this.bootstrapPeers = bootstrapPeers.map(cloneAndValidate);
   }
 
-  async start(local: P2PPeerDescriptor): Promise<void> {
+  async start(local: P2PPeerDescriptor, options: PeerDiscoveryOptions = {}): Promise<void> {
     const descriptor = cloneAndValidate(local);
+    if (this.started) return;
+    if (options.refreshIntervalMs !== undefined &&
+      (!Number.isSafeInteger(options.refreshIntervalMs) || options.refreshIntervalMs <= 0)) {
+      throw new TypeError("peer discovery refresh interval must be a positive safe integer");
+    }
     this.started = true;
     this.localNodeId = descriptor.nodeId;
+    this.refreshOptions = options;
+    await this.refresh();
   }
 
   async advertise(local: P2PPeerDescriptor): Promise<void> {
@@ -40,9 +50,34 @@ export class StaticPeerDiscovery implements PeerDiscovery {
   }
 
   async stop(): Promise<void> {
+    if (this.refreshTimer !== undefined) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
     if (this.localNodeId !== undefined) StaticPeerDiscovery.advertised.delete(this.localNodeId);
     this.localNodeId = undefined;
+    this.refreshOptions = undefined;
     this.started = false;
+  }
+
+  private async refresh(): Promise<void> {
+    if (!this.started) return;
+    try {
+      const peers = await this.discover();
+      await this.refreshOptions?.onRefresh?.(peers);
+    } catch {
+      // A failed discovery pass must not terminate future refreshes.
+    } finally {
+      if (this.started && this.refreshOptions?.refreshIntervalMs !== undefined) {
+        const interval = this.refreshOptions.refreshIntervalMs;
+        if (Number.isFinite(interval) && interval > 0) {
+          this.refreshTimer = setTimeout(() => {
+            this.refreshTimer = undefined;
+            void this.refresh();
+          }, interval);
+        }
+      }
+    }
   }
 }
 

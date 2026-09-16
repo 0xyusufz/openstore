@@ -78,4 +78,68 @@ describe("static peer discovery (OPENSTORE-034)", () => {
     await node.stop();
     await expect(discovery.discover()).rejects.toThrow(/not started/i);
   });
+
+  it("rejects invalid refresh intervals", async () => {
+    const discovery = new StaticPeerDiscovery();
+    const descriptor = {
+      nodeId: "peer",
+      baseUrl: "libp2p://peer",
+      identity: { publicKey: createIdentity().publicKey.toString("base64") },
+      capabilities: { pieceStore: true, pieceGet: true, pieceDelete: true },
+    };
+    await expect(discovery.start(descriptor, { refreshIntervalMs: 0 })).rejects.toThrow(/refresh interval/i);
+  });
+
+  it("refreshes and connects to a peer advertised after startup", async () => {
+    const secondDiscovery = new StaticPeerDiscovery();
+    const second = await createLibp2pStorageNode({
+      ...storageOptions(secondDiscovery),
+      discoveryRefreshIntervalMs: 20,
+    });
+    nodes.push(second);
+    await second.start();
+
+    const firstDiscovery = new StaticPeerDiscovery();
+    const first = await createLibp2pStorageNode(storageOptions(firstDiscovery));
+    nodes.push(first);
+    await first.start();
+
+    await waitFor(() => second.discoveredPeers.some((peer) => peer.nodeId === first.peerId));
+    await waitFor(() => second.node.getConnections().some((connection) => connection.remotePeer.toString() === first.peerId));
+    const connectedCount = second.node.getConnections().filter((connection) => connection.remotePeer.toString() === first.peerId).length;
+    expect(connectedCount).toBeLessThanOrEqual(2);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(second.node.getConnections().filter((connection) => connection.remotePeer.toString() === first.peerId)).toHaveLength(connectedCount);
+  }, 20_000);
+
+  it("keeps refreshing around unreachable peers and has idempotent lifecycle", async () => {
+    const identity = { publicKey: createIdentity().publicKey.toString("base64") };
+    const unreachable: P2PPeerDescriptor = {
+      nodeId: "12D3KooWJ5rVx8z7LzYyM8n4q2k7b3s6d9f1h5j8p2c4v6x8z",
+      baseUrl: "libp2p://unreachable",
+      multiaddr: "/ip4/127.0.0.1/tcp/1",
+      identity,
+      capabilities: { pieceStore: true, pieceGet: true, pieceDelete: true },
+    };
+    const discovery = new StaticPeerDiscovery([unreachable]);
+    const node = await createLibp2pStorageNode({
+      ...storageOptions(discovery),
+      discoveryRefreshIntervalMs: 10,
+    });
+    nodes.push(node);
+    await node.start();
+    await node.start();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await node.stop();
+    await node.stop();
+    await expect(discovery.discover()).rejects.toThrow(/not started/i);
+  }, 20_000);
 });
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(predicate()).toBe(true);
+}

@@ -30,6 +30,7 @@ export interface Libp2pStorageNodeOptions {
   getPiece: (pieceId: string) => Promise<Buffer | null>;
   deletePiece: (pieceId: string) => Promise<number>;
   discovery?: PeerDiscovery;
+  discoveryRefreshIntervalMs?: number;
 }
 
 export interface Libp2pStorageNode {
@@ -86,22 +87,13 @@ export async function createLibp2pStorageNode(
       if (node.status !== "started") await node.start();
       if (options.discovery) {
         const descriptor = createLocalDescriptor(wrapper, options);
-        await options.discovery.start(descriptor);
+        await options.discovery.start(descriptor, {
+          refreshIntervalMs: options.discoveryRefreshIntervalMs,
+          onRefresh: async (peers) => {
+            discoveredPeers = await reconcilePeers(wrapper, peers);
+          },
+        });
         await options.discovery.advertise(descriptor);
-        const discovered = await options.discovery.discover();
-        const peers = discovered.filter((peer) => peer.nodeId !== wrapper.peerId && peer.multiaddr !== undefined);
-        const seen = new Set<string>();
-        for (const peer of peers) {
-          validateP2PPeerDescriptor(peer);
-          if (seen.has(peer.nodeId)) continue;
-          seen.add(peer.nodeId);
-          try {
-            await node.dial(multiaddr(peer.multiaddr!));
-          } catch {
-            // Discovery must not take down the node when a bootstrap peer is unavailable.
-          }
-        }
-        discoveredPeers = peers;
       }
     },
     async stop(): Promise<void> {
@@ -110,6 +102,38 @@ export async function createLibp2pStorageNode(
     },
   };
   return wrapper;
+}
+
+const pendingDials = new WeakMap<Libp2pStorageNode, Set<string>>();
+
+async function reconcilePeers(wrapper: Libp2pStorageNode, discovered: readonly P2PPeerDescriptor[]): Promise<readonly P2PPeerDescriptor[]> {
+  const pending = pendingDials.get(wrapper) ?? new Set<string>();
+  pendingDials.set(wrapper, pending);
+  const peers = discovered
+    .filter((peer) => peer.nodeId !== wrapper.peerId && peer.multiaddr !== undefined)
+    .map((peer) => {
+      validateP2PPeerDescriptor(peer);
+      return peer;
+    });
+  const unique = [...new Map(peers.map((peer) => [peer.nodeId, peer])).values()];
+  await Promise.all(unique.map(async (peer) => {
+    if (pending.has(peer.nodeId)) return;
+    if (wrapper.node.getConnections().some((connection) => connection.remotePeer.toString() === peer.nodeId)) return;
+    pending.add(peer.nodeId);
+    try {
+      const connection = await wrapper.node.dial(multiaddr(peer.multiaddr!), {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (connection.remotePeer.toString() !== peer.nodeId) {
+        await connection.close();
+      }
+    } catch {
+      // Unreachable peers are retried by the next refresh pass.
+    } finally {
+      pending.delete(peer.nodeId);
+    }
+  }));
+  return unique;
 }
 
 function createLocalDescriptor(wrapper: Libp2pStorageNode, options: Libp2pStorageNodeOptions): P2PPeerDescriptor {
@@ -217,6 +241,10 @@ function validateOptions(options: Libp2pStorageNodeOptions): void {
   const publicKey = Buffer.from(options.applicationIdentity.publicKey, "base64");
   if (publicKey.length !== 44 || publicKey.toString("base64") !== options.applicationIdentity.publicKey) throw new TypeError("application identity is invalid");
   if (options.maxPieceBytes !== undefined && (!Number.isSafeInteger(options.maxPieceBytes) || options.maxPieceBytes <= 0)) throw new TypeError("maxPieceBytes must be positive");
+  if (options.discoveryRefreshIntervalMs !== undefined &&
+    (!Number.isSafeInteger(options.discoveryRefreshIntervalMs) || options.discoveryRefreshIntervalMs <= 0)) {
+    throw new TypeError("discoveryRefreshIntervalMs must be a positive safe integer");
+  }
 }
 
 function validatePieceRequest(request: PieceRequest): void {

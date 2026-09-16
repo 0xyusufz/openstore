@@ -41,10 +41,15 @@ export interface P2PPeerDescriptor extends P2PNodeDescriptor {
 }
 
 export interface PeerDiscovery {
-  start(local: P2PPeerDescriptor): Promise<void>;
+  start(local: P2PPeerDescriptor, options?: PeerDiscoveryOptions): Promise<void>;
   advertise(local: P2PPeerDescriptor): Promise<void>;
   discover(): Promise<readonly P2PPeerDescriptor[]>;
   stop(): Promise<void>;
+}
+
+export interface PeerDiscoveryOptions {
+  refreshIntervalMs?: number;
+  onRefresh?: (peers: readonly P2PPeerDescriptor[]) => Promise<void> | void;
 }
 
 export interface P2PTransportRequestOptions {
