@@ -18,6 +18,11 @@ export interface P2PNodeAddress {
   baseUrl: string;
 }
 
+export interface Libp2pNodeAddress extends P2PNodeAddress {
+  /** Static dial address, including /p2p/<peer-id>. */
+  multiaddr: string;
+}
+
 export interface P2PNodeCapabilities {
   pieceStore: boolean;
   pieceGet: boolean;
@@ -89,8 +94,8 @@ export function validateP2PNodeAddress(node: unknown): asserts node is P2PNodeAd
   } catch {
     throw new TypeError("node address baseUrl must be a valid URL");
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new TypeError("node address baseUrl must use http or https");
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "libp2p:") {
+    throw new TypeError("node address baseUrl must use http or https or libp2p");
   }
   if (parsed.username !== "" || parsed.password !== "") {
     throw new TypeError("node address baseUrl must not contain credentials");
