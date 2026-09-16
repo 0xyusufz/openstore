@@ -4,7 +4,8 @@ import { mplex } from "@libp2p/mplex";
 import { noise } from "@chainsafe/libp2p-noise";
 import { multiaddr } from "@multiformats/multiaddr";
 import type { Libp2p } from "@libp2p/interface";
-import type { P2PNodeCapabilities, P2PNodeIdentity, P2PTransport, P2PTransportRequestOptions, P2PNodeAddress, P2PGetResult, P2PHealthResult } from "./index.js";
+import type { P2PNodeCapabilities, P2PNodeIdentity, P2PTransport, P2PTransportRequestOptions, P2PNodeAddress, P2PGetResult, P2PHealthResult, PeerDiscovery, P2PPeerDescriptor } from "./index.js";
+import { validateP2PPeerDescriptor } from "./index.js";
 
 export const OPENSTORE_PIECE_PROTOCOL = "/openstore/piece/1.0.0";
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
@@ -28,6 +29,7 @@ export interface Libp2pStorageNodeOptions {
   storePiece: (pieceId: string, data: Buffer) => Promise<number>;
   getPiece: (pieceId: string) => Promise<Buffer | null>;
   deletePiece: (pieceId: string) => Promise<number>;
+  discovery?: PeerDiscovery;
 }
 
 export interface Libp2pStorageNode {
@@ -36,6 +38,7 @@ export interface Libp2pStorageNode {
   readonly capabilities: P2PNodeCapabilities;
   readonly node: Libp2p;
   readonly listenAddrs: string[];
+  readonly discoveredPeers: readonly P2PPeerDescriptor[];
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -56,6 +59,7 @@ export async function createLibp2pStorageNode(
     pieceDelete: true,
     maxPieceBytes: options.maxPieceBytes,
   };
+  let discoveredPeers: readonly P2PPeerDescriptor[] = [];
   await node.handle(OPENSTORE_PIECE_PROTOCOL, async (stream) => {
     try {
       const request = await readMessage<PieceRequest>(stream as AsyncIterable<unknown>);
@@ -75,14 +79,47 @@ export async function createLibp2pStorageNode(
     get listenAddrs() {
       return node.getMultiaddrs().map((address) => address.toString());
     },
+    get discoveredPeers() {
+      return discoveredPeers;
+    },
     async start(): Promise<void> {
       if (node.status !== "started") await node.start();
+      if (options.discovery) {
+        const descriptor = createLocalDescriptor(wrapper, options);
+        await options.discovery.start(descriptor);
+        await options.discovery.advertise(descriptor);
+        const discovered = await options.discovery.discover();
+        const peers = discovered.filter((peer) => peer.nodeId !== wrapper.peerId && peer.multiaddr !== undefined);
+        const seen = new Set<string>();
+        for (const peer of peers) {
+          validateP2PPeerDescriptor(peer);
+          if (seen.has(peer.nodeId)) continue;
+          seen.add(peer.nodeId);
+          try {
+            await node.dial(multiaddr(peer.multiaddr!));
+          } catch {
+            // Discovery must not take down the node when a bootstrap peer is unavailable.
+          }
+        }
+        discoveredPeers = peers;
+      }
     },
     async stop(): Promise<void> {
+      await options.discovery?.stop();
       if (node.status === "started") await node.stop();
     },
   };
   return wrapper;
+}
+
+function createLocalDescriptor(wrapper: Libp2pStorageNode, options: Libp2pStorageNodeOptions): P2PPeerDescriptor {
+  return {
+    nodeId: wrapper.peerId,
+    baseUrl: `libp2p://${wrapper.peerId}`,
+    multiaddr: wrapper.listenAddrs[0],
+    identity: wrapper.applicationIdentity,
+    capabilities: wrapper.capabilities,
+  };
 }
 
 export class Libp2pPieceTransport implements P2PTransport {

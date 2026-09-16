@@ -35,6 +35,18 @@ export interface P2PNodeDescriptor extends P2PNodeAddress {
   capabilities: P2PNodeCapabilities;
 }
 
+export interface P2PPeerDescriptor extends P2PNodeDescriptor {
+  /** Static libp2p dial address, including /p2p/<peer-id> when used. */
+  multiaddr?: string;
+}
+
+export interface PeerDiscovery {
+  start(local: P2PPeerDescriptor): Promise<void>;
+  advertise(local: P2PPeerDescriptor): Promise<void>;
+  discover(): Promise<readonly P2PPeerDescriptor[]>;
+  stop(): Promise<void>;
+}
+
 export interface P2PTransportRequestOptions {
   timeoutMs: number;
 }
@@ -138,4 +150,50 @@ export function createP2PNodeDescriptor(
     throw new TypeError("node maxPieceBytes must be a positive safe integer");
   }
   return { ...address, identity: { ...identity }, capabilities: { ...capabilities } };
+}
+
+const SENSITIVE_DESCRIPTOR_KEYS = new Set([
+  "privateKey",
+  "secretKey",
+  "seed",
+  "password",
+  "recoveryPhrase",
+  "mnemonic",
+]);
+
+export function validateP2PPeerDescriptor(value: unknown): asserts value is P2PPeerDescriptor {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("peer descriptor must be an object");
+  }
+  const descriptor = value as Record<string, unknown>;
+  rejectSensitiveKeys(descriptor);
+  validateP2PNodeAddress(descriptor);
+  validateP2PNodeIdentity(descriptor.identity);
+  if (!descriptor.capabilities || typeof descriptor.capabilities !== "object") {
+    throw new TypeError("peer descriptor capabilities are required");
+  }
+  const capabilities = descriptor.capabilities as P2PNodeCapabilities;
+  if (capabilities.pieceStore !== true || capabilities.pieceGet !== true || capabilities.pieceDelete !== true) {
+    throw new TypeError("peer descriptor capabilities are invalid");
+  }
+  if (descriptor.multiaddr !== undefined) {
+    if (typeof descriptor.multiaddr !== "string" || descriptor.multiaddr.length === 0 || descriptor.multiaddr.length > 2048) {
+      throw new TypeError("peer descriptor multiaddr is invalid");
+    }
+    if (!descriptor.multiaddr.startsWith("/ip4/") && !descriptor.multiaddr.startsWith("/ip6/") && !descriptor.multiaddr.startsWith("/dns")) {
+      throw new TypeError("peer descriptor multiaddr uses an unsupported protocol");
+    }
+    if (descriptor.multiaddr.includes("/p2p/") && !descriptor.multiaddr.endsWith(`/p2p/${descriptor.nodeId}`)) {
+      throw new TypeError("peer descriptor identity does not match multiaddr");
+    }
+  }
+  return;
+}
+
+function rejectSensitiveKeys(value: unknown): void {
+  if (!value || typeof value !== "object") return;
+  for (const [key, nested] of Object.entries(value)) {
+    if (SENSITIVE_DESCRIPTOR_KEYS.has(key)) throw new TypeError("peer descriptor contains private material");
+    rejectSensitiveKeys(nested);
+  }
 }
