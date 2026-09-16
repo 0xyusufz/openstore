@@ -6,6 +6,7 @@ import { multiaddr } from "@multiformats/multiaddr";
 import type { Libp2p } from "@libp2p/interface";
 import type { P2PNodeCapabilities, P2PNodeIdentity, P2PTransport, P2PTransportRequestOptions, P2PNodeAddress, P2PGetResult, P2PHealthResult, PeerDiscovery, P2PPeerDescriptor } from "./index.js";
 import { validateP2PPeerDescriptor } from "./index.js";
+import { createDhtServices, DhtPeerDiscovery } from "./dht-discovery.js";
 
 export const OPENSTORE_PIECE_PROTOCOL = "/openstore/piece/1.0.0";
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
@@ -53,7 +54,9 @@ export async function createLibp2pStorageNode(
     transports: [tcp()],
     streamMuxers: [mplex()],
     connectionEncrypters: [noise()],
+    services: options.discovery instanceof DhtPeerDiscovery ? createDhtServices() : undefined,
   });
+  if (options.discovery instanceof DhtPeerDiscovery) options.discovery.attach(node as never);
   const capabilities: P2PNodeCapabilities = {
     pieceStore: true,
     pieceGet: true,
