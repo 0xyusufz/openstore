@@ -24,6 +24,10 @@ import type { FileManifest } from "../../packages/manifest/index.js";
 import type { ManifestStore } from "../../packages/manifest/store.js";
 import { DEFAULT_TIMEOUT_MS } from "./index.js";
 import type { StorageNodeEndpoint } from "./index.js";
+import type { CoordinatorEndpointProvider } from "./index.js";
+import { resolveEndpoints } from "./coordinator.js";
+import type { P2PTransport } from "../../packages/p2p/index.js";
+import { MixedStorageTransport, HttpStorageTransport } from "./http-transport.js";
 
 export const DELETE_VERSION = 1;
 
@@ -39,6 +43,9 @@ export interface DeleteFileOptions {
    * every piece deletion succeeded or was confirmed already absent.
    */
   manifestStore?: ManifestStore;
+  /** Discover endpoints from a coordinator when endpoints is empty. */
+  coordinator?: CoordinatorEndpointProvider;
+  transport?: P2PTransport;
 }
 
 /**
@@ -112,6 +119,7 @@ export async function deleteFile(
   options: DeleteFileOptions = {},
 ): Promise<DeleteFileReport> {
   const checked = revalidateManifest(manifest);
+  endpoints = await resolveEndpoints(endpoints, options.coordinator);
   assertValidEndpoints(endpoints);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -121,11 +129,12 @@ export async function deleteFile(
   const deleted: DeletedPiece[] = [];
   const alreadyAbsent: DeletedPiece[] = [];
   const failed: DeleteFailure[] = [];
+  const transport = options.transport ?? new MixedStorageTransport(new HttpStorageTransport(options.identity));
 
   await Promise.all(
     checked.chunks.flatMap((chunk) =>
       endpoints.map(async (endpoint) => {
-        const outcome = await deletePieceOnNode(endpoint, chunk.pieceId, timeoutMs, options.identity);
+        const outcome = await deletePieceOnNode(endpoint, chunk.pieceId, timeoutMs, options.identity, transport);
         if (outcome === "deleted") {
           deleted.push({ endpoint, pieceId: chunk.pieceId });
         } else if (outcome === "absent") {
@@ -166,9 +175,22 @@ async function deletePieceOnNode(
   pieceId: string,
   timeoutMs: number,
   identity?: { publicKey: Buffer; privateKey: Buffer },
+  transport?: P2PTransport,
 ): Promise<DeleteOutcome> {
   const path = `/pieces/${encodeURIComponent(pieceId)}`;
   try {
+    if (transport) {
+      const res = await transport.deletePiece({
+        nodeId: endpoint.id,
+        baseUrl: endpoint.baseUrl,
+        ...(endpoint.multiaddr === undefined ? {} : { multiaddr: endpoint.multiaddr }),
+        ...(endpoint.identityBinding === undefined ? {} : { identityBinding: endpoint.identityBinding }),
+        ...(endpoint.identity === undefined ? {} : { identity: endpoint.identity }),
+      }, pieceId, { timeoutMs });
+      if (res.status === 204 || res.status === 200) return "deleted";
+      if (res.status === 404) return "absent";
+      return { status: res.status, error: `unexpected status ${res.status}` };
+    }
     const headers: Record<string, string> = {};
     if (identity) {
       const { createAuthHeaders } = await import("../../packages/auth/index.js");

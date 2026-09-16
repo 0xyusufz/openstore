@@ -34,6 +34,9 @@ import { isTransientError, storePieceOnNodes } from "./index.js";
 import type { StorageNodeEndpoint } from "./index.js";
 import type { Registry } from "../../packages/registry/index.js";
 import type { ManifestStore } from "../../packages/manifest/store.js";
+import type { CoordinatorEndpointProvider } from "./index.js";
+import { resolveEndpoints } from "./coordinator.js";
+import type { P2PTransport } from "../../packages/p2p/index.js";
 
 /**
  * Options for {@link uploadBuffer}.
@@ -52,6 +55,10 @@ export interface UploadOptions {
    * The encryption key is never persisted — only manifest metadata.
    */
   manifestStore?: ManifestStore;
+  /** Discover endpoints from a coordinator when endpoints is empty. */
+  coordinator?: CoordinatorEndpointProvider;
+  transport?: P2PTransport;
+  identity?: { publicKey: Buffer; privateKey: Buffer };
 }
 
 /**
@@ -87,6 +94,7 @@ export async function uploadBuffer(
     throw new TypeError("filename must be a non-empty string");
   }
   const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
+  endpoints = await resolveEndpoints(endpoints, options.coordinator);
 
   const fileId = generateFileId();
   const encryptionKey = generateEncryptionKey();
@@ -135,6 +143,8 @@ export async function uploadBuffer(
       replicationFactor,
       retryAttempts: options.retryAttempts,
       retryBackoffMs: options.retryBackoffMs,
+      transport: options.transport,
+      identity: options.identity,
     });
     if (report.succeeded.length === 0) {
       const reasons = report.failed

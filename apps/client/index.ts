@@ -20,6 +20,7 @@
 
 import { createHash } from "crypto";
 import { HttpStorageTransport } from "./http-transport.js";
+import { MixedStorageTransport } from "./http-transport.js";
 import type { P2PTransport } from "../../packages/p2p/index.js";
 import type { P2PNodeAddress, P2PNodeIdentity } from "../../packages/p2p/index.js";
 
@@ -39,6 +40,22 @@ export const MAX_RETRY_BACKOFF_MS = 1000;
 export interface StorageNodeEndpoint {
   id: string;
   baseUrl: string;
+  /** Transport advertised by the coordinator. */
+  transport?: "http" | "libp2p";
+  /** Capacity metadata advertised by the coordinator. */
+  capacity?: {
+    allocatedBytes?: number;
+    totalBytes?: number;
+    usedBytes: number;
+    availableBytes: number;
+  };
+  /** Capability metadata advertised by the coordinator. */
+  capabilities?: {
+    pieceStore: boolean;
+    pieceGet: boolean;
+    pieceDelete: boolean;
+    maxPieceBytes?: number;
+  };
   /** Static libp2p address for libp2p:// endpoints. */
   multiaddr?: string;
   /** Public OpenStore-to-libp2p identity binding. */
@@ -48,6 +65,12 @@ export interface StorageNodeEndpoint {
   reliabilityScore?: number;
   /** Optional storage-audit health score (0–100) from registry discovery metadata. */
   storageScore?: number;
+}
+
+/** A source of coordinator-discovered storage endpoints. */
+export interface CoordinatorEndpointProvider {
+  refresh(): Promise<StorageNodeEndpoint[]>;
+  getEndpoints(): StorageNodeEndpoint[];
 }
 
 /**
@@ -178,7 +201,7 @@ async function storePieceOnNodesUncoordinated(
   );
   const succeeded: StorageNodeEndpoint[] = [];
   const failed: NodeFailure[] = [];
-  const transport = options.transport ?? new HttpStorageTransport(options.identity);
+  const transport = options.transport ?? new MixedStorageTransport(new HttpStorageTransport(options.identity));
   for (const endpoint of selected) {
     if (succeeded.length >= Math.min(replicationFactor, endpoints.length)) break;
     const failure = await postToNode(endpoint, pieceId, data, timeoutMs, transport, options);
@@ -208,7 +231,7 @@ export async function deletePieceFromNodes(
   assertValidPieceIdArg(pieceId);
   if (!Array.isArray(endpoints) || endpoints.length === 0) return;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const transport = options.transport ?? new HttpStorageTransport(options.identity);
+  const transport = options.transport ?? new MixedStorageTransport(new HttpStorageTransport(options.identity));
   await Promise.all(
     endpoints.map(async (endpoint) => {
       try {
@@ -257,7 +280,7 @@ export async function getPieceFromNodes(
   assertValidRetryOptions(options.retryAttempts, options.retryBackoffMs);
 
   const problems: string[] = [];
-  const transport = options.transport ?? new HttpStorageTransport(options.identity);
+  const transport = options.transport ?? new MixedStorageTransport(new HttpStorageTransport(options.identity));
   for (const endpoint of endpoints) {
     const attempts = options.retryAttempts ?? DEFAULT_RETRY_ATTEMPTS;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -415,6 +438,7 @@ function assertValidRetryOptions(attempts: number | undefined, backoffMs: number
   ) {
     throw new RangeError(`retryAttempts must be an integer from 1 to ${MAX_RETRY_ATTEMPTS}`);
   }
+
   if (
     backoffMs !== undefined &&
     (!Number.isFinite(backoffMs) || backoffMs < 0 || backoffMs > MAX_RETRY_BACKOFF_MS)
@@ -424,3 +448,5 @@ function assertValidRetryOptions(attempts: number | undefined, backoffMs: number
     );
   }
 }
+
+export { createCoordinatorAdapter, coordinatorNodesToEndpoints, resolveEndpoints } from "./coordinator.js";

@@ -39,7 +39,7 @@ it("uploads, downloads, and deletes opaque pieces through libp2p", async () => {
   const bytes = Buffer.from("opaque encrypted bytes");
   const stored = await storePieceOnNodes("network-piece", bytes, [endpoint], { transport });
   expect(stored.succeeded).toHaveLength(1);
-  expect((await getPieceFromNodes("network-piece", [endpoint], { transport })).bytes).toEqual(bytes);
+  expect((await getPieceFromNodes("network-piece", [endpoint])).bytes).toEqual(bytes);
   await deletePieceFromNodes("network-piece", [endpoint], { transport });
   await expect(getPieceFromNodes("network-piece", [endpoint], { transport, retryAttempts: 1 })).rejects.toThrow(/unavailable/i);
 }, 20_000);

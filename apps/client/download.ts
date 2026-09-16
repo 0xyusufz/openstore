@@ -32,6 +32,9 @@ import {
 import type { FileManifest } from "../../packages/manifest/index.js";
 import { getPieceFromNodes } from "./index.js";
 import type { StorageNodeEndpoint } from "./index.js";
+import type { CoordinatorEndpointProvider } from "./index.js";
+import { resolveEndpoints } from "./coordinator.js";
+import type { P2PTransport } from "../../packages/p2p/index.js";
 
 /**
  * Options for {@link downloadBuffer}.
@@ -40,6 +43,10 @@ export interface DownloadOptions {
   timeoutMs?: number;
   retryAttempts?: number;
   retryBackoffMs?: number;
+  /** Discover endpoints from a coordinator when endpoints is empty. */
+  coordinator?: CoordinatorEndpointProvider;
+  transport?: P2PTransport;
+  identity?: { publicKey: Buffer; privateKey: Buffer };
 }
 
 /**
@@ -72,6 +79,7 @@ export async function downloadBuffer(
   if (!(encryptionKey instanceof Uint8Array)) {
     throw new TypeError("encryption key must be a Uint8Array");
   }
+  endpoints = await resolveEndpoints(endpoints, options.coordinator);
 
   // Reuse manifest validation (ordering, hashes, no key material).
   const checked = buildManifest({
@@ -98,6 +106,8 @@ export async function downloadBuffer(
             timeoutMs: options.timeoutMs,
             retryAttempts: options.retryAttempts,
             retryBackoffMs: options.retryBackoffMs,
+            transport: options.transport,
+            identity: options.identity,
           });
           bytes = got.bytes;
         } catch (err) {

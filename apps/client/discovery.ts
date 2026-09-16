@@ -8,6 +8,16 @@
 import type { Registry } from "../../packages/registry/index.js";
 import type { StorageNodeEndpoint } from "./index.js";
 
+export {
+  createCoordinatorAdapter,
+  coordinatorNodesToEndpoints,
+  resolveEndpoints,
+} from "./coordinator.js";
+export type {
+  CoordinatorAdapter,
+  CoordinatorAdapterOptions,
+} from "./coordinator.js";
+
 /**
  * Discover available endpoints from the registry.
  * Returns only currently available/valid nodes (heartbeat not expired).
