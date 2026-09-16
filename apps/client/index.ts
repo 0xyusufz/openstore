@@ -19,6 +19,9 @@
  */
 
 import { createHash } from "crypto";
+import { HttpStorageTransport } from "./http-transport.js";
+import type { P2PTransport } from "../../packages/p2p/index.js";
+import type { P2PNodeAddress } from "../../packages/p2p/index.js";
 
 export const CLIENT_VERSION = 1;
 
@@ -52,6 +55,7 @@ export interface StorePieceOptions {
   identity?: { publicKey: Buffer; privateKey: Buffer };
   retryAttempts?: number;
   retryBackoffMs?: number;
+  transport?: P2PTransport;
 }
 
 /**
@@ -85,6 +89,7 @@ export interface GetPieceOptions {
   retryBackoffMs?: number;
   /** Optional integrity check; invalid responses are treated as replica failures. */
   validate?: (bytes: Buffer, endpoint: StorageNodeEndpoint) => void | Promise<void>;
+  transport?: P2PTransport;
 }
 
 /**
@@ -132,6 +137,7 @@ export async function storePieceOnNodes(
     retryAttempts: options.retryAttempts ?? DEFAULT_RETRY_ATTEMPTS,
     retryBackoffMs: options.retryBackoffMs ?? DEFAULT_RETRY_BACKOFF_MS,
     publicKey: options.identity?.publicKey.toString("base64") ?? "",
+    protocol: options.transport?.protocol ?? "http",
   });
   const existing = inFlightStores.get(operationKey);
   if (existing) return existing;
@@ -165,13 +171,12 @@ async function storePieceOnNodesUncoordinated(
     0,
     endpoints.length,
   );
-  const body = JSON.stringify({ id: pieceId, data: data.toString("base64") });
-
   const succeeded: StorageNodeEndpoint[] = [];
   const failed: NodeFailure[] = [];
+  const transport = options.transport ?? new HttpStorageTransport(options.identity);
   for (const endpoint of selected) {
     if (succeeded.length >= Math.min(replicationFactor, endpoints.length)) break;
-    const failure = await postToNode(endpoint, body, timeoutMs, options.identity, options);
+    const failure = await postToNode(endpoint, pieceId, data, timeoutMs, transport, options);
     if (failure === null) succeeded.push(endpoint);
     else failed.push(failure);
   }
@@ -198,20 +203,11 @@ export async function deletePieceFromNodes(
   assertValidPieceIdArg(pieceId);
   if (!Array.isArray(endpoints) || endpoints.length === 0) return;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const transport = options.transport ?? new HttpStorageTransport(options.identity);
   await Promise.all(
     endpoints.map(async (endpoint) => {
       try {
-        const path = `/pieces/${encodeURIComponent(pieceId)}`;
-        const headers: Record<string, string> = {};
-        if (options.identity) {
-          const { createAuthHeaders } = await import("../../packages/auth/index.js");
-          Object.assign(headers, createAuthHeaders(options.identity, "DELETE", path));
-        }
-        await fetch(`${normalizeBaseUrl(endpoint.baseUrl)}${path}`, {
-          method: "DELETE",
-          headers: Object.keys(headers).length > 0 ? headers : undefined,
-          signal: AbortSignal.timeout(timeoutMs),
-        });
+        await transport.deletePiece(toP2PAddress(endpoint), pieceId, { timeoutMs });
       } catch {}
     }),
   );
@@ -256,22 +252,14 @@ export async function getPieceFromNodes(
   assertValidRetryOptions(options.retryAttempts, options.retryBackoffMs);
 
   const problems: string[] = [];
+  const transport = options.transport ?? new HttpStorageTransport(options.identity);
   for (const endpoint of endpoints) {
     const attempts = options.retryAttempts ?? DEFAULT_RETRY_ATTEMPTS;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        const path = `/pieces/${encodeURIComponent(pieceId)}`;
-        const headers: Record<string, string> = {};
-        if (options.identity) {
-          const { createAuthHeaders } = await import("../../packages/auth/index.js");
-          Object.assign(headers, createAuthHeaders(options.identity, "GET", path));
-        }
-        const res = await fetch(`${normalizeBaseUrl(endpoint.baseUrl)}${path}`, {
-          headers: Object.keys(headers).length > 0 ? headers : undefined,
-          signal: AbortSignal.timeout(timeoutMs),
-        });
-        if (res.status === 200) {
-          const bytes = Buffer.from(await res.arrayBuffer());
+        const res = await transport.getPiece(toP2PAddress(endpoint), pieceId, { timeoutMs });
+        if (res.status === 200 && res.bytes) {
+          const bytes = res.bytes;
           try {
             await options.validate?.(bytes, endpoint);
             return { bytes, from: endpoint };
@@ -295,26 +283,17 @@ export async function getPieceFromNodes(
 
 async function postToNode(
   endpoint: StorageNodeEndpoint,
-  body: string,
+  pieceId: string,
+  data: Buffer,
   timeoutMs: number,
-  identity?: { publicKey: Buffer; privateKey: Buffer },
+  transport: P2PTransport,
   options: StorePieceOptions = {},
 ): Promise<NodeFailure | null> {
   const attempts = options.retryAttempts ?? DEFAULT_RETRY_ATTEMPTS;
   let last: NodeFailure | null = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
    try {
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (identity) {
-      const { createAuthHeaders } = await import("../../packages/auth/index.js");
-      Object.assign(headers, createAuthHeaders(identity, "POST", "/pieces", Buffer.from(body, "utf8")));
-    }
-    const res = await fetch(`${normalizeBaseUrl(endpoint.baseUrl)}/pieces`, {
-      method: "POST",
-      headers,
-      body,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    const res = await transport.storePiece(toP2PAddress(endpoint), pieceId, data, { timeoutMs });
     if (res.status === 200 || res.status === 201) {
       return null;
     }
@@ -354,6 +333,7 @@ function buildStoreOperationKey(
     retryAttempts: number;
     retryBackoffMs: number;
     publicKey: string;
+    protocol: string;
   },
 ): string {
   const dataDigest = createHash("sha256").update(data).digest("hex");
@@ -363,12 +343,12 @@ function buildStoreOperationKey(
     .digest("hex");
 }
 
-function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, "");
-}
-
 function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function toP2PAddress(endpoint: StorageNodeEndpoint): P2PNodeAddress {
+  return { nodeId: endpoint.id, baseUrl: endpoint.baseUrl };
 }
 
 function assertValidPieceIdArg(pieceId: string): void {
