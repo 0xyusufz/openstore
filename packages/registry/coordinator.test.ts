@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { createIdentity } from "../identity/index.js";
 import { createRegistry } from "./index.js";
-import { createRegistryClient, createRegistryCoordinator } from "./coordinator.js";
+import { DEFAULT_REGISTRY_COORDINATOR_PORT, createRegistryClient, createRegistryCoordinator } from "./coordinator.js";
 import { peerIdFromOpenStorePublicKey } from "../p2p/identity-binding.js";
 
 describe("cross-process registry coordinator", () => {
   it("registers, heartbeats, lists and removes nodes over HTTP", async () => {
     const coordinator = createRegistryCoordinator({ registry: createRegistry(), token: "secret" });
-    const port = await coordinator.listen(0);
+    const port = await coordinator.listen(DEFAULT_REGISTRY_COORDINATOR_PORT);
+    expect(DEFAULT_REGISTRY_COORDINATOR_PORT).toBe(4190);
     const client = createRegistryClient({ baseUrl: `http://127.0.0.1:${port}`, token: "secret" });
     const identity = createIdentity();
     const node = await client.registerWithIdentity(identity, "http://127.0.0.1:4901");
@@ -17,6 +18,17 @@ describe("cross-process registry coordinator", () => {
     await client.unregisterWithIdentity(identity, node.nodeId);
     expect(await client.nodes()).toHaveLength(0);
     await coordinator.close();
+  });
+
+  it("uses bearer authentication and reports connection failures", async () => {
+    const coordinator = createRegistryCoordinator({ registry: createRegistry(), token: "secret" });
+    const port = await coordinator.listen(0);
+    const unauthorized = createRegistryClient({ baseUrl: `http://127.0.0.1:${port}`, token: "wrong" });
+    await expect(unauthorized.nodes()).rejects.toThrow("unauthorized");
+    await coordinator.close();
+
+    const unavailable = createRegistryClient({ baseUrl: "http://127.0.0.1:1" });
+    await expect(unavailable.nodes()).rejects.toBeInstanceOf(Error);
   });
 
   it("does not allow an untrusted process to use the coordinator", async () => {

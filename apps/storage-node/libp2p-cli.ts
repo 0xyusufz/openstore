@@ -10,6 +10,19 @@ export interface StorageNodeCliOptions {
   err?: (line: string) => void;
 }
 
+function errorMessage(error: unknown): string {
+  const messages: string[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof Error) { messages.push(current.message); current = current.cause; }
+    else { messages.push(typeof current === "string" ? current : "storage node failed"); break; }
+  }
+  return (messages.filter(Boolean).join(": ") || "storage node failed")
+    .replace(/(password|token|secret|private key|recovery phrase|seed)(?:\s*[:=]\s*)?[^\s:;,)]*/gi, "$1 [redacted]");
+}
+
 function usage(): string {
   return "Usage: openstore-storage-node --storage-dir <dir> --identity <keystore> --password-env <ENV> [--listen <multiaddr>] [--bootstrap <descriptor.json>] [--capacity-bytes <n>] [--max-piece-bytes <n>] [--refresh-interval-ms <n>] [--coordinator-url <url>] [--coordinator-token-env <ENV>] [--coordinator-token <token>] [--heartbeat-interval-ms <n>]";
 }
@@ -69,7 +82,7 @@ export async function runStorageNodeCli(argv: string[], options: StorageNodeCliO
     await stop();
     return 0;
   } catch (error) {
-    err(error instanceof Error ? error.message : "storage node failed");
+    err(errorMessage(error));
     return 2;
   }
 }
