@@ -113,9 +113,20 @@ export async function uploadBuffer(
     // Intelligent selection when registry is available: filter by capacity, prefer more available.
     let selectedEndpoints = endpoints;
     let replicationFactor = options.replicationFactor;
+    const eligibleEndpoints = endpoints.filter((endpoint) =>
+      endpoint.capabilities?.pieceStore !== false &&
+      (endpoint.capacity === undefined || endpoint.capacity.availableBytes >= pieceBytes.length),
+    );
+    if (eligibleEndpoints.length !== endpoints.length) {
+      selectedEndpoints = eligibleEndpoints;
+    }
+    if (selectedEndpoints.length === 0) {
+      throw new Error("insufficient suitable nodes: no endpoint supports piece storage with available capacity");
+    }
     if (options.registry) {
       const { selectAvailableNodes } = await import("./selection.js");
-      const candidates = options.registry.listAvailable();
+      const candidates = options.registry.listAvailable()
+        .filter((candidate) => candidate.capabilities?.pieceStore !== false);
       if (candidates.length > 0) {
         const rf = replicationFactor ?? 3;
         const selected = selectAvailableNodes(candidates, pieceBytes.length);
@@ -133,6 +144,11 @@ export async function uploadBuffer(
         }));
         replicationFactor = rf;
       }
+    }
+    if (selectedEndpoints.length < (replicationFactor ?? selectedEndpoints.length)) {
+      throw new Error(
+        `insufficient suitable nodes: need ${replicationFactor ?? selectedEndpoints.length}, have ${selectedEndpoints.length}`,
+      );
     }
 
     // Record ownership BEFORE storing: even if the store hangs or

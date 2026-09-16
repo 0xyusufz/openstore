@@ -68,4 +68,13 @@ describe("coordinator endpoint adapter (Milestone 042)", () => {
     expect(() => coordinatorNodesToEndpoints({ nodes: [{ ...node("bad"), capacity: { usedBytes: -1, availableBytes: 1 } }] }))
       .toThrow(/capacity\.usedBytes/);
   });
+
+  it("rejects duplicate identities and transport downgrades", () => {
+    const first = node("duplicate");
+    expect(() => coordinatorNodesToEndpoints({ nodes: [first, { ...first }] }))
+      .toThrow(/duplicate coordinator node identity/);
+    expect(() => coordinatorNodesToEndpoints({
+      nodes: [{ ...node("peer", "libp2p"), baseUrl: "http://127.0.0.1:1" }],
+    })).toThrow(/libp2p baseUrl/);
+  });
 });

@@ -423,6 +423,10 @@ function assertValidEndpoints(endpoints: StorageNodeEndpoint[]): void {
       }
     }
   }
+  const ids = new Set(endpoints.map((endpoint) => endpoint.id));
+  if (ids.size !== endpoints.length) {
+    throw new TypeError("endpoints must contain distinct node identities");
+  }
 }
 
 function assertValidTimeout(timeoutMs: number): void {

@@ -80,6 +80,7 @@ export async function downloadBuffer(
     throw new TypeError("encryption key must be a Uint8Array");
   }
   endpoints = await resolveEndpoints(endpoints, options.coordinator);
+  endpoints = endpoints.filter((endpoint) => endpoint.capabilities?.pieceGet !== false);
 
   // Reuse manifest validation (ordering, hashes, no key material).
   const checked = buildManifest({

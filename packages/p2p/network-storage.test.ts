@@ -3,6 +3,9 @@ import { createIdentity } from "../identity/index.js";
 import { deletePieceFromNodes, getPieceFromNodes, storePieceOnNodes, type StorageNodeEndpoint } from "../../apps/client/index.js";
 import { Libp2pPieceTransport } from "./libp2p.js";
 import { createLibp2pStorageNode, type Libp2pStorageNode } from "./libp2p.js";
+import { uploadBuffer } from "../../apps/client/upload.js";
+import { downloadBuffer } from "../../apps/client/download.js";
+import { deleteFile, DeleteFileError } from "../../apps/client/delete.js";
 
 const nodes: Libp2pStorageNode[] = [];
 
@@ -43,6 +46,57 @@ it("uploads, downloads, and deletes opaque pieces through libp2p", async () => {
   await deletePieceFromNodes("network-piece", [endpoint], { transport });
   await expect(getPieceFromNodes("network-piece", [endpoint], { transport, retryAttempts: 1 })).rejects.toThrow(/unavailable/i);
 }, 20_000);
+
+it("replicates across two libp2p nodes and fails over after one stops", async () => {
+  const identities = [createIdentity(), createIdentity()];
+  const stores = identities.map(() => new Map<string, Buffer>());
+  const replicas: Libp2pStorageNode[] = [];
+  for (let i = 0; i < 2; i += 1) {
+    const identity = identities[i];
+    const store = stores[i];
+    const node = await createLibp2pStorageNode({
+      applicationIdentity: { publicKey: identity.publicKey.toString("base64") },
+      applicationPrivateKey: identity.privateKey,
+      storePiece: async (id, data) => { store.set(id, Buffer.from(data)); return 201; },
+      getPiece: async (id) => store.get(id) ?? null,
+      deletePiece: async (id) => { if (!store.delete(id)) return 404; return 204; },
+    });
+    replicas.push(node);
+    nodes.push(node);
+  }
+  await Promise.all(replicas.map((node) => node.start()));
+  const endpoints = replicas.map((node, i) => ({
+    id: node.peerId,
+    baseUrl: `libp2p://${node.peerId}`,
+    multiaddr: node.listenAddrs[0],
+    identityBinding: node.peerId,
+    identity: { publicKey: identities[i].publicKey.toString("base64") },
+  }));
+  const input = Buffer.from("two-node encrypted pipeline");
+  const uploaded = await uploadBuffer(input, "two-node.txt", endpoints, {
+    replicationFactor: 2,
+  });
+  expect(uploaded.manifest.chunks[0].nodeIds).toEqual(endpoints.map((endpoint) => endpoint.id));
+  expect(stores[0].size).toBe(1);
+  expect(stores[1].size).toBe(1);
+  expect([...stores[0].values()][0]).toEqual([...stores[1].values()][0]);
+
+  const downloaded = await downloadBuffer(uploaded.manifest, uploaded.encryptionKey, endpoints, {
+    retryAttempts: 1,
+  });
+  expect(downloaded).toEqual(input);
+
+  await replicas[0].stop();
+  const afterFailure = await downloadBuffer(uploaded.manifest, uploaded.encryptionKey, endpoints, {
+    retryAttempts: 1,
+  });
+  expect(afterFailure).toEqual(input);
+
+  await expect(deleteFile(uploaded.manifest, endpoints, { timeoutMs: 500 }))
+    .rejects.toBeInstanceOf(DeleteFileError);
+  await deletePieceFromNodes(uploaded.manifest.chunks[0].pieceId, [endpoints[1]], { retryAttempts: 1 });
+  expect(stores[1].size).toBe(0);
+}, 30_000);
 
 it("falls back from an unavailable libp2p replica to a valid replica", async () => {
   const identity = createIdentity();

@@ -120,6 +120,7 @@ export async function deleteFile(
 ): Promise<DeleteFileReport> {
   const checked = revalidateManifest(manifest);
   endpoints = await resolveEndpoints(endpoints, options.coordinator);
+  endpoints = endpoints.filter((endpoint) => endpoint.capabilities?.pieceDelete !== false);
   assertValidEndpoints(endpoints);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {

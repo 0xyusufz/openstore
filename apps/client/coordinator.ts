@@ -37,8 +37,13 @@ export function coordinatorNodesToEndpoints(payload: unknown): StorageNodeEndpoi
   }
   const nodes = (payload as Record<string, unknown>).nodes;
   if (!Array.isArray(nodes)) throw new TypeError("coordinator response nodes must be an array");
-  return nodes.map((node, index) => nodeToEndpoint(node, index))
-    .filter((_endpoint, index) => (nodes[index] as Record<string, unknown>).available === true);
+  const endpoints = nodes.map((node, index) => nodeToEndpoint(node, index));
+  const seen = new Set<string>();
+  for (const endpoint of endpoints) {
+    if (seen.has(endpoint.id)) throw new TypeError(`duplicate coordinator node identity: ${endpoint.id}`);
+    seen.add(endpoint.id);
+  }
+  return endpoints.filter((_endpoint, index) => (nodes[index] as Record<string, unknown>).available === true);
 }
 
 export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): CoordinatorAdapter {
@@ -101,6 +106,7 @@ function nodeToEndpoint(value: unknown, index: number): StorageNodeEndpoint {
   const transport = node.transport === undefined ? inferTransport(baseUrl) : node.transport;
   if (transport !== "http" && transport !== "libp2p") throw new TypeError(`node[${index}].transport is invalid`);
   if (transport === "http" && !/^https?:\/\//.test(baseUrl)) throw new TypeError(`node[${index}] HTTP baseUrl is invalid`);
+  if (transport === "libp2p" && !/^libp2p:\/\//.test(baseUrl)) throw new TypeError(`node[${index}] libp2p baseUrl is invalid`);
   const capacity = validateCapacity(node.capacity, index);
   const reliability = validateReliability(node.reliability, index);
   const result: StorageNodeEndpoint = {
