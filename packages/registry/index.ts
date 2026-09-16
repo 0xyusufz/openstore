@@ -58,7 +58,12 @@ function heartbeatPayload(nodeId: string, capacity: NodeCapacity | undefined, ti
 }
 
 function descriptorPayload(kind: "REGISTER" | "HEARTBEAT", descriptor: P2PPeerDescriptor, capacity: NodeCapacity | undefined, timestamp: string, nonce: string): string {
-  return `${kind}\n${JSON.stringify(descriptor)}\n${capacity ? JSON.stringify(capacity) : ""}\n${timestamp}\n${nonce}`;
+  const capacityPayload = capacity === undefined ? "" : JSON.stringify({
+    allocatedBytes: getAllocated(capacity),
+    usedBytes: capacity.usedBytes,
+    availableBytes: capacity.availableBytes,
+  });
+  return `${kind}\n${JSON.stringify(descriptor)}\n${capacityPayload}\n${timestamp}\n${nonce}`;
 }
 
 export interface NodeCapacity {

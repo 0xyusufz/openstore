@@ -51,10 +51,11 @@ describe("cross-process registry coordinator", () => {
       identity: { publicKey: identity.publicKey.toString("base64") }, identityBinding: peerId,
       capabilities: { pieceStore: true, pieceGet: true, pieceDelete: true, allocatedBytes: 100, availableBytes: 100 },
     };
-    const record = await client.registerLibp2pWithIdentity(identity, descriptor);
+    const capacity = { allocatedBytes: 100, usedBytes: 0, availableBytes: 100 };
+    const record = await client.registerLibp2pWithIdentity(identity, descriptor, capacity);
     expect(record.transport).toBe("libp2p");
     expect((await client.nodes())[0].multiaddr).toBe(descriptor.multiaddr);
-    await client.heartbeatLibp2pWithIdentity(identity, descriptor);
+    await client.heartbeatLibp2pWithIdentity(identity, descriptor, capacity);
     await client.unregisterWithIdentity(identity, peerId);
     expect(await client.nodes()).toHaveLength(0);
     await coordinator.close();
