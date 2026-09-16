@@ -15,6 +15,7 @@ export class StaticPeerDiscovery implements PeerDiscovery {
   private localNodeId?: string;
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private refreshOptions?: PeerDiscoveryOptions;
+  private lastPeerIds = new Set<string>();
 
   constructor(private readonly bootstrapPeers: readonly P2PPeerDescriptor[] = []) {
     this.bootstrapPeers = bootstrapPeers.map(cloneAndValidate);
@@ -57,6 +58,7 @@ export class StaticPeerDiscovery implements PeerDiscovery {
     if (this.localNodeId !== undefined) StaticPeerDiscovery.advertised.delete(this.localNodeId);
     this.localNodeId = undefined;
     this.refreshOptions = undefined;
+    this.lastPeerIds.clear();
     this.started = false;
   }
 
@@ -64,7 +66,11 @@ export class StaticPeerDiscovery implements PeerDiscovery {
     if (!this.started) return;
     try {
       const peers = await this.discover();
+      const current = new Set(peers.map((peer) => peer.nodeId));
+      const removed = [...this.lastPeerIds].filter((nodeId) => !current.has(nodeId));
+      this.lastPeerIds = current;
       await this.refreshOptions?.onRefresh?.(peers);
+      if (removed.length > 0) await this.refreshOptions?.onPeerRemoved?.(removed);
     } catch {
       // A failed discovery pass must not terminate future refreshes.
     } finally {

@@ -34,6 +34,7 @@ export class DhtPeerDiscovery implements PeerDiscovery {
   private bootstrapPeers: readonly P2PPeerDescriptor[];
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private refreshOptions?: PeerDiscoveryOptions;
+  private lastPeerIds = new Set<string>();
 
   constructor(bootstrapPeers: readonly P2PPeerDescriptor[] = []) {
     this.bootstrapPeers = bootstrapPeers.map(cloneAndValidate);
@@ -112,12 +113,17 @@ export class DhtPeerDiscovery implements PeerDiscovery {
     this.local = undefined;
     this.node = undefined;
     this.refreshOptions = undefined;
+    this.lastPeerIds.clear();
   }
 
   private async refresh(options: PeerDiscoveryOptions): Promise<void> {
     try {
       const peers = await this.discover();
+      const current = new Set(peers.map((peer) => peer.nodeId));
+      const removed = [...this.lastPeerIds].filter((nodeId) => !current.has(nodeId));
+      this.lastPeerIds = current;
       await options.onRefresh?.(peers);
+      if (removed.length > 0) await options.onPeerRemoved?.(removed);
     } catch {
       // A failed query must not stop future refreshes.
     } finally {

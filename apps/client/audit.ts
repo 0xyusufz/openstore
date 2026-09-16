@@ -308,7 +308,15 @@ export function createAuditScheduler(options: AuditSchedulerOptions): AuditSched
   async function runOnceImpl(): Promise<AuditReport> {
     const endpoints = registry
       .listAvailable()
-      .map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl }));
+      .map((r) => ({
+        id: r.nodeId,
+        baseUrl: r.baseUrl,
+        ...(r.transport === "libp2p" ? {
+          multiaddr: r.multiaddr,
+          identityBinding: r.identityBinding,
+          identity: r.publicKey ? { publicKey: r.publicKey } : undefined,
+        } : {}),
+      }));
     const auditId = randomBytes(16).toString("hex");
     const auditedAt = Date.now();
     const results = await Promise.all(

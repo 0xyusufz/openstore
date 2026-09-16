@@ -104,6 +104,11 @@ export function selectEndpoints(
   return selected.map((r) => ({
     id: r.nodeId,
     baseUrl: r.baseUrl,
+    ...(r.transport === "libp2p" ? {
+      multiaddr: r.multiaddr,
+      identityBinding: r.identityBinding,
+      identity: r.publicKey ? { publicKey: r.publicKey } : undefined,
+    } : {}),
     reliabilityScore: r.reliability?.score ?? DEFAULT_RELIABILITY_SCORE,
     storageScore: r.reliability?.storageScore,
   }));
@@ -140,6 +145,11 @@ export async function storePieceWithSelection(
         endpoints = selected.map((r) => ({
           id: r.nodeId,
           baseUrl: r.baseUrl,
+          ...(r.transport === "libp2p" ? {
+            multiaddr: r.multiaddr,
+            identityBinding: r.identityBinding,
+            identity: r.publicKey ? { publicKey: r.publicKey } : undefined,
+          } : {}),
           reliabilityScore: r.reliability?.score ?? DEFAULT_RELIABILITY_SCORE,
           storageScore: r.reliability?.storageScore,
         }));

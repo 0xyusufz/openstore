@@ -17,6 +17,8 @@ import { dirname } from "path";
 import { signMessage, verifyMessage } from "../identity/index.js";
 import type { Identity } from "../identity/index.js";
 import type { StorageNodeEndpoint } from "../../apps/client/index.js";
+import type { P2PPeerDescriptor } from "../p2p/index.js";
+import { validateP2PPeerDescriptor } from "../p2p/index.js";
 
 export const REGISTRY_VERSION = 1;
 export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
@@ -95,6 +97,10 @@ export interface NodeRecord {
   lastSeen: number;
   capacity: NodeCapacity;
   reliability: NodeReliability;
+  transport?: "http" | "libp2p";
+  multiaddr?: string;
+  identityBinding?: string;
+  capabilities?: { pieceStore: boolean; pieceGet: boolean; pieceDelete: boolean; maxPieceBytes?: number };
 }
 
 /**
@@ -219,6 +225,8 @@ export interface Registry {
   listAvailable(): NodeRecord[];
   get(nodeId: string): NodeRecord | undefined;
   getAvailableEndpoints(): StorageNodeEndpoint[];
+  registerDiscoveredPeer(peer: P2PPeerDescriptor, options?: { availableBytes?: number; usedBytes?: number; reliabilityScore?: number }): NodeRecord;
+  removeDiscoveredPeer(nodeId: string): void;
   pruneExpired(): void;
 }
 
@@ -679,7 +687,67 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         baseUrl: r.baseUrl,
         reliabilityScore: r.reliability.score,
         storageScore: r.reliability.storageScore,
+        ...(r.transport === "libp2p" ? {
+          multiaddr: r.multiaddr,
+          identityBinding: r.identityBinding,
+          identity: { publicKey: r.publicKey },
+        } : {}),
       }));
+    },
+
+    registerDiscoveredPeer(peer: P2PPeerDescriptor, options = {}): NodeRecord {
+      validateP2PPeerDescriptor(peer);
+      if (peer.identityBinding === undefined || peer.identityBinding !== peer.nodeId) {
+        throw new Error("discovered peer requires a valid identity binding");
+      }
+      const existing = nodes.get(peer.nodeId);
+      for (const record of nodes.values()) {
+        if (record.publicKey === peer.identity.publicKey && record.nodeId !== peer.nodeId) {
+          throw new Error("discovered peer identity is already registered");
+        }
+      }
+      const availableBytes = options.availableBytes ?? peer.capabilities.maxPieceBytes ?? 0;
+      const usedBytes = options.usedBytes ?? 0;
+      if (!Number.isSafeInteger(availableBytes) || availableBytes < 0 ||
+        !Number.isSafeInteger(usedBytes) || usedBytes < 0) {
+        throw new TypeError("discovered peer capacity is invalid");
+      }
+      const reliability = existing ? { ...existing.reliability } : defaultReliability();
+      if (options.reliabilityScore !== undefined) {
+        if (!Number.isInteger(options.reliabilityScore) || options.reliabilityScore < 0 || options.reliabilityScore > 100) {
+          throw new TypeError("discovered peer reliability score is invalid");
+        }
+        reliability.score = options.reliabilityScore;
+      }
+      const record: NodeRecord = {
+        nodeId: peer.nodeId,
+        publicKey: peer.identity.publicKey,
+        baseUrl: peer.baseUrl,
+        available: true,
+        lastSeen: Date.now(),
+        capacity: {
+          allocatedBytes: availableBytes + usedBytes,
+          totalBytes: availableBytes + usedBytes,
+          usedBytes,
+          availableBytes,
+        },
+        reliability,
+        transport: "libp2p",
+        multiaddr: peer.multiaddr,
+        identityBinding: peer.identityBinding,
+        capabilities: { ...peer.capabilities },
+      };
+      nodes.set(record.nodeId, record);
+      persist();
+      return { ...record, capacity: { ...record.capacity }, reliability: { ...record.reliability } };
+    },
+
+    removeDiscoveredPeer(nodeId: string): void {
+      const record = nodes.get(nodeId);
+      if (record?.transport === "libp2p") {
+        nodes.delete(nodeId);
+        persist();
+      }
     },
 
     pruneExpired(): void {

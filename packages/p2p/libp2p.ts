@@ -9,6 +9,7 @@ import type { P2PNodeCapabilities, P2PNodeIdentity, P2PTransport, P2PTransportRe
 import { validateP2PPeerDescriptor } from "./index.js";
 import { createDhtServices, DhtPeerDiscovery } from "./dht-discovery.js";
 import { peerIdFromOpenStorePrivateKey, peerIdFromOpenStorePublicKey } from "./identity-binding.js";
+import type { Registry } from "../registry/index.js";
 
 export const OPENSTORE_PIECE_PROTOCOL = "/openstore/piece/1.0.0";
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
@@ -36,6 +37,7 @@ export interface Libp2pStorageNodeOptions {
   deletePiece: (pieceId: string) => Promise<number>;
   discovery?: PeerDiscovery;
   discoveryRefreshIntervalMs?: number;
+  placementRegistry?: Registry;
 }
 
 export interface Libp2pStorageNode {
@@ -111,6 +113,12 @@ export async function createLibp2pStorageNode(
           refreshIntervalMs: options.discoveryRefreshIntervalMs,
           onRefresh: async (peers) => {
             discoveredPeers = await reconcilePeers(wrapper, peers);
+            for (const peer of discoveredPeers) {
+              if (options.placementRegistry) options.placementRegistry.registerDiscoveredPeer(peer);
+            }
+          },
+          onPeerRemoved: async (nodeIds) => {
+            for (const nodeId of nodeIds) options.placementRegistry?.removeDiscoveredPeer(nodeId);
           },
         });
         await options.discovery.advertise(descriptor);

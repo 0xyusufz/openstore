@@ -114,7 +114,15 @@ export async function uploadBuffer(
         if (selected.length < rf) {
           throw new Error(`insufficient suitable nodes: need ${rf}, have ${selected.length}`);
         }
-        selectedEndpoints = selected.map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl }));
+        selectedEndpoints = selected.map((r) => ({
+          id: r.nodeId,
+          baseUrl: r.baseUrl,
+          ...(r.transport === "libp2p" ? {
+            multiaddr: r.multiaddr,
+            identityBinding: r.identityBinding,
+            identity: r.publicKey ? { publicKey: r.publicKey } : undefined,
+          } : {}),
+        }));
         replicationFactor = rf;
       }
     }

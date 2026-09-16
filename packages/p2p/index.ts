@@ -55,6 +55,7 @@ export interface PeerDiscovery {
 export interface PeerDiscoveryOptions {
   refreshIntervalMs?: number;
   onRefresh?: (peers: readonly P2PPeerDescriptor[]) => Promise<void> | void;
+  onPeerRemoved?: (nodeIds: readonly string[]) => Promise<void> | void;
 }
 
 export interface P2PTransportRequestOptions {
