@@ -32,6 +32,8 @@ export interface Libp2pStorageNodeOptions {
   applicationPrivateKey?: Buffer;
   listenAddrs?: string[];
   maxPieceBytes?: number;
+  allocatedBytes?: number;
+  availableBytes?: number;
   storePiece: (pieceId: string, data: Buffer) => Promise<number>;
   getPiece: (pieceId: string) => Promise<Buffer | null>;
   deletePiece: (pieceId: string) => Promise<number>;
@@ -81,6 +83,8 @@ export async function createLibp2pStorageNode(
     pieceGet: true,
     pieceDelete: true,
     maxPieceBytes: options.maxPieceBytes,
+    allocatedBytes: options.allocatedBytes,
+    availableBytes: options.availableBytes,
   };
   let discoveredPeers: readonly P2PPeerDescriptor[] = [];
   await node.handle(OPENSTORE_PIECE_PROTOCOL, async (stream) => {

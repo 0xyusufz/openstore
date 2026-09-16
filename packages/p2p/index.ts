@@ -31,6 +31,8 @@ export interface P2PNodeCapabilities {
   pieceGet: boolean;
   pieceDelete: boolean;
   maxPieceBytes?: number;
+  allocatedBytes?: number;
+  availableBytes?: number;
 }
 
 export interface P2PNodeDescriptor extends P2PNodeAddress {
@@ -160,6 +162,16 @@ export function createP2PNodeDescriptor(
   ) {
     throw new TypeError("node maxPieceBytes must be a positive safe integer");
   }
+  for (const field of ["allocatedBytes", "availableBytes"] as const) {
+    if (capabilities[field] !== undefined &&
+      (!Number.isSafeInteger(capabilities[field]) || capabilities[field] < 0)) {
+      throw new TypeError(`node ${field} must be a non-negative safe integer`);
+    }
+  }
+  if (capabilities.allocatedBytes !== undefined && capabilities.availableBytes !== undefined &&
+      capabilities.availableBytes > capabilities.allocatedBytes) {
+    throw new TypeError("node availableBytes cannot exceed allocatedBytes");
+  }
   return { ...address, identity: { ...identity }, capabilities: { ...capabilities } };
 }
 
@@ -186,6 +198,12 @@ export function validateP2PPeerDescriptor(value: unknown): asserts value is P2PP
   const capabilities = descriptor.capabilities as P2PNodeCapabilities;
   if (capabilities.pieceStore !== true || capabilities.pieceGet !== true || capabilities.pieceDelete !== true) {
     throw new TypeError("peer descriptor capabilities are invalid");
+  }
+  for (const field of ["allocatedBytes", "availableBytes"] as const) {
+    if (capabilities[field] !== undefined &&
+      (!Number.isSafeInteger(capabilities[field]) || capabilities[field] < 0)) {
+      throw new TypeError(`peer descriptor ${field} is invalid`);
+    }
   }
   if (descriptor.multiaddr !== undefined) {
     if (typeof descriptor.multiaddr !== "string" || descriptor.multiaddr.length === 0 || descriptor.multiaddr.length > 2048) {

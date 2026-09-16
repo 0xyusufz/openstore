@@ -706,7 +706,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
           throw new Error("discovered peer identity is already registered");
         }
       }
-      const availableBytes = options.availableBytes ?? peer.capabilities.maxPieceBytes ?? 0;
+      const availableBytes = options.availableBytes ?? peer.capabilities.availableBytes ?? peer.capabilities.maxPieceBytes ?? 0;
       const usedBytes = options.usedBytes ?? 0;
       if (!Number.isSafeInteger(availableBytes) || availableBytes < 0 ||
         !Number.isSafeInteger(usedBytes) || usedBytes < 0) {
