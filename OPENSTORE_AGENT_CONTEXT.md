@@ -271,3 +271,24 @@ placement. Then address any discovered lifecycle, observability, or
 coordinator durability gaps with focused tests while preserving the current
 trusted-coordinator boundary. No specific next milestone number or roadmap
 document was found in the source tree.
+
+## 15. Milestone 044 status
+
+Milestone 044 is implemented as a real cross-process integration harness in
+`tests/integration/milestone-044.test.ts`. It starts a coordinator and two
+standalone libp2p storage-node child processes on dynamic loopback ports,
+authenticates registration and discovery, uploads with replication factor two,
+verifies identical opaque piece files, downloads exactly, kills one node and
+waits for coordinator expiry, downloads from the same manifest through the
+surviving replica, restarts the node with the same encrypted identity and
+storage directory, verifies stable PeerId and persisted data, and exercises
+authenticated mixed HTTP/libp2p placement, download, and delete.
+
+The harness uses bounded polling, temporary directories, child-process cleanup,
+and environment variables for test-only secrets; it does not print secrets or
+piece contents. Coordinator expiry is represented by the existing registry
+record becoming unavailable rather than being physically deleted. The test
+passed locally in approximately 9 seconds. No production runtime changes were
+needed. The current worktree still contains pre-existing untracked
+`.manual-043/` artifacts and untracked `tests/` content; do not remove or
+commit them without reviewing ownership.
