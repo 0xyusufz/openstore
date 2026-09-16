@@ -57,7 +57,10 @@ export interface StorageNodeOptions {
   registryHeartbeatIntervalMs?: number;
   /** Total allocated bytes for this node (capacity). Defaults to 1 GiB */
   capacityBytes?: number;
+  onLifecycleEvent?: (event: StorageNodeLifecycleEvent) => void;
 }
+export type StorageNodeLifecycleEvent = { type: "storage-node.started" | "storage-node.closed" | "storage-node.draining" | "storage-node.recovery"; draining?: boolean; error?: string };
+export interface StorageNodeStatusSnapshot { status: "ok" | "degraded" | "draining"; draining: boolean; capacity: NodeCapacity; pieceCount: number; }
 
 export interface NodeCapacity {
   allocatedBytes?: number;
@@ -82,6 +85,8 @@ export interface StorageNode {
   readonly capacityBytes: number;
   /** Get current capacity/health info */
   getCapacity(): Promise<NodeCapacity>;
+  getStatusSnapshot(): Promise<StorageNodeStatusSnapshot>;
+  statusSnapshot(): Promise<StorageNodeStatusSnapshot>;
   /**
    * Resize the allocation quota (OPENSTORE-029). Pieces already stored
    * are untouched; shrinking below current usage is rejected so stored
@@ -139,6 +144,12 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   // Draining mode (OPENSTORE-029): when true the node serves reads but
   // rejects new stores so it can be decommissioned without data loss.
   let draining = false;
+  const emit = (event: StorageNodeLifecycleEvent): void => {
+    try {
+      const error = event.error?.replace(/(token|password|secret|private key)[^\s]*/gi, "$1 [redacted]").slice(0, 300);
+      options.onLifecycleEvent?.({ ...event, ...(error ? { error } : {}) });
+    } catch {}
+  };
 
   let nodeIdentity: Identity | undefined = options.identity;
   const hasKeystore = typeof options.identityPath === "string" && options.identityPath !== "";
@@ -178,6 +189,12 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     const available = Math.max(0, capacityBytes - used);
     return { allocatedBytes: capacityBytes, totalBytes: capacityBytes, usedBytes: used, availableBytes: available };
   }
+  async function getStatusSnapshot(): Promise<StorageNodeStatusSnapshot> {
+    const capacity = await getCapacity();
+    let pieceCount = 0;
+    try { pieceCount = (await readdir(storageDir)).length; } catch {}
+    return { status: draining ? "draining" : "ok", draining, capacity, pieceCount };
+  }
 
   const node: StorageNode = {
     version: STORAGE_NODE_VERSION,
@@ -197,12 +214,19 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     },
     setDraining(next: boolean): void {
       draining = next === true;
+      emit({ type: "storage-node.draining", draining });
     },
     get identity(): Identity | undefined {
       return nodeIdentity;
     },
     async getCapacity(): Promise<NodeCapacity> {
       return getCapacity();
+    },
+    async getStatusSnapshot(): Promise<StorageNodeStatusSnapshot> {
+      return getStatusSnapshot();
+    },
+    async statusSnapshot(): Promise<StorageNodeStatusSnapshot> {
+      return getStatusSnapshot();
     },
     async listen(port: number = 0, host: string = "127.0.0.1"): Promise<number> {
       if (
@@ -236,6 +260,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       } else {
         throw new Error("failed to determine listening port");
       }
+      emit({ type: "storage-node.started" });
 
       // Register with registry if configured
       if (options.registry && nodeIdentity) {
@@ -299,6 +324,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
             resolveClose();
           }
         });
+        emit({ type: "storage-node.closed" });
       });
     },
   };

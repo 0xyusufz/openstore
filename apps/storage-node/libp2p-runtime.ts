@@ -40,6 +40,10 @@ export type Libp2pStorageNodeLifecycleState =
 export interface Libp2pStorageNodeLifecycleEvent {
   state: Libp2pStorageNodeLifecycleState;
   previousState?: Libp2pStorageNodeLifecycleState;
+  type?: string;
+  attempt?: number;
+  retryCount?: number;
+  nextRetryAt?: number;
   error?: string;
 }
 
@@ -47,8 +51,26 @@ export interface Libp2pStorageNodeRuntime {
   readonly identity: Identity;
   readonly node: Libp2pStorageNode;
   readonly state: Libp2pStorageNodeLifecycleState;
+  readonly status: () => Promise<Libp2pStorageNodeStatusSnapshot>;
+  readonly statusSnapshot: () => Promise<Libp2pStorageNodeStatusSnapshot>;
   start(): Promise<void>;
   stop(): Promise<void>;
+}
+export interface Libp2pStorageNodeStatusSnapshot {
+  peerId: string;
+  state: Libp2pStorageNodeLifecycleState;
+  coordinatorConfigured: boolean;
+  coordinatorConnected: boolean;
+  registered: boolean;
+  registrationStatus: "registered" | "unregistered" | "registering" | "failed";
+  lastSuccessfulRegistrationAt?: number;
+  lastSuccessfulHeartbeatAt?: number;
+  lastFailureClassification?: string;
+  retryAttempt: number;
+  retryCount: number;
+  nextRetryAt?: number;
+  shuttingDown: boolean;
+  capacity: { allocatedBytes: number; usedBytes: number; availableBytes: number };
 }
 
 export function validateLibp2pStorageNodeRuntimeConfig(
@@ -107,6 +129,14 @@ export async function createLibp2pStorageNodeRuntime(
   let stopPromise: Promise<void> | undefined;
   let registrationPromise: Promise<void> | undefined;
   let stopping = false;
+  let coordinatorConnected = false;
+  let registrationStatus: Libp2pStorageNodeStatusSnapshot["registrationStatus"] = "unregistered";
+  let lastSuccessfulRegistrationAt: number | undefined;
+  let lastSuccessfulHeartbeatAt: number | undefined;
+  let lastFailureClassification: string | undefined;
+  let retryAttempt = 0;
+  let retryCount = 0;
+  let nextRetryAt: number | undefined;
   const descriptor = async (snapshot: { allocatedBytes: number; availableBytes: number }) => ({
     nodeId: node.peerId,
     baseUrl: `libp2p://${node.peerId}`,
@@ -115,14 +145,22 @@ export async function createLibp2pStorageNodeRuntime(
     identityBinding: node.peerId,
     capabilities: { ...node.capabilities, ...snapshot },
   });
-  const emit = (next: Libp2pStorageNodeLifecycleState, error?: unknown) => {
+  const status = async (): Promise<Libp2pStorageNodeStatusSnapshot> => {
+    const usedBytes = await store.usedBytes();
+    return { peerId: node.peerId, state, coordinatorConfigured: Boolean(coordinator), coordinatorConnected, registered, registrationStatus, lastSuccessfulRegistrationAt, lastSuccessfulHeartbeatAt, lastFailureClassification, retryAttempt, retryCount, nextRetryAt, shuttingDown: stopping, capacity: { allocatedBytes: capacity, usedBytes, availableBytes: Math.max(0, capacity - usedBytes) } };
+  };
+  const emit = (next: Libp2pStorageNodeLifecycleState, error?: unknown, eventType?: string, attempt?: number) => {
     const previousState = state;
     state = next;
-    if (previousState === next && !error) return;
+    if (previousState === next && !error && !eventType) return;
     try {
       const event = {
         state: next,
         previousState,
+        type: eventType ?? next,
+        ...(attempt === undefined ? {} : { attempt }),
+        retryCount,
+        ...(nextRetryAt === undefined ? {} : { nextRetryAt }),
         ...(error === undefined ? {} : { error: safeLifecycleError(error) }),
       };
       input.lifecycleEventCallback?.(event);
@@ -146,24 +184,43 @@ export async function createLibp2pStorageNodeRuntime(
   };
   const performRegister = async () => {
     if (!coordinator) return;
+    registrationStatus = "registering";
+    emit(state === "stopped" ? "starting" : state, undefined, "registration.attempt", 0);
     let lastError: unknown;
     for (let attempt = 0; attempt < retryAttempts; attempt++) {
       if (stopping || state === "stopped") return;
       try {
+        emit("reconnecting", undefined, "registration.attempt", attempt);
         const snapshot = await capacitySnapshot();
         await coordinator.registerLibp2pWithIdentity(identity, await descriptor(snapshot), snapshot);
         registered = true;
-        emit("registered");
+        registrationStatus = "registered";
+        coordinatorConnected = true;
+        lastSuccessfulRegistrationAt = Date.now();
+        lastFailureClassification = undefined;
+        retryAttempt = 0;
+        nextRetryAt = undefined;
+        emit("registered", undefined, "registration.success");
         if (!stopping) scheduleHeartbeat();
         return;
       } catch (error) {
         lastError = error;
+        coordinatorConnected = false;
+        registrationStatus = "failed";
+        lastFailureClassification = (error as { classification?: string }).classification ?? "unknown";
+        emit("coordinator-unreachable", error, "registration.failure", attempt);
+        retryAttempt = attempt + 1;
+        retryCount++;
+        emit("coordinator-unreachable", error, "connection.lost");
         if (attempt + 1 < retryAttempts) await new Promise<void>((resolve) => setTimeout(resolve, delay(attempt)));
       }
     }
     registered = false;
+    registrationStatus = "failed";
     emit("coordinator-unreachable", lastError);
     if (!stopping && state !== "stopped" && !reconnectTimer) {
+      nextRetryAt = Date.now() + delay(retryAttempts);
+      emit("reconnecting", undefined, "retry.scheduled");
       reconnectTimer = setTimeout(() => {
         reconnectTimer = undefined;
         if (stopping || state === "stopped") return;
@@ -181,9 +238,17 @@ export async function createLibp2pStorageNodeRuntime(
         try {
           const snapshot = await capacitySnapshot();
           await coordinator.heartbeatLibp2pWithIdentity(identity, await descriptor(snapshot), snapshot);
+          lastSuccessfulHeartbeatAt = Date.now();
+          emit("registered", undefined, "heartbeat.success");
+          coordinatorConnected = true;
+          lastFailureClassification = undefined;
+          emit("registered", undefined, "connection.recovered");
           scheduleHeartbeat();
         } catch (error) {
           registered = false;
+          coordinatorConnected = false;
+          emit("coordinator-unreachable", error, "heartbeat.failure");
+          lastFailureClassification = (error as { classification?: string }).classification ?? "unknown";
           emit(isNodeMissing(error) ? "reconnecting" : "coordinator-unreachable", error);
           if (isNodeMissing(error)) void register();
           else if (!reconnectTimer) {
@@ -204,6 +269,9 @@ export async function createLibp2pStorageNodeRuntime(
   };
   const stop = async () => {
     stopping = true;
+    coordinatorConnected = false;
+    nextRetryAt = undefined;
+    emit("stopped", undefined, "shutdown");
     clearTimers();
     if (startPromise) await startPromise;
     if (registrationPromise) await registrationPromise;
@@ -212,12 +280,15 @@ export async function createLibp2pStorageNodeRuntime(
       registered = false;
     }
     await node.stop();
-    emit("stopped");
+    registrationStatus = "unregistered";
+    emit("stopped", undefined, "shutdown.completed");
   };
   return {
     identity,
     node,
     get state() { return state; },
+    status,
+    statusSnapshot: status,
     start() { return startPromise ??= start().finally(() => { startPromise = undefined; }); },
     stop() { return stopPromise ??= stop().finally(() => { stopPromise = undefined; }); },
   };

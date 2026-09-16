@@ -10,9 +10,13 @@ import { createSignedHeartbeat, createSignedLibp2pHeartbeat, createSignedLibp2pR
 export const REGISTRY_PROTOCOL_VERSION = 1;
 export const DEFAULT_REGISTRY_COORDINATOR_PORT = 4190;
 export interface CoordinatorLogger { info?: (message: string, details?: Record<string, string | number | boolean>) => void; warn?: (message: string, details?: Record<string, string | number | boolean>) => void; error?: (message: string, details?: Record<string, string | number | boolean>) => void; }
-export type CoordinatorEvent = { type: "coordinator.started" | "coordinator.closed"; address?: string } | { type: "coordinator.request"; operation: string; outcome: "success" | "error" };
+export type CoordinatorEvent =
+  | { type: "coordinator.started" | "coordinator.closed"; address?: string; startedAt?: number; uptimeMs?: number }
+  | { type: "coordinator.request"; operation: string; outcome: "success" | "error" }
+  | { type: "coordinator.expiry"; expired: number };
 export interface RegistryCoordinatorOptions { registry: Registry; token?: string; host?: string; maxBodyBytes?: number; logger?: CoordinatorLogger; onEvent?: (event: CoordinatorEvent) => void; onLifecycleEvent?: (event: CoordinatorEvent) => void; }
-export interface RegistryCoordinator { readonly server: Server; readonly address: string; listen(port?: number, host?: string): Promise<number>; close(): Promise<void>; }
+export interface RegistryCoordinatorOptions { expiryIntervalMs?: number; startExpiryWorker?: boolean; }
+export interface RegistryCoordinator { readonly server: Server; readonly address: string; listen(port?: number, host?: string): Promise<number>; close(): Promise<void>; startExpiryWorker(): void; stopExpiryWorker(): void; }
 export interface RegistryClientOptions { baseUrl: string; token?: string; }
 export type RegistryClientErrorClassification = "transient" | "auth" | "config" | "protocol" | "unknown";
 export class RegistryClientError extends Error {
@@ -35,10 +39,34 @@ export function createRegistryCoordinator(options: RegistryCoordinatorOptions): 
   const emit = (event: CoordinatorEvent): void => {
     try { options.onEvent?.(event); } catch {}
     try { if (options.onLifecycleEvent && options.onLifecycleEvent !== options.onEvent) options.onLifecycleEvent(event); } catch {}
-    try { const level = event.type === "coordinator.request" && event.outcome === "error" ? "error" : "info"; options.logger?.[level]?.(event.type, event.type === "coordinator.request" ? { operation: event.operation, outcome: event.outcome } : event.address ? { address: event.address } : {}); } catch {}
+    try { const level = event.type === "coordinator.request" && event.outcome === "error" ? "error" : "info"; options.logger?.[level]?.(event.type, event.type === "coordinator.request" ? { operation: event.operation, outcome: event.outcome } : event.type === "coordinator.expiry" ? { expired: event.expired } : event.address ? { address: event.address } : {}); } catch {}
   };
-  const server = createServer((req, res) => { void handle(req, res, options.registry, options.token, maxBody, emit); });
+  const server = createServer((req, res) => { void handle(req, res, options.registry, options.token, maxBody, emit, () => coordinatorStatus()); });
   let port: number | undefined; let host = options.host ?? "127.0.0.1";
+  let startedAt: number | undefined;
+  let expiryTimer: ReturnType<typeof setInterval> | undefined;
+  let expiryRunning = false;
+  const startExpiryWorker = (): void => {
+    if (expiryTimer) return;
+    const interval = options.expiryIntervalMs ?? Math.max(25, Math.floor(options.registry.heartbeatTimeoutMs / 3));
+    if (!Number.isSafeInteger(interval) || interval <= 0) throw new TypeError("expiryIntervalMs must be a positive safe integer");
+    expiryTimer = setInterval(() => {
+      if (expiryRunning) return;
+      expiryRunning = true;
+      try {
+        const expired = options.registry.pruneExpired();
+        if (expired.length > 0) emit({ type: "coordinator.expiry", expired: expired.length });
+      } finally { expiryRunning = false; }
+    }, interval);
+    expiryTimer.unref?.();
+  };
+  const stopExpiryWorker = (): void => { if (expiryTimer) { clearInterval(expiryTimer); expiryTimer = undefined; } };
+  const coordinatorStatus = () => ({
+    lifecycle: server.listening ? "running" : "stopped",
+    startedAt: server.listening ? startedAt : undefined,
+    uptimeMs: server.listening && startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : 0,
+    heartbeatTimeoutMs: options.registry.heartbeatTimeoutMs,
+  });
   return {
     server, get address() { return `http://${host}:${port ?? 0}`; },
     async listen(requestedPort = DEFAULT_REGISTRY_COORDINATOR_PORT, requestedHost = host) {
@@ -46,9 +74,21 @@ export function createRegistryCoordinator(options: RegistryCoordinatorOptions): 
       host = requestedHost;
       await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(requestedPort, host, () => { server.off("error", reject); resolve(); }); });
       const addr = server.address(); if (!addr || typeof addr === "string") throw new Error("failed to determine coordinator port");
-      port = addr.port; emit({ type: "coordinator.started", address: `http://${host}:${port}` }); return port;
+      port = addr.port;
+      startedAt = Date.now();
+      emit({ type: "coordinator.started", address: `http://${host}:${port}`, startedAt });
+      if (options.startExpiryWorker) startExpiryWorker();
+      return port;
     },
-    async close() { if (!server.listening) return; await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); emit({ type: "coordinator.closed" }); },
+    async close() {
+      stopExpiryWorker();
+      if (!server.listening) return;
+      const uptimeMs = startedAt === undefined ? 0 : Math.max(0, Date.now() - startedAt);
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      emit({ type: "coordinator.closed", uptimeMs });
+    },
+    startExpiryWorker,
+    stopExpiryWorker,
   };
 }
 
@@ -76,7 +116,7 @@ function requestJson(urlString: string, method: "GET" | "POST", body: unknown, t
     const request = parsed.protocol === "https:" ? httpsRequest : parsed.protocol === "http:" ? httpRequest : undefined;
     if (!request) { reject(new RegistryClientError(operation, "config", "unsupported coordinator protocol")); return; }
     const serialized = body === undefined ? undefined : JSON.stringify(body);
-    const req = request({ hostname: parsed.hostname, port: parsed.port || undefined, path: `${parsed.pathname}${parsed.search}`, method, headers: { accept: "application/json", ...(serialized === undefined ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(serialized) }), ...(token ? { authorization: `Bearer ${token}` } : {}) } }, (response) => {
+    const req = request({ hostname: parsed.hostname, port: parsed.port || undefined, path: parsed.pathname + parsed.search, method, headers: { accept: "application/json", ...(serialized === undefined ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(serialized) }), ...(token ? { authorization: "Bearer " + token } : {}) } }, (response) => {
       let data = ""; response.setEncoding("utf8"); response.on("data", (chunk: string) => { data += chunk; });
       response.on("end", () => {
         let payload: any = {};
@@ -94,11 +134,11 @@ function requestJson(urlString: string, method: "GET" | "POST", body: unknown, t
   });
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, registry: Registry, token: string | undefined, maxBody: number, emit: (event: CoordinatorEvent) => void): Promise<void> {
+async function handle(req: IncomingMessage, res: ServerResponse, registry: Registry, token: string | undefined, maxBody: number, emit: (event: CoordinatorEvent) => void, coordinatorStatus: () => unknown): Promise<void> {
   const path = (req.url ?? "/").split("?")[0];
-  if (token && req.headers.authorization !== `Bearer ${token}`) { emit({ type: "coordinator.request", operation: "auth", outcome: "error" }); return send(res, 401, { error: "unauthorized" }); }
-  if (req.method === "GET" && (path === "/health" || path === "/v1/health")) { const persistence = registry.persistenceStatus(); return send(res, 200, { status: persistence.degraded ? "degraded" : "ok", protocol: REGISTRY_PROTOCOL_VERSION, persistence }); }
-  if (req.method === "GET" && (path === "/status" || path === "/v1/status")) { const persistence = registry.persistenceStatus(); return send(res, 200, { protocol: REGISTRY_PROTOCOL_VERSION, status: persistence.degraded ? "degraded" : "ok", persistence }); }
+  if (token && req.headers.authorization !== "Bearer " + token) { emit({ type: "coordinator.request", operation: "auth", outcome: "error" }); return send(res, 401, { error: "unauthorized" }); }
+  if (req.method === "GET" && (path === "/health" || path === "/v1/health")) { const persistence = registry.persistenceStatus(); const aggregate = registry.healthSnapshot(); return send(res, 200, { status: persistence.degraded ? "degraded" : "ok", protocol: REGISTRY_PROTOCOL_VERSION, persistence, aggregate, health: aggregate, coordinator: coordinatorStatus() }); }
+  if (req.method === "GET" && (path === "/status" || path === "/v1/status")) { const persistence = registry.persistenceStatus(); const aggregate = registry.healthSnapshot(); return send(res, 200, { protocol: REGISTRY_PROTOCOL_VERSION, status: persistence.degraded ? "degraded" : "ok", persistence, aggregate, health: aggregate, coordinator: coordinatorStatus() }); }
   if (req.method === "GET" && (path === "/nodes" || path === "/v1/nodes")) return send(res, 200, { protocol: REGISTRY_PROTOCOL_VERSION, nodes: registry.list() });
   if (req.method !== "POST") return send(res, 405, { error: "method not allowed" });
   try {

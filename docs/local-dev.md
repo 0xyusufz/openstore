@@ -105,6 +105,13 @@ The **Storage Nodes** page has a **My Storage Node** card. Sharing flow:
 Capacity and contribution metrics are shown for a future rewards
 system. No earnings exist yet, and no blockchain/payment is involved.
 
+For coordinator-backed deployments, query `GET /v1/status` to inspect the
+sanitized aggregate node/capacity/health snapshot. Expiry is coordinator-owned
+when enabled, so nodes that stop heartbeating transition offline without a
+client or dashboard polling loop. Storage-node status snapshots are
+read-only; lifecycle and recovery events contain state and bounded,
+redacted error text only.
+
 ## Stopping
 
 `Ctrl-C` (SIGINT/SIGTERM) closes nodes (graceful registry unregister)

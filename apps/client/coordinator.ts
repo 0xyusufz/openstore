@@ -7,7 +7,7 @@
 import type { CoordinatorEndpointProvider, StorageNodeEndpoint } from "./index.js";
 import { multiaddr } from "@multiformats/multiaddr";
 import { peerIdFromOpenStorePublicKey } from "../../packages/p2p/identity-binding.js";
-import { createRegistryClient } from "../../packages/registry/coordinator.js";
+import { createRegistryClient, type RegistryClientErrorClassification } from "../../packages/registry/coordinator.js";
 
 export interface CoordinatorAdapterOptions {
   baseUrl: string;
@@ -18,8 +18,18 @@ export interface CoordinatorAdapterOptions {
 export interface CoordinatorAdapter extends CoordinatorEndpointProvider {
   readonly lastError: Error | undefined;
   readonly lastRefreshAt: number | undefined;
+  readonly metadata: CoordinatorMetadata;
   /** A non-throwing snapshot suitable for best-effort callers. */
   refreshSafe(): Promise<StorageNodeEndpoint[]>;
+}
+export interface CoordinatorMetadata {
+  lastKnownGoodAt?: number;
+  lastKnownGoodCount: number;
+  lastError?: string;
+  lastErrorClassification?: RegistryClientErrorClassification;
+  consecutiveFailureCount: number;
+  readonly snapshotAge: number | undefined;
+  readonly isStale: boolean;
 }
 
 /** Resolve explicit endpoints first; discover only when none were supplied. */
@@ -58,6 +68,7 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
   let lastError: Error | undefined;
   let lastRefreshAt: number | undefined;
   let inFlight: Promise<StorageNodeEndpoint[]> | undefined;
+  let metadata: CoordinatorMetadata = { lastKnownGoodCount: 0, consecutiveFailureCount: 0, snapshotAge: undefined, isStale: false };
   const baseUrl = options.baseUrl.replace(/\/+$/, "");
 
   const refresh = (): Promise<StorageNodeEndpoint[]> => {
@@ -69,9 +80,12 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
       snapshot = endpoints;
       lastError = undefined;
       lastRefreshAt = Date.now();
+      metadata = { lastKnownGoodAt: lastRefreshAt, lastKnownGoodCount: snapshot.length, consecutiveFailureCount: 0, snapshotAge: 0, isStale: false };
       return snapshot.slice();
     })().catch((error: unknown) => {
       lastError = error instanceof Error ? error : new Error(String(error));
+      const classification = (error as { classification?: RegistryClientErrorClassification }).classification;
+      metadata = { ...metadata, lastError: lastError.message.slice(0, 300), lastErrorClassification: classification ?? "unknown", consecutiveFailureCount: metadata.consecutiveFailureCount + 1 };
       throw lastError;
     }).finally(() => {
       inFlight = undefined;
@@ -82,6 +96,10 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
   return {
     get lastError() { return lastError; },
     get lastRefreshAt() { return lastRefreshAt; },
+    get metadata() {
+      const snapshotAge = metadata.lastKnownGoodAt === undefined ? undefined : Math.max(0, Date.now() - metadata.lastKnownGoodAt);
+      return { ...metadata, snapshotAge, isStale: metadata.consecutiveFailureCount > 0 };
+    },
     getEndpoints: () => snapshot.slice(),
     refresh,
     async refreshSafe() {
@@ -165,7 +183,7 @@ async function fetchNodes(
   const response = await request(url, {
     headers: {
       accept: "application/json",
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(token ? { authorization: "Bearer " + token } : {}),
     },
   });
   if (!response.ok) throw new Error(`coordinator returned ${response.status}`);

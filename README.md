@@ -48,3 +48,10 @@ The versioned protocol is available at `GET /v1/health`, `GET /v1/nodes` and
 token on node clients (`createRegistryClient`) when coordinator authentication
 is enabled. The coordinator supports an optional persistence file and retains
 HTTP and libp2p records in the same placement snapshot.
+
+`GET /v1/status` (and `/v1/health`) includes a sanitized aggregate snapshot:
+node availability, capacity totals, and average health scores. Applications
+can enable the coordinator-owned expiry worker with `expiryIntervalMs` and
+`startExpiryWorker: true`, or control it explicitly with
+`startExpiryWorker()`/`stopExpiryWorker()`. Client adapters retain their
+last-known-good endpoint snapshot and expose non-secret refresh metadata.

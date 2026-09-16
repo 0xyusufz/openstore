@@ -154,6 +154,10 @@ piece transport. It must not be coupled to client encryption/storage logic.
   refresh coalescing, last-known-good state, and coordinator-driven placement.
 - **043:** Added multi-node libp2p placement/failover hardening and real
   two-node replication/failure coverage.
+- **046:** Added aggregate coordinator health, safe registry node lifecycle
+  events, coordinator-owned expiry scheduling, read-only node status snapshots,
+  sanitized runtime lifecycle/recovery telemetry, client last-known-good
+  metadata, and focused lifecycle integration coverage.
 
 ## 7. State after Milestone 043
 
@@ -169,22 +173,24 @@ Latest recorded full validation: **49 test files, 354 tests passed**;
 status refers to the Milestone 043 implementation before the handoff file was
 created; rerun validation after any further changes.
 
+Milestone 046 validation: **52 test files, 362 tests passed**; `npm run build`,
+`npm run typecheck`, and `git diff --check` passed.
+
 ## 8. Current branch/worktree
 
 Repository: `0xyusufz/openstore`
 
-At handoff:
+Current worktree:
 
 ```text
 branch: 0xyusufz-audit-openstore-030
 tracking: origin/0xyusufz-audit-openstore-030
-HEAD: a7cd071 feat: add p2p multi-node placement and failover
+HEAD: 37b71e0 feat: harden coordinator lifecycle recovery
 ```
 
-The worktree currently contains an untracked `.manual-043/` directory from
-manual testing. It is not source code and should not be committed. The
-handoff document itself will also appear as an untracked file until explicitly
-handled by a later agent.
+Milestone 046 changes are currently uncommitted. The worktree also contains an
+untracked `.manual-043/` directory from manual testing. It is not source code
+and should not be committed.
 
 ## 9. Git workflow
 
@@ -316,3 +322,19 @@ node recovery, verifies expiry of a killed node, restarts that node with the
 same identity and storage, and confirms persisted retrieval. Focused tests also
 cover persistence degradation, contextual coordinator errors, and safe runtime
 lifecycle events. Full validation must be rerun after later changes.
+
+## 17. Milestone 046 status
+
+Milestone 046 adds safe coordinator aggregate health/status fields, timestamped
+registry lifecycle events, an optional coordinator-owned expiry worker, public
+standalone libp2p runtime status snapshots, bounded sanitized recovery events,
+and client refresh metadata while preserving last-known-good endpoints. README
+and local-development documentation now describe coordinator status, expiry,
+recovery, and troubleshooting.
+
+The dedicated Milestone 046 tests cover aggregate expiry-worker behavior,
+last-known-good client metadata, and safe storage-node status. Milestones 044
+and 045 remain the real child-process coverage for multi-node placement,
+coordinator restart, persistence, and recovery. The current validation is
+**52 test files, 362 tests passed**, with build, typecheck, and diff-check
+passing. No commit or push has been made.

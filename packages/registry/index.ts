@@ -218,10 +218,13 @@ export interface RegistryLogger {
 }
 
 export type RegistryEvent =
-  | { type: "registry.started"; persistence: "enabled" | "disabled" }
+  | { type: "registry.started"; persistence: "enabled" | "disabled"; timestamp?: number }
   | { type: "persistence.load"; outcome: "success" | "missing" | "invalid" | "error"; records: number }
   | { type: "persistence.write"; outcome: "success" | "error"; records: number }
-  | { type: "persistence.degraded"; degraded: boolean; operation: "load" | "write" };
+  | { type: "persistence.degraded"; degraded: boolean; operation: "load" | "write" }
+  | { type: "node.registered" | "node.re-registered" | "node.heartbeat-accepted" | "node.heartbeat-rejected" | "node.registration-rejected" | "node.expired" | "node.unregistered"; nodeId: string; timestamp?: number; available?: boolean; transport?: "http" | "libp2p"; state?: string; operation?: string; classification?: string };
+
+export interface ExpiredNodeInfo { nodeId: string; lastSeen: number; missedHeartbeats: number; }
 
 export interface PersistenceStatus {
   enabled: boolean;
@@ -229,6 +232,21 @@ export interface PersistenceStatus {
   degraded: boolean;
   lastLoadOutcome?: "success" | "missing" | "invalid" | "error";
   lastWriteOutcome?: "success" | "error";
+}
+
+export interface RegistryHealthSnapshot {
+  totalNodes: number;
+  availableNodes: number;
+  unavailableNodes: number;
+  totalCapacityBytes: number;
+  usedCapacityBytes: number;
+  availableCapacityBytes: number;
+  averageReliabilityScore: number;
+  averageStorageScore: number;
+  heartbeatTimeoutMs: number;
+  lastMutationAt?: number;
+  lastExpiryAt?: number;
+  lastExpiryCount: number;
 }
 
 /**
@@ -248,11 +266,14 @@ export interface StorageAuditResult {
 
 export interface Registry {
   readonly version: number;
+  readonly heartbeatTimeoutMs: number;
   register(baseUrl: string, identity: Identity, capacity?: NodeCapacity): NodeRecord;
   registerSigned(signed: SignedRegistration): NodeRecord;
+  registerSignedInternal(signed: SignedRegistration): NodeRecord;
   registerLibp2pSigned(signed: SignedLibp2pRegistration): NodeRecord;
   heartbeat(nodeId: string, identity: Identity, capacity?: NodeCapacity): NodeRecord;
   heartbeatSigned(signed: SignedHeartbeat): NodeRecord;
+  heartbeatSignedInternal(signed: SignedHeartbeat): NodeRecord;
   heartbeatLibp2pSigned(signed: SignedLibp2pHeartbeat): NodeRecord;
   unregister(nodeId: string, identity: Identity): void;
   unregisterSigned(signed: SignedUnregister): void;
@@ -269,7 +290,8 @@ export interface Registry {
   getAvailableEndpoints(): StorageNodeEndpoint[];
   registerDiscoveredPeer(peer: P2PPeerDescriptor, options?: { availableBytes?: number; usedBytes?: number; reliabilityScore?: number }): NodeRecord;
   removeDiscoveredPeer(nodeId: string): void;
-  pruneExpired(): void;
+  pruneExpired(): ExpiredNodeInfo[];
+  healthSnapshot(): RegistryHealthSnapshot;
   persistenceStatus(): PersistenceStatus;
 }
 
@@ -317,15 +339,20 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
   const seenNonces = new Map<string, number>();
   /** Idempotency keys `${auditId}:${nodeId}` for recorded storage audits. */
   const seenAuditIds = new Set<string>();
+  const lifecycleStates = new Map<string, string>();
+  let lastMutationAt: number | undefined;
+  let lastExpiryAt: number | undefined;
+  let lastExpiryCount = 0;
   const MAX_SEEN_AUDIT_IDS = 1000;
   let persistenceDegraded = false;
   let lastLoadOutcome: "success" | "missing" | "invalid" | "error" | undefined;
   let lastWriteOutcome: PersistenceStatus["lastWriteOutcome"];
   const emit = (event: RegistryEvent): void => {
+    if (!("timestamp" in event)) event = { ...event, timestamp: Date.now() } as unknown as RegistryEvent;
     try { options.onEvent?.(event); } catch {}
     try { if (options.onLifecycleEvent && options.onLifecycleEvent !== options.onEvent) options.onLifecycleEvent(event); } catch {}
     const level = event.type === "persistence.degraded" && event.degraded ? "warn" : event.type === "persistence.write" && event.outcome === "error" ? "error" : "info";
-    try { options.logger?.[level]?.(event.type, event.type === "persistence.load" ? { outcome: event.outcome, records: event.records } : event.type === "persistence.write" ? { outcome: event.outcome, records: event.records } : event.type === "persistence.degraded" ? { degraded: event.degraded, operation: event.operation } : { persistence: event.persistence }); } catch {}
+    try { options.logger?.[level]?.(event.type, event.type === "persistence.load" ? { outcome: event.outcome, records: event.records } : event.type === "persistence.write" ? { outcome: event.outcome, records: event.records } : event.type === "persistence.degraded" ? { degraded: event.degraded, operation: event.operation } : "nodeId" in event ? { nodeId: event.nodeId, ...(event.available === undefined ? {} : { available: event.available }) } : { persistence: event.persistence }); } catch {}
   };
   const markDegraded = (degraded: boolean, operation: "load" | "write"): void => {
     if (persistenceDegraded !== degraded) {
@@ -564,9 +591,10 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     return { allocatedBytes: total, totalBytes: total, usedBytes: used, availableBytes: available };
   }
 
-  function prune(): void {
+  function prune(): ExpiredNodeInfo[] {
     const now = Date.now();
     let changed = false;
+    const expired: ExpiredNodeInfo[] = [];
     for (const [, rec] of nodes) {
       if (now - rec.lastSeen > heartbeatTimeoutMs) {
         if (rec.available) {
@@ -579,16 +607,25 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
             rec.reliability.missedHeartbeats,
           );
           changed = true;
+          expired.push({ nodeId: rec.nodeId, lastSeen: rec.lastSeen, missedHeartbeats: rec.reliability.missedHeartbeats });
+            emit({ type: "node.expired", nodeId: rec.nodeId, available: false, transport: rec.transport, operation: "expiry" });
         } else {
           rec.available = false;
         }
       }
     }
-    if (changed) persist();
+    if (changed) {
+      lastExpiryAt = Date.now();
+      lastExpiryCount = expired.length;
+      lastMutationAt = lastExpiryAt;
+      persist();
+    }
+    return expired;
   }
 
   const registry: Registry = {
     version: REGISTRY_VERSION,
+    heartbeatTimeoutMs,
 
     register(baseUrl: string, identity: Identity, capacity?: NodeCapacity): NodeRecord {
       if (!identity || typeof identity !== "object" || !Buffer.isBuffer(identity.publicKey) || !Buffer.isBuffer(identity.privateKey)) {
@@ -603,6 +640,14 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     },
 
     registerSigned(signed: SignedRegistration): NodeRecord {
+      try { return registry.registerSignedInternal(signed); } catch (error) {
+        const nodeId = typeof signed?.publicKey === "string" ? signed.publicKey.slice(0, 96) : "unknown";
+        emit({ type: "node.registration-rejected", nodeId, state: "register-rejected", operation: "register", classification: "validation" });
+        throw error;
+      }
+    },
+
+    registerSignedInternal(signed: SignedRegistration): NodeRecord {
       if (!signed || typeof signed !== "object") throw new Error("malformed node record");
       const { baseUrl, publicKey, timestamp, nonce, signature, capacity } = signed as unknown as Record<string, unknown>;
       if (typeof baseUrl !== "string" || typeof publicKey !== "string" || typeof timestamp !== "string" || typeof nonce !== "string" || typeof signature !== "string") {
@@ -654,6 +699,13 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         }),
       };
       nodes.set(nodeId, record);
+      lastMutationAt = Date.now();
+      const eventType = existing ? "node.re-registered" : "node.registered";
+      if (lifecycleStates.get(nodeId) !== eventType) {
+        lifecycleStates.set(nodeId, eventType);
+          lastMutationAt = Date.now();
+          emit({ type: eventType, nodeId, available: true, transport: record.transport, operation: "register" });
+      }
       persist();
       return { ...record, capacity: { ...record.capacity }, reliability: { ...record.reliability } };
     },
@@ -676,6 +728,13 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     },
 
     heartbeatSigned(signed: SignedHeartbeat): NodeRecord {
+      try { return registry.heartbeatSignedInternal(signed); } catch (error) {
+        emit({ type: "node.heartbeat-rejected", nodeId: typeof signed?.nodeId === "string" ? signed.nodeId.slice(0, 96) : "unknown", state: "heartbeat-rejected", operation: "heartbeat", classification: "validation" });
+        throw error;
+      }
+    },
+
+    heartbeatSignedInternal(signed: SignedHeartbeat): NodeRecord {
       if (!signed || typeof signed !== "object") throw new Error("malformed node record");
       const { nodeId, publicKey, timestamp, nonce, signature, capacity } = signed as unknown as Record<string, unknown>;
       if (typeof nodeId !== "string" || typeof publicKey !== "string" || typeof timestamp !== "string" || typeof nonce !== "string" || typeof signature !== "string") {
@@ -710,6 +769,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       }
       if (!existing) throw new Error("node not found");
       existing.lastSeen = Date.now();
+      lastMutationAt = existing.lastSeen;
       existing.available = true;
       if (cap) existing.capacity = cap;
       if (descriptor) {
@@ -725,6 +785,11 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         existing.reliability.successfulHeartbeats,
         existing.reliability.missedHeartbeats,
       );
+      if (lifecycleStates.get(nodeId) !== "node.heartbeat-accepted") {
+        lifecycleStates.set(nodeId, "node.heartbeat-accepted");
+        lastMutationAt = Date.now();
+        emit({ type: "node.heartbeat-accepted", nodeId: nodeId as string, available: true, transport: existing.transport, operation: "heartbeat" });
+      }
       persist();
       return { ...existing, capacity: { ...existing.capacity }, reliability: { ...existing.reliability } };
     },
@@ -767,6 +832,9 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       }
       if (!nodes.has(nodeId as string)) throw new Error("node not found");
       nodes.delete(nodeId as string);
+      lifecycleStates.delete(nodeId as string);
+      lastMutationAt = Date.now();
+      emit({ type: "node.unregistered", nodeId: nodeId as string, available: false, transport: existing?.transport, operation: "unregister" });
       persist();
     },
 
@@ -889,8 +957,29 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       }
     },
 
-    pruneExpired(): void {
+    pruneExpired(): ExpiredNodeInfo[] {
+      return prune();
+    },
+    healthSnapshot(): RegistryHealthSnapshot {
       prune();
+      const records = Array.from(nodes.values());
+      const totalCapacityBytes = records.reduce((sum, record) => sum + (record.capacity.allocatedBytes ?? record.capacity.totalBytes ?? 0), 0);
+      const usedCapacityBytes = records.reduce((sum, record) => sum + record.capacity.usedBytes, 0);
+      const availableCapacityBytes = records.reduce((sum, record) => sum + record.capacity.availableBytes, 0);
+      return {
+        totalNodes: records.length,
+        availableNodes: records.filter((record) => record.available).length,
+        unavailableNodes: records.filter((record) => !record.available).length,
+        totalCapacityBytes,
+        usedCapacityBytes,
+        availableCapacityBytes,
+        averageReliabilityScore: records.length ? Math.round(records.reduce((sum, record) => sum + record.reliability.score, 0) / records.length) : 0,
+        averageStorageScore: records.length ? Math.round(records.reduce((sum, record) => sum + record.reliability.storageScore, 0) / records.length) : 0,
+        heartbeatTimeoutMs,
+        lastMutationAt,
+        lastExpiryAt,
+        lastExpiryCount,
+      };
     },
     persistenceStatus(): PersistenceStatus {
       const enabled = Boolean(persistencePath);
