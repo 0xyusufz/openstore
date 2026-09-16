@@ -112,6 +112,9 @@ export function buildManifest(input: BuildManifestInput): FileManifest {
     if (!Array.isArray(chunk.nodeIds) || chunk.nodeIds.length === 0) {
       throw new Error(`chunk ${position} must list at least one node ID`);
     }
+    if (new Set(chunk.nodeIds).size !== chunk.nodeIds.length) {
+      throw new Error(`chunk ${position} contains duplicate replica node IDs`);
+    }
     for (const nodeId of chunk.nodeIds) {
       if (typeof nodeId !== "string" || nodeId === "") {
         throw new Error(`chunk ${position} has an invalid node ID`);

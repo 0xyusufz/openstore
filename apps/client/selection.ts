@@ -35,6 +35,30 @@ export function selectNodes(
   if (!Number.isInteger(pieceSize) || pieceSize < 0) throw new TypeError("pieceSize must be a non-negative integer");
   if (!Number.isInteger(replicationFactor) || replicationFactor <= 0) throw new RangeError("replicationFactor must be a positive integer");
 
+  const suitable = selectAvailableNodes(candidates, pieceSize);
+
+  if (suitable.length < replicationFactor) {
+    throw new Error(
+      `insufficient suitable nodes: need ${replicationFactor}, have ${suitable.length} (available with enough capacity)`,
+    );
+  }
+
+  return suitable.slice(0, replicationFactor);
+}
+
+/**
+ * Return every unique available node with enough capacity, ordered for
+ * placement. Callers that require a replication factor should use
+ * {@link selectNodes}; recovery flows use the extra candidates as
+ * replacements after an initial store failure.
+ */
+export function selectAvailableNodes(
+  candidates: NodeRecord[],
+  pieceSize: number,
+): NodeRecord[] {
+  if (!Array.isArray(candidates)) throw new TypeError("candidates must be an array");
+  if (!Number.isInteger(pieceSize) || pieceSize < 0) throw new TypeError("pieceSize must be a non-negative integer");
+
   const suitable = candidates
     .filter((n) => n.available)
     .filter((n) => n.capacity.availableBytes >= pieceSize)
@@ -58,13 +82,7 @@ export function selectNodes(
     }
   }
 
-  if (unique.length < replicationFactor) {
-    throw new Error(
-      `insufficient suitable nodes: need ${replicationFactor}, have ${unique.length} (available with enough capacity)`,
-    );
-  }
-
-  return unique.slice(0, replicationFactor);
+  return unique;
 }
 
 /**

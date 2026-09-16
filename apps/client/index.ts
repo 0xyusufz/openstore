@@ -18,9 +18,17 @@
  *   report per-node results, reads fall through to the next replica.
  */
 
+import { createHash } from "crypto";
+
 export const CLIENT_VERSION = 1;
 
 export const DEFAULT_TIMEOUT_MS = 5000;
+export const DEFAULT_RETRY_ATTEMPTS = 3;
+export const DEFAULT_RETRY_BACKOFF_MS = 25;
+/** Maximum caller-configurable attempts for one node operation. */
+export const MAX_RETRY_ATTEMPTS = 10;
+/** Maximum base and per-attempt exponential backoff delay in milliseconds. */
+export const MAX_RETRY_BACKOFF_MS = 1000;
 
 /**
  * Address of one storage-node replica.
@@ -42,6 +50,8 @@ export interface StorePieceOptions {
   replicationFactor?: number;
   /** Ed25519 identity to sign requests (private key stays client-side) */
   identity?: { publicKey: Buffer; privateKey: Buffer };
+  retryAttempts?: number;
+  retryBackoffMs?: number;
 }
 
 /**
@@ -71,6 +81,10 @@ export interface GetPieceOptions {
   timeoutMs?: number;
   /** Ed25519 identity to sign requests */
   identity?: { publicKey: Buffer; privateKey: Buffer };
+  retryAttempts?: number;
+  retryBackoffMs?: number;
+  /** Optional integrity check; invalid responses are treated as replica failures. */
+  validate?: (bytes: Buffer, endpoint: StorageNodeEndpoint) => void | Promise<void>;
 }
 
 /**
@@ -80,6 +94,8 @@ export interface RetrievedPiece {
   bytes: Buffer;
   from: StorageNodeEndpoint;
 }
+
+const inFlightStores = new Map<string, Promise<StorePiecesReport>>();
 
 /**
  * Send a piece to the configured nodes and report per-node results.
@@ -105,6 +121,41 @@ export async function storePieceOnNodes(
   assertValidEndpoints(endpoints);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   assertValidTimeout(timeoutMs);
+  assertValidRetryOptions(options.retryAttempts, options.retryBackoffMs);
+  const replicationFactor = options.replicationFactor ?? endpoints.length;
+  if (!Number.isInteger(replicationFactor) || replicationFactor <= 0) {
+    throw new RangeError("replicationFactor must be a positive integer");
+  }
+  const operationKey = buildStoreOperationKey(pieceId, data, endpoints, {
+    timeoutMs,
+    replicationFactor,
+    retryAttempts: options.retryAttempts ?? DEFAULT_RETRY_ATTEMPTS,
+    retryBackoffMs: options.retryBackoffMs ?? DEFAULT_RETRY_BACKOFF_MS,
+    publicKey: options.identity?.publicKey.toString("base64") ?? "",
+  });
+  const existing = inFlightStores.get(operationKey);
+  if (existing) return existing;
+  const operation = storePieceOnNodesUncoordinated(pieceId, data, endpoints, options);
+  inFlightStores.set(operationKey, operation);
+  try {
+    return await operation;
+  } finally {
+    if (inFlightStores.get(operationKey) === operation) inFlightStores.delete(operationKey);
+  }
+}
+
+async function storePieceOnNodesUncoordinated(
+  pieceId: string,
+  data: Buffer,
+  endpoints: StorageNodeEndpoint[],
+  options: StorePieceOptions = {},
+): Promise<StorePiecesReport> {
+  assertValidPieceIdArg(pieceId);
+  assertValidData(data);
+  assertValidEndpoints(endpoints);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  assertValidTimeout(timeoutMs);
+  assertValidRetryOptions(options.retryAttempts, options.retryBackoffMs);
   const replicationFactor = options.replicationFactor ?? endpoints.length;
   if (!Number.isInteger(replicationFactor) || replicationFactor <= 0) {
     throw new RangeError("replicationFactor must be a positive integer");
@@ -112,22 +163,18 @@ export async function storePieceOnNodes(
 
   const selected = endpoints.slice(
     0,
-    Math.min(replicationFactor, endpoints.length),
+    endpoints.length,
   );
   const body = JSON.stringify({ id: pieceId, data: data.toString("base64") });
 
   const succeeded: StorageNodeEndpoint[] = [];
   const failed: NodeFailure[] = [];
-  await Promise.all(
-    selected.map(async (endpoint) => {
-      const failure = await postToNode(endpoint, body, timeoutMs, options.identity);
-      if (failure === null) {
-        succeeded.push(endpoint);
-      } else {
-        failed.push(failure);
-      }
-    }),
-  );
+  for (const endpoint of selected) {
+    if (succeeded.length >= Math.min(replicationFactor, endpoints.length)) break;
+    const failure = await postToNode(endpoint, body, timeoutMs, options.identity, options);
+    if (failure === null) succeeded.push(endpoint);
+    else failed.push(failure);
+  }
 
   return {
     version: CLIENT_VERSION,
@@ -206,11 +253,12 @@ export async function getPieceFromNodes(
   assertValidEndpoints(endpoints);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   assertValidTimeout(timeoutMs);
+  assertValidRetryOptions(options.retryAttempts, options.retryBackoffMs);
 
   const problems: string[] = [];
   for (const endpoint of endpoints) {
-    let lastErr: string | null = null;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    const attempts = options.retryAttempts ?? DEFAULT_RETRY_ATTEMPTS;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
         const path = `/pieces/${encodeURIComponent(pieceId)}`;
         const headers: Record<string, string> = {};
@@ -218,40 +266,27 @@ export async function getPieceFromNodes(
           const { createAuthHeaders } = await import("../../packages/auth/index.js");
           Object.assign(headers, createAuthHeaders(options.identity, "GET", path));
         }
-        const res = await fetch(
-          `${normalizeBaseUrl(endpoint.baseUrl)}${path}`,
-          {
-            headers: Object.keys(headers).length > 0 ? headers : undefined,
-            signal: AbortSignal.timeout(timeoutMs),
-          },
-        );
+        const res = await fetch(`${normalizeBaseUrl(endpoint.baseUrl)}${path}`, {
+          headers: Object.keys(headers).length > 0 ? headers : undefined,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
         if (res.status === 200) {
-          return {
-            bytes: Buffer.from(await res.arrayBuffer()),
-            from: endpoint,
-          };
-        }
-        if (res.status >= 500 && res.status !== 507 && attempt === 0) {
-          lastErr = `${endpoint.id}: unexpected status ${res.status}`;
-          await delay(100 * (attempt + 1));
-          continue;
+          const bytes = Buffer.from(await res.arrayBuffer());
+          try {
+            await options.validate?.(bytes, endpoint);
+            return { bytes, from: endpoint };
+          } catch (err) {
+            problems.push(`${endpoint.id}: ${toErrorMessage(err)}`);
+            break;
+          }
         }
         problems.push(`${endpoint.id}: unexpected status ${res.status}`);
-        lastErr = null;
-        break;
+        if (!isTransientStatus(res.status)) break;
       } catch (err) {
-        const msg = toErrorMessage(err);
-        if (isTransientError(msg) && attempt === 0) {
-          lastErr = `${endpoint.id}: ${msg}`;
-          await delay(100 * (attempt + 1));
-          continue;
-        }
-        problems.push(`${endpoint.id}: ${msg}`);
-        lastErr = null;
-        break;
+        problems.push(`${endpoint.id}: ${toErrorMessage(err)}`);
       }
+      if (attempt + 1 < attempts) await backoff(options.retryBackoffMs, attempt);
     }
-    if (lastErr) problems.push(lastErr);
   }
   throw new Error(
     `piece "${pieceId}" unavailable from ${endpoints.length} node(s): ${problems.join("; ")}`,
@@ -263,8 +298,12 @@ async function postToNode(
   body: string,
   timeoutMs: number,
   identity?: { publicKey: Buffer; privateKey: Buffer },
+  options: StorePieceOptions = {},
 ): Promise<NodeFailure | null> {
-  try {
+  const attempts = options.retryAttempts ?? DEFAULT_RETRY_ATTEMPTS;
+  let last: NodeFailure | null = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+   try {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (identity) {
       const { createAuthHeaders } = await import("../../packages/auth/index.js");
@@ -279,14 +318,49 @@ async function postToNode(
     if (res.status === 200 || res.status === 201) {
       return null;
     }
-    return {
+    last = {
       endpoint,
       status: res.status,
       error: `unexpected status ${res.status}`,
     };
+    if (!isTransientStatus(res.status)) return last;
   } catch (err) {
-    return { endpoint, error: toErrorMessage(err) };
+    last = { endpoint, error: toErrorMessage(err) };
   }
+   if (attempt + 1 < attempts) await backoff(options.retryBackoffMs, attempt);
+  }
+  return last;
+}
+
+function isTransientStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+async function backoff(base: number | undefined, attempt: number): Promise<void> {
+  const delay = Math.min(
+    MAX_RETRY_BACKOFF_MS,
+    Math.max(0, base ?? DEFAULT_RETRY_BACKOFF_MS) * 2 ** attempt,
+  );
+  if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+function buildStoreOperationKey(
+  pieceId: string,
+  data: Buffer,
+  endpoints: StorageNodeEndpoint[],
+  options: {
+    timeoutMs: number;
+    replicationFactor: number;
+    retryAttempts: number;
+    retryBackoffMs: number;
+    publicKey: string;
+  },
+): string {
+  const dataDigest = createHash("sha256").update(data).digest("hex");
+  const endpointSet = endpoints.map(({ id, baseUrl }) => ({ id, baseUrl }));
+  return createHash("sha256")
+    .update(JSON.stringify({ pieceId, dataDigest, endpointSet, ...options }))
+    .digest("hex");
 }
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -332,5 +406,22 @@ function assertValidEndpoints(endpoints: StorageNodeEndpoint[]): void {
 function assertValidTimeout(timeoutMs: number): void {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new RangeError("timeoutMs must be a positive number");
+  }
+}
+
+function assertValidRetryOptions(attempts: number | undefined, backoffMs: number | undefined): void {
+  if (
+    attempts !== undefined &&
+    (!Number.isInteger(attempts) || attempts <= 0 || attempts > MAX_RETRY_ATTEMPTS)
+  ) {
+    throw new RangeError(`retryAttempts must be an integer from 1 to ${MAX_RETRY_ATTEMPTS}`);
+  }
+  if (
+    backoffMs !== undefined &&
+    (!Number.isFinite(backoffMs) || backoffMs < 0 || backoffMs > MAX_RETRY_BACKOFF_MS)
+  ) {
+    throw new RangeError(
+      `retryBackoffMs must be a number from 0 to ${MAX_RETRY_BACKOFF_MS}`,
+    );
   }
 }

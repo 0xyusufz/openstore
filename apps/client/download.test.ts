@@ -118,6 +118,21 @@ describe("download pipeline (OPENSTORE-006)", () => {
     ).rejects.toThrow(/hash mismatch/);
   });
 
+  it("falls back when the first replica is corrupted", async () => {
+    const original = Buffer.from("corrupted-replica-fallback");
+    const { manifest, encryptionKey } = await uploadBuffer(
+      original,
+      "corrupted-fallback.txt",
+      endpoints,
+    );
+    const pieceId = manifest.pieceIds[0] as string;
+    const corrupted = await fetchPiece(endpoints[0] as StorageNodeEndpoint, pieceId);
+    corrupted[0] = (corrupted[0] as number) ^ 0xff;
+    await overwritePiece(endpoints[0] as StorageNodeEndpoint, pieceId, corrupted);
+
+    await expect(downloadBuffer(manifest, encryptionKey, endpoints)).resolves.toEqual(original);
+  });
+
   it("5. rejects a wrong encryption key", async () => {
     const { manifest } = await uploadBuffer(
       Buffer.from("secret-file-data"),

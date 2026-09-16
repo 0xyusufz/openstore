@@ -38,6 +38,8 @@ import type { StorageNodeEndpoint } from "./index.js";
  */
 export interface DownloadOptions {
   timeoutMs?: number;
+  retryAttempts?: number;
+  retryBackoffMs?: number;
 }
 
 /**
@@ -94,6 +96,8 @@ export async function downloadBuffer(
         try {
           const got = await getPieceFromNodes(chunk.pieceId, [endpoint], {
             timeoutMs: options.timeoutMs,
+            retryAttempts: options.retryAttempts,
+            retryBackoffMs: options.retryBackoffMs,
           });
           bytes = got.bytes;
         } catch (err) {

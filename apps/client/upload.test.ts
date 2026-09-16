@@ -153,4 +153,44 @@ describe("upload pipeline (OPENSTORE-005)", () => {
       }),
     ).rejects.toThrow(/on any node/);
   });
+
+  it("replaces capacity-rejected and draining nodes while preserving RF", async () => {
+    const node = nodes[0] as StorageNode;
+    const endpoint = endpoints[0] as StorageNodeEndpoint;
+    const originalCapacity = node.capacityBytes;
+    try {
+      node.setCapacityBytes(1);
+      const capacityResult = await uploadBuffer(
+        Buffer.from("capacity replacement"),
+        "capacity-replacement.txt",
+        endpoints,
+        { replicationFactor: 2, retryBackoffMs: 0 },
+      );
+      expect(capacityResult.manifest.chunks[0]?.nodeIds).toHaveLength(2);
+      expect(capacityResult.manifest.chunks[0]?.nodeIds).not.toContain(endpoint.id);
+
+      node.setCapacityBytes(originalCapacity);
+      node.setDraining(true);
+      const drainingResult = await uploadBuffer(
+        Buffer.from("draining replacement"),
+        "draining-replacement.txt",
+        endpoints,
+        { replicationFactor: 2, retryBackoffMs: 0 },
+      );
+      expect(drainingResult.manifest.chunks[0]?.nodeIds).toHaveLength(2);
+      expect(drainingResult.manifest.chunks[0]?.nodeIds).not.toContain(endpoint.id);
+    } finally {
+      node.setCapacityBytes(originalCapacity);
+      node.setDraining(false);
+    }
+  });
+
+  it("reports an explicit unrecoverable partial replication failure", async () => {
+    await expect(uploadBuffer(
+      Buffer.from("partial failure"),
+      "partial-failure.txt",
+      [endpoints[0] as StorageNodeEndpoint, dead],
+      { replicationFactor: 2, retryAttempts: 1 },
+    )).rejects.toThrow(/partial replication failure.*stored 1\/2/);
+  });
 });

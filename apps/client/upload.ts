@@ -41,6 +41,8 @@ import type { ManifestStore } from "../../packages/manifest/store.js";
 export interface UploadOptions {
   chunkSize?: number;
   timeoutMs?: number;
+  retryAttempts?: number;
+  retryBackoffMs?: number;
   replicationFactor?: number;
   /** Optional registry for intelligent node selection (capacity/availability aware) */
   registry?: Registry;
@@ -100,16 +102,18 @@ export async function uploadBuffer(
     const pieceBytes = encodeEncryptedPiece(encrypted);
     const pieceId = hashPieceId(pieceBytes);
 
-    // Intelligent selection when registry is available: filter by capacity, prefer more available
+    // Intelligent selection when registry is available: filter by capacity, prefer more available.
     let selectedEndpoints = endpoints;
     let replicationFactor = options.replicationFactor;
     if (options.registry) {
-      const { selectNodes } = await import("./selection.js");
+      const { selectAvailableNodes } = await import("./selection.js");
       const candidates = options.registry.listAvailable();
       if (candidates.length > 0) {
         const rf = replicationFactor ?? 3;
-        // Throws if insufficient suitable nodes — do not silently reduce
-        const selected = selectNodes(candidates, pieceBytes.length, rf);
+        const selected = selectAvailableNodes(candidates, pieceBytes.length);
+        if (selected.length < rf) {
+          throw new Error(`insufficient suitable nodes: need ${rf}, have ${selected.length}`);
+        }
         selectedEndpoints = selected.map((r) => ({ id: r.nodeId, baseUrl: r.baseUrl }));
         replicationFactor = rf;
       }
@@ -118,23 +122,12 @@ export async function uploadBuffer(
     // Record ownership BEFORE storing: even if the store hangs or
     // the response is lost, this attempt's cleanup may delete it.
     attemptedPieces.push({ pieceId, endpoints: selectedEndpoints });
-    let report = await storePieceOnNodes(pieceId, pieceBytes, selectedEndpoints, {
+    const report = await storePieceOnNodes(pieceId, pieceBytes, selectedEndpoints, {
       timeoutMs: options.timeoutMs,
       replicationFactor,
+      retryAttempts: options.retryAttempts,
+      retryBackoffMs: options.retryBackoffMs,
     });
-    // One transient retry for pieces that failed on every replica
-    // due to network/timeout/5xx (draining/quota are permanent and
-    // not retried — the report already tried all replicas once).
-        if (report.succeeded.length === 0) {
-          const transient = report.failed.some((f) => isTransientError(f.error));
-      if (transient) {
-        await new Promise((r) => setTimeout(r, 150));
-        report = await storePieceOnNodes(pieceId, pieceBytes, selectedEndpoints, {
-          timeoutMs: options.timeoutMs,
-          replicationFactor,
-        });
-      }
-    }
     if (report.succeeded.length === 0) {
       const reasons = report.failed
         .map(
@@ -144,6 +137,14 @@ export async function uploadBuffer(
         .join("; ");
       throw new Error(
         `failed to store piece ${fileChunk.index} ("${pieceId}") on any node: ${reasons}`,
+      );
+    }
+    const required = options.replicationFactor ?? (options.registry ? (replicationFactor ?? 3) : report.succeeded.length);
+    if (report.succeeded.length < required) {
+      const reasons = report.failed.map((f) => `${f.endpoint.id}: ${f.status ?? f.error}`).join("; ");
+      throw new Error(
+        `partial replication failure for piece ${fileChunk.index} ("${pieceId}"): ` +
+        `stored ${report.succeeded.length}/${required}; ${reasons}`,
       );
     }
     return {
