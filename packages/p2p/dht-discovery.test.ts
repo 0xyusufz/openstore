@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { multiaddr } from "@multiformats/multiaddr";
+import { peerIdFromOpenStorePrivateKey } from "./identity-binding.js";
 import { createIdentity } from "../identity/index.js";
 import { DhtPeerDiscovery } from "./dht-discovery.js";
 import { createLibp2pStorageNode, type Libp2pStorageNode } from "./libp2p.js";
@@ -12,8 +13,10 @@ afterEach(async () => {
 });
 
 function options(discovery: DhtPeerDiscovery) {
+  const identity = createIdentity();
   return {
-    applicationIdentity: { publicKey: createIdentity().publicKey.toString("base64") },
+    applicationIdentity: { publicKey: identity.publicKey.toString("base64") },
+    applicationPrivateKey: identity.privateKey,
     discovery,
     discoveryRefreshIntervalMs: 50,
     storePiece: async () => 201,
@@ -35,6 +38,7 @@ describe("DHT peer discovery (OPENSTORE-036)", () => {
       multiaddr: second.listenAddrs[0],
       identity: second.applicationIdentity,
       capabilities: second.capabilities,
+      identityBinding: second.peerId,
     };
     const firstDiscovery = new DhtPeerDiscovery([secondDescriptor]);
     const first = await createLibp2pStorageNode(options(firstDiscovery));
@@ -47,6 +51,7 @@ describe("DHT peer discovery (OPENSTORE-036)", () => {
       multiaddr: first.listenAddrs[0],
       identity: first.applicationIdentity,
       capabilities: first.capabilities,
+      identityBinding: first.peerId,
     };
     secondDiscovery.addBootstrapPeer(firstDescriptor);
     await secondDiscovery.refreshNow({
@@ -69,11 +74,13 @@ describe("DHT peer discovery (OPENSTORE-036)", () => {
     } as unknown as P2PPeerDescriptor;
     expect(() => new DhtPeerDiscovery([invalid])).toThrow(/private|unsupported/i);
 
+    const unreachableIdentity = createIdentity();
     const unreachable: P2PPeerDescriptor = {
-      nodeId: "12D3KooWJ5rVx8z7LzYyM8n4q2k7b3s6d9f1h5j8p2c4v6x8z",
+      nodeId: peerIdFromOpenStorePrivateKey(unreachableIdentity.privateKey, unreachableIdentity.publicKey),
       baseUrl: "libp2p://unreachable",
       multiaddr: "/ip4/127.0.0.1/tcp/1",
-      identity: { publicKey: createIdentity().publicKey.toString("base64") },
+      identity: { publicKey: unreachableIdentity.publicKey.toString("base64") },
+      identityBinding: peerIdFromOpenStorePrivateKey(unreachableIdentity.privateKey, unreachableIdentity.publicKey),
       capabilities: { pieceStore: true, pieceGet: true, pieceDelete: true },
     };
     const discovery = new DhtPeerDiscovery([unreachable]);

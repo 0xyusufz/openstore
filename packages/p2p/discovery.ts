@@ -89,5 +89,6 @@ function cloneAndValidate(value: P2PPeerDescriptor): P2PPeerDescriptor {
     identity: { publicKey: value.identity.publicKey },
     capabilities: { ...value.capabilities },
     ...(value.multiaddr === undefined ? {} : { multiaddr: value.multiaddr }),
+    ...(value.identityBinding === undefined ? {} : { identityBinding: value.identityBinding }),
   };
 }

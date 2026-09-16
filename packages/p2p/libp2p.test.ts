@@ -5,6 +5,7 @@ import {
   Libp2pPieceTransport,
 } from "./libp2p.js";
 import type { Libp2pStorageNode } from "./libp2p.js";
+import { peerIdFromOpenStorePublicKey } from "./identity-binding.js";
 
 const nodes: Libp2pStorageNode[] = [];
 
@@ -15,6 +16,20 @@ afterEach(async () => {
 });
 
 describe("libp2p piece transport (OPENSTORE-033)", () => {
+  it("uses the OpenStore Ed25519 identity as the deterministic libp2p identity", async () => {
+    const identity = createIdentity();
+    const node = await createLibp2pStorageNode({
+      applicationIdentity: { publicKey: identity.publicKey.toString("base64") },
+      applicationPrivateKey: identity.privateKey,
+      storePiece: async () => 201,
+      getPiece: async () => null,
+      deletePiece: async () => 204,
+    });
+    nodes.push(node);
+    expect(node.peerId).toBe(peerIdFromOpenStorePublicKey(identity.publicKey));
+    await node.start();
+  });
+
   it("connects two local nodes and stores, gets, and deletes opaque bytes", async () => {
     const stored = new Map<string, Buffer>();
     const first = await createLibp2pStorageNode({

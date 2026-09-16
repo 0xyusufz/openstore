@@ -38,6 +38,8 @@ export interface P2PNodeDescriptor extends P2PNodeAddress {
 export interface P2PPeerDescriptor extends P2PNodeDescriptor {
   /** Static libp2p dial address, including /p2p/<peer-id> when used. */
   multiaddr?: string;
+  /** Peer ID derived from the same OpenStore Ed25519 public key. */
+  identityBinding?: string;
 }
 
 export interface PeerDiscovery {
@@ -192,6 +194,14 @@ export function validateP2PPeerDescriptor(value: unknown): asserts value is P2PP
       throw new TypeError("peer descriptor identity does not match multiaddr");
     }
   }
+  if (descriptor.identityBinding !== undefined &&
+    (typeof descriptor.identityBinding !== "string" || descriptor.identityBinding !== descriptor.nodeId)) {
+    throw new TypeError("peer descriptor identity binding is invalid");
+  }
+  if (descriptor.identityBinding !== undefined &&
+    peerIdFromOpenStorePublicKey(Buffer.from(descriptor.identity.publicKey, "base64")) !== descriptor.identityBinding) {
+    throw new TypeError("peer descriptor OpenStore identity does not match peer ID");
+  }
   return;
 }
 
@@ -202,3 +212,4 @@ function rejectSensitiveKeys(value: unknown): void {
     rejectSensitiveKeys(nested);
   }
 }
+import { peerIdFromOpenStorePublicKey } from "./identity-binding.js";

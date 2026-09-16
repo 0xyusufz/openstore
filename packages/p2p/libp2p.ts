@@ -2,11 +2,13 @@ import { createLibp2p } from "libp2p";
 import { tcp } from "@libp2p/tcp";
 import { mplex } from "@libp2p/mplex";
 import { noise } from "@chainsafe/libp2p-noise";
+import { privateKeyFromRaw } from "@libp2p/crypto/keys";
 import { multiaddr } from "@multiformats/multiaddr";
 import type { Libp2p } from "@libp2p/interface";
 import type { P2PNodeCapabilities, P2PNodeIdentity, P2PTransport, P2PTransportRequestOptions, P2PNodeAddress, P2PGetResult, P2PHealthResult, PeerDiscovery, P2PPeerDescriptor } from "./index.js";
 import { validateP2PPeerDescriptor } from "./index.js";
 import { createDhtServices, DhtPeerDiscovery } from "./dht-discovery.js";
+import { peerIdFromOpenStorePrivateKey, peerIdFromOpenStorePublicKey } from "./identity-binding.js";
 
 export const OPENSTORE_PIECE_PROTOCOL = "/openstore/piece/1.0.0";
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
@@ -25,6 +27,8 @@ interface PieceResponse {
 
 export interface Libp2pStorageNodeOptions {
   applicationIdentity: P2PNodeIdentity;
+  /** Private identity material stays in process memory and is never serialized. */
+  applicationPrivateKey?: Buffer;
   listenAddrs?: string[];
   maxPieceBytes?: number;
   storePiece: (pieceId: string, data: Buffer) => Promise<number>;
@@ -55,7 +59,20 @@ export async function createLibp2pStorageNode(
     streamMuxers: [mplex()],
     connectionEncrypters: [noise()],
     services: options.discovery instanceof DhtPeerDiscovery ? createDhtServices() : undefined,
+    ...(options.applicationPrivateKey === undefined ? {} : {
+      privateKey: privateKeyForLibp2p(options.applicationPrivateKey, options.applicationIdentity.publicKey),
+    }),
   });
+  if (options.applicationPrivateKey !== undefined) {
+    const expectedPeerId = peerIdFromOpenStorePrivateKey(
+      options.applicationPrivateKey,
+      Buffer.from(options.applicationIdentity.publicKey, "base64"),
+    );
+    if (node.peerId.toString() !== expectedPeerId) {
+      await node.stop();
+      throw new TypeError("libp2p peer identity binding failed");
+    }
+  }
   if (options.discovery instanceof DhtPeerDiscovery) options.discovery.attach(node as never);
   const capabilities: P2PNodeCapabilities = {
     pieceStore: true,
@@ -140,13 +157,21 @@ async function reconcilePeers(wrapper: Libp2pStorageNode, discovered: readonly P
 }
 
 function createLocalDescriptor(wrapper: Libp2pStorageNode, options: Libp2pStorageNodeOptions): P2PPeerDescriptor {
+  const publicKey = Buffer.from(wrapper.applicationIdentity.publicKey, "base64");
   return {
     nodeId: wrapper.peerId,
     baseUrl: `libp2p://${wrapper.peerId}`,
     multiaddr: wrapper.listenAddrs[0],
     identity: wrapper.applicationIdentity,
     capabilities: wrapper.capabilities,
+    ...(options.applicationPrivateKey === undefined ? {} : { identityBinding: wrapper.peerId }),
   };
+}
+
+function privateKeyForLibp2p(privateKeyDer: Buffer, publicKeyBase64: string) {
+  const publicKey = Buffer.from(publicKeyBase64, "base64");
+  const seed = privateKeyDer.subarray(-32);
+  return privateKeyFromRaw(Buffer.concat([seed, publicKey.subarray(-32)]));
 }
 
 export class Libp2pPieceTransport implements P2PTransport {

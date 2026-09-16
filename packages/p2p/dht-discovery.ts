@@ -178,11 +178,15 @@ function decode(value: Uint8Array): P2PPeerDescriptor {
 
 function cloneAndValidate(value: P2PPeerDescriptor): P2PPeerDescriptor {
   validateP2PPeerDescriptor(value);
+  if (value.identityBinding === undefined) {
+    throw new TypeError("DHT peer descriptor requires an identity binding");
+  }
   return {
     nodeId: value.nodeId,
     baseUrl: value.baseUrl,
     identity: { publicKey: value.identity.publicKey },
     capabilities: { ...value.capabilities },
     ...(value.multiaddr === undefined ? {} : { multiaddr: value.multiaddr }),
+    ...(value.identityBinding === undefined ? {} : { identityBinding: value.identityBinding }),
   };
 }
