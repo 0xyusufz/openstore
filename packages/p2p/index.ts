@@ -16,6 +16,9 @@ export interface P2PNodeIdentity {
 export interface P2PNodeAddress {
   nodeId: string;
   baseUrl: string;
+  multiaddr?: string;
+  identityBinding?: string;
+  identity?: P2PNodeIdentity;
 }
 
 export interface Libp2pNodeAddress extends P2PNodeAddress {

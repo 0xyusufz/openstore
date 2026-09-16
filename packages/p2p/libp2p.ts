@@ -201,8 +201,14 @@ export class Libp2pPieceTransport implements P2PTransport {
 
   private async request(node: P2PNodeAddress, request: PieceRequest, options: P2PTransportRequestOptions): Promise<PieceResponse> {
     validatePieceRequest(request);
+    if (!node.baseUrl.startsWith("libp2p:")) throw new TypeError("libp2p transport requires a libp2p endpoint");
     const multiaddrText = (node as P2PNodeAddress & { multiaddr?: string }).multiaddr;
     if (typeof multiaddrText !== "string" || multiaddrText.length === 0) throw new TypeError("libp2p node requires a multiaddr");
+    const binding = (node as P2PNodeAddress & { identityBinding?: string }).identityBinding;
+    if (binding !== undefined && binding !== node.nodeId) throw new TypeError("libp2p identity binding does not match peer ID");
+    if (node.identity !== undefined && peerIdFromOpenStorePublicKey(Buffer.from(node.identity.publicKey, "base64")) !== node.nodeId) {
+      throw new TypeError("libp2p OpenStore identity does not match peer ID");
+    }
     if (multiaddrText.includes("/p2p/") && !multiaddrText.endsWith(`/p2p/${node.nodeId}`)) {
       throw new TypeError("libp2p node identity does not match multiaddr");
     }

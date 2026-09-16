@@ -6,6 +6,7 @@ import type {
   P2PTransport,
   P2PTransportRequestOptions,
 } from "../../packages/p2p/index.js";
+import { Libp2pPieceTransport } from "../../packages/p2p/libp2p.js";
 
 export interface HttpTransportIdentity {
   publicKey: Buffer;
@@ -87,4 +88,34 @@ export class HttpStorageTransport implements P2PTransport {
 
 function normalize(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "");
+}
+
+/** Routes each endpoint to its explicitly configured transport protocol. */
+export class MixedStorageTransport implements P2PTransport {
+  readonly protocol = "mixed";
+  private readonly libp2p = new Libp2pPieceTransport();
+
+  constructor(private readonly http: HttpStorageTransport = new HttpStorageTransport()) {}
+
+  async storePiece(node: P2PNodeAddress, pieceId: string, data: Buffer, options: P2PTransportRequestOptions) {
+    return this.forNode(node).storePiece(node, pieceId, data, options);
+  }
+
+  async getPiece(node: P2PNodeAddress, pieceId: string, options: P2PTransportRequestOptions) {
+    return this.forNode(node).getPiece(node, pieceId, options);
+  }
+
+  async deletePiece(node: P2PNodeAddress, pieceId: string, options: P2PTransportRequestOptions) {
+    return this.forNode(node).deletePiece(node, pieceId, options);
+  }
+
+  async health(node: P2PNodeAddress, options: P2PTransportRequestOptions) {
+    return this.forNode(node).health(node, options);
+  }
+
+  private forNode(node: P2PNodeAddress): P2PTransport {
+    if (node.baseUrl.startsWith("libp2p:")) return this.libp2p;
+    if (node.baseUrl.startsWith("http:") || node.baseUrl.startsWith("https:")) return this.http;
+    throw new TypeError("unsupported storage transport");
+  }
 }

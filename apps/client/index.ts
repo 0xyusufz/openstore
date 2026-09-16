@@ -21,7 +21,7 @@
 import { createHash } from "crypto";
 import { HttpStorageTransport } from "./http-transport.js";
 import type { P2PTransport } from "../../packages/p2p/index.js";
-import type { P2PNodeAddress } from "../../packages/p2p/index.js";
+import type { P2PNodeAddress, P2PNodeIdentity } from "../../packages/p2p/index.js";
 
 export const CLIENT_VERSION = 1;
 
@@ -39,6 +39,11 @@ export const MAX_RETRY_BACKOFF_MS = 1000;
 export interface StorageNodeEndpoint {
   id: string;
   baseUrl: string;
+  /** Static libp2p address for libp2p:// endpoints. */
+  multiaddr?: string;
+  /** Public OpenStore-to-libp2p identity binding. */
+  identityBinding?: string;
+  identity?: P2PNodeIdentity;
   /** Optional heartbeat reliability score (0–100) from registry discovery metadata. */
   reliabilityScore?: number;
   /** Optional storage-audit health score (0–100) from registry discovery metadata. */
@@ -348,7 +353,13 @@ function toErrorMessage(err: unknown): string {
 }
 
 function toP2PAddress(endpoint: StorageNodeEndpoint): P2PNodeAddress {
-  return { nodeId: endpoint.id, baseUrl: endpoint.baseUrl };
+  return {
+    nodeId: endpoint.id,
+    baseUrl: endpoint.baseUrl,
+    ...(endpoint.multiaddr === undefined ? {} : { multiaddr: endpoint.multiaddr }),
+    ...(endpoint.identityBinding === undefined ? {} : { identityBinding: endpoint.identityBinding }),
+    ...(endpoint.identity === undefined ? {} : { identity: endpoint.identity }),
+  } as P2PNodeAddress;
 }
 
 function assertValidPieceIdArg(pieceId: string): void {
@@ -379,6 +390,14 @@ function assertValidEndpoints(endpoints: StorageNodeEndpoint[]): void {
       throw new TypeError(
         `endpoints[${i}] must be { id, baseUrl } with non-empty strings`,
       );
+    }
+    if (endpoint.baseUrl.startsWith("libp2p:")) {
+      if (typeof endpoint.multiaddr !== "string" || endpoint.multiaddr.length === 0) {
+        throw new TypeError(`endpoints[${i}] libp2p endpoints require multiaddr`);
+      }
+      if (endpoint.identityBinding !== undefined && endpoint.identityBinding !== endpoint.id) {
+        throw new TypeError(`endpoints[${i}] has an invalid identity binding`);
+      }
     }
   }
 }
