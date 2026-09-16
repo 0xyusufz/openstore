@@ -5,6 +5,7 @@
  * refresh never replaces the last known-good snapshot.
  */
 import type { CoordinatorEndpointProvider, StorageNodeEndpoint } from "./index.js";
+import type { FileManifest, ManifestChunk } from "../../packages/manifest/index.js";
 import { multiaddr } from "@multiformats/multiaddr";
 import { peerIdFromOpenStorePublicKey } from "../../packages/p2p/identity-binding.js";
 import { createRegistryClient, type RegistryClientErrorClassification } from "../../packages/registry/coordinator.js";
@@ -21,6 +22,7 @@ export interface CoordinatorAdapter extends CoordinatorEndpointProvider {
   readonly metadata: CoordinatorMetadata;
   /** A non-throwing snapshot suitable for best-effort callers. */
   refreshSafe(): Promise<StorageNodeEndpoint[]>;
+  getKnownEndpoints(): StorageNodeEndpoint[];
 }
 export interface CoordinatorMetadata {
   lastKnownGoodAt?: number;
@@ -36,9 +38,36 @@ export interface CoordinatorMetadata {
 export async function resolveEndpoints(
   endpoints: StorageNodeEndpoint[],
   provider?: CoordinatorEndpointProvider,
+  options: { requireFresh?: boolean } = {},
 ): Promise<StorageNodeEndpoint[]> {
-  if (endpoints.length > 0 || !provider) return endpoints;
-  return provider.refresh();
+  if (!provider) return endpoints;
+  if (options.requireFresh || endpoints.length === 0) return provider.refresh();
+  return endpoints;
+}
+
+/** Resolve only replicas recorded in a manifest; never invents replacements. */
+export function resolveManifestReplicaEndpoints(
+  manifest: Pick<FileManifest, "chunks" | "nodeIds">,
+  endpoints: StorageNodeEndpoint[],
+  chunk?: Pick<ManifestChunk, "nodeIds">,
+): StorageNodeEndpoint[] {
+  if (!Array.isArray(endpoints)) throw new TypeError("endpoints must be an array");
+  const ids = chunk?.nodeIds ?? manifest.nodeIds;
+  if (!Array.isArray(ids) || ids.length === 0) throw new Error("manifest has no known replica identities");
+  const byId = new Map<string, StorageNodeEndpoint>();
+  for (const endpoint of endpoints) {
+    if (!endpoint || typeof endpoint.id !== "string" || endpoint.id.length === 0) {
+      throw new TypeError("manifest replica endpoint has invalid identity");
+    }
+    if (byId.has(endpoint.id)) throw new TypeError(`duplicate endpoint identity: ${endpoint.id}`);
+    byId.set(endpoint.id, endpoint);
+  }
+  const result: StorageNodeEndpoint[] = [];
+  for (const id of ids) {
+    const endpoint = byId.get(id);
+    if (endpoint) result.push(endpoint);
+  }
+  return result;
 }
 
 export function coordinatorNodesToEndpoints(payload: unknown): StorageNodeEndpoint[] {
@@ -65,6 +94,7 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
     ? createRegistryClient({ baseUrl: options.baseUrl, token: options.token })
     : undefined;
   let snapshot: StorageNodeEndpoint[] = [];
+  let knownSnapshot: StorageNodeEndpoint[] = [];
   let lastError: Error | undefined;
   let lastRefreshAt: number | undefined;
   let inFlight: Promise<StorageNodeEndpoint[]> | undefined;
@@ -74,9 +104,11 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
   const refresh = (): Promise<StorageNodeEndpoint[]> => {
     if (inFlight) return inFlight;
     inFlight = (async () => {
-      const endpoints = nativeClient
-        ? coordinatorNodesToEndpoints({ nodes: await nativeClient.nodes() })
-        : await fetchNodes(request!, `${baseUrl}/v1/nodes`, options.token);
+      const rawNodes = nativeClient
+        ? await nativeClient.nodes()
+        : await fetchRawNodes(request!, `${baseUrl}/v1/nodes`, options.token);
+      knownSnapshot = endpointsForNodes(rawNodes);
+      const endpoints = knownSnapshot.filter((_endpoint, index) => (rawNodes[index] as Record<string, unknown>).available === true);
       snapshot = endpoints;
       lastError = undefined;
       lastRefreshAt = Date.now();
@@ -101,11 +133,24 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
       return { ...metadata, snapshotAge, isStale: metadata.consecutiveFailureCount > 0 };
     },
     getEndpoints: () => snapshot.slice(),
+    getKnownEndpoints: () => knownSnapshot.slice(),
     refresh,
     async refreshSafe() {
       try { return await refresh(); } catch { return snapshot.slice(); }
     },
   };
+}
+
+async function fetchRawNodes(request: NonNullable<CoordinatorAdapterOptions["fetch"]>, url: string, token?: string): Promise<unknown[]> {
+  const response = await request(url, { headers: { accept: "application/json", ...(token ? { authorization: "Bearer " + token } : {}) } });
+  if (!response.ok) throw new Error(`coordinator returned ${response.status}`);
+  const payload = await response.json() as { nodes?: unknown[] };
+  if (!Array.isArray(payload.nodes)) throw new TypeError("coordinator response nodes must be an array");
+  return payload.nodes;
+}
+
+function endpointsForNodes(nodes: unknown[]): StorageNodeEndpoint[] {
+  return nodes.map((node, index) => nodeToEndpoint(node, index));
 }
 
 function nodeToEndpoint(value: unknown, index: number): StorageNodeEndpoint {

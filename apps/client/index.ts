@@ -71,6 +71,8 @@ export interface StorageNodeEndpoint {
 export interface CoordinatorEndpointProvider {
   refresh(): Promise<StorageNodeEndpoint[]>;
   getEndpoints(): StorageNodeEndpoint[];
+  /** Optional all-record snapshot, including unavailable nodes. */
+  getKnownEndpoints?: () => StorageNodeEndpoint[];
 }
 
 /**
@@ -93,6 +95,7 @@ export interface NodeFailure {
   endpoint: StorageNodeEndpoint;
   status?: number;
   error: string;
+  classification?: "transient" | "permanent" | "unavailable";
 }
 
 /**
@@ -329,10 +332,11 @@ async function postToNode(
       endpoint,
       status: res.status,
       error: `unexpected status ${res.status}`,
+      classification: isTransientStatus(res.status) ? "transient" : res.status === 404 ? "unavailable" : "permanent",
     };
     if (!isTransientStatus(res.status)) return last;
   } catch (err) {
-    last = { endpoint, error: toErrorMessage(err) };
+    last = { endpoint, error: toErrorMessage(err), classification: "transient" };
   }
    if (attempt + 1 < attempts) await backoff(options.retryBackoffMs, attempt);
   }
@@ -397,7 +401,7 @@ function assertValidData(data: Buffer): void {
   }
 }
 
-function assertValidEndpoints(endpoints: StorageNodeEndpoint[]): void {
+export function assertValidEndpoints(endpoints: StorageNodeEndpoint[]): void {
   if (!Array.isArray(endpoints) || endpoints.length === 0) {
     throw new TypeError("endpoints must be a non-empty array");
   }
@@ -413,6 +417,29 @@ function assertValidEndpoints(endpoints: StorageNodeEndpoint[]): void {
       throw new TypeError(
         `endpoints[${i}] must be { id, baseUrl } with non-empty strings`,
       );
+    }
+    const expected = endpoint.baseUrl.startsWith("libp2p:") ? "libp2p" :
+      endpoint.baseUrl.startsWith("http:") || endpoint.baseUrl.startsWith("https:") ? "http" : undefined;
+    if (!expected) throw new TypeError(`endpoints[${i}] has an unsupported transport`);
+    if (endpoint.transport !== undefined && endpoint.transport !== expected) {
+      throw new TypeError(`endpoints[${i}] transport does not match baseUrl`);
+    }
+    try {
+      const parsed = new URL(endpoint.baseUrl);
+      if (parsed.username || parsed.password) throw new Error("credentials");
+    } catch {
+      throw new TypeError(`endpoints[${i}] baseUrl is invalid`);
+    }
+    if (endpoint.capabilities !== undefined) {
+      for (const capability of ["pieceStore", "pieceGet", "pieceDelete"] as const) {
+        if (typeof endpoint.capabilities[capability] !== "boolean") {
+          throw new TypeError(`endpoints[${i}] capability ${capability} is invalid`);
+        }
+      }
+      if (endpoint.capabilities.maxPieceBytes !== undefined &&
+        (!Number.isSafeInteger(endpoint.capabilities.maxPieceBytes) || endpoint.capabilities.maxPieceBytes <= 0)) {
+        throw new TypeError(`endpoints[${i}] maxPieceBytes is invalid`);
+      }
     }
     if (endpoint.baseUrl.startsWith("libp2p:")) {
       if (typeof endpoint.multiaddr !== "string" || endpoint.multiaddr.length === 0) {

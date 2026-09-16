@@ -134,6 +134,59 @@ describe("static peer discovery (OPENSTORE-034)", () => {
     await node.stop();
     await expect(discovery.discover()).rejects.toThrow(/not started/i);
   }, 20_000);
+
+  it("emits verified connection lifecycle events", async () => {
+    const events: string[] = [];
+    const first = await createLibp2pStorageNode(storageOptions());
+    nodes.push(first);
+    await first.start();
+    const discovery = new StaticPeerDiscovery([{
+      nodeId: first.peerId,
+      baseUrl: `libp2p://${first.peerId}`,
+      multiaddr: first.listenAddrs[0],
+      identity: first.applicationIdentity,
+      capabilities: first.capabilities,
+    }]);
+    const second = await createLibp2pStorageNode({
+      ...storageOptions(discovery),
+      onConnectionEvent: (event) => events.push(event.type),
+    });
+    nodes.push(second);
+    await second.start();
+    expect(events).toContain("connection.open");
+    const connection = second.node.getConnections().find((item) => item.remotePeer.toString() === first.peerId);
+    await connection?.close();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toContain("connection.close");
+  }, 20_000);
+
+  it("bounds reconnect attempts and emits exhaustion", async () => {
+    const events: string[] = [];
+    const first = await createLibp2pStorageNode(storageOptions());
+    nodes.push(first);
+    await first.start();
+    const discovery = new StaticPeerDiscovery([{
+      nodeId: first.peerId,
+      baseUrl: `libp2p://${first.peerId}`,
+      multiaddr: first.listenAddrs[0],
+      identity: first.applicationIdentity,
+      capabilities: first.capabilities,
+    }]);
+    const second = await createLibp2pStorageNode({
+      ...storageOptions(discovery),
+      reconnectBaseDelayMs: 1,
+      reconnectMaxDelayMs: 2,
+      maxReconnectAttempts: 2,
+      onConnectionEvent: (event) => events.push(event.type),
+    });
+    nodes.push(second);
+    await second.start();
+    await waitFor(() => events.includes("connection.open"));
+    await first.stop();
+    await waitFor(() => events.includes("reconnect.exhausted"));
+    expect(events.filter((event) => event === "reconnect.scheduled").length).toBe(2);
+    expect(events).toContain("reconnect.exhausted");
+  }, 20_000);
 });
 
 async function waitFor(predicate: () => boolean): Promise<void> {

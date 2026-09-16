@@ -338,3 +338,24 @@ and 045 remain the real child-process coverage for multi-node placement,
 coordinator restart, persistence, and recovery. The current validation is
 **52 test files, 362 tests passed**, with build, typecheck, and diff-check
 passing. No commit or push has been made.
+
+## 18. Milestone 047 status
+
+Milestone 047 adds resilient, coalesced discovery refreshes (including an
+explicit `refreshNow()` path), verified libp2p peer connection lifecycle
+events/state, bounded reconnect scheduling, strict endpoint
+transport/capability validation, and a reusable manifest replica endpoint
+resolver. New placement requires a fresh coordinator refresh; existing
+manifest downloads and deletes use all known manifest replica metadata during
+coordinator outages and preserve unavailable-replica failures. No repair or
+re-replication was added. Coordinator adapters expose available and all-known
+snapshots separately; discovery removes stale peers and cancels pending
+reconnects during refresh and shutdown. Validation passed with **53 test files,
+368 tests**; Milestone 047 now includes a bounded authenticated child-process
+scenario covering two standalone nodes, abrupt node loss, surviving-manifest
+download, outage deletion failure, and same-identity restart/re-registration.
+Reconnect attempts are bounded by the configurable
+`maxReconnectAttempts` (default 5) and emit sanitized `reconnect.exhausted`
+events. No commit or push has been made.
+`npm run build`, `npm run typecheck`, and `git diff --check` also pass. Changes
+remain uncommitted and the pre-existing `.manual-043/` artifacts are preserved.

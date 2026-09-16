@@ -94,7 +94,8 @@ export async function uploadBuffer(
     throw new TypeError("filename must be a non-empty string");
   }
   const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
-  endpoints = await resolveEndpoints(endpoints, options.coordinator);
+  // Placement must never proceed from a stale coordinator snapshot.
+  endpoints = await resolveEndpoints(endpoints, options.coordinator, { requireFresh: options.coordinator !== undefined });
 
   const fileId = generateFileId();
   const encryptionKey = generateEncryptionKey();

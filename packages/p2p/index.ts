@@ -52,6 +52,8 @@ export interface PeerDiscovery {
   advertise(local: P2PPeerDescriptor): Promise<void>;
   discover(): Promise<readonly P2PPeerDescriptor[]>;
   stop(): Promise<void>;
+  /** Run one discovery pass immediately. Implementations coalesce callers. */
+  refreshNow?(options?: PeerDiscoveryOptions): Promise<void>;
 }
 
 export interface PeerDiscoveryOptions {

@@ -16,6 +16,7 @@ export class StaticPeerDiscovery implements PeerDiscovery {
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private refreshOptions?: PeerDiscoveryOptions;
   private lastPeerIds = new Set<string>();
+  private refreshPromise?: Promise<void>;
 
   constructor(private readonly bootstrapPeers: readonly P2PPeerDescriptor[] = []) {
     this.bootstrapPeers = bootstrapPeers.map(cloneAndValidate);
@@ -31,7 +32,7 @@ export class StaticPeerDiscovery implements PeerDiscovery {
     this.started = true;
     this.localNodeId = descriptor.nodeId;
     this.refreshOptions = options;
-    await this.refresh();
+    await this.refreshNow();
   }
 
   async advertise(local: P2PPeerDescriptor): Promise<void> {
@@ -39,6 +40,11 @@ export class StaticPeerDiscovery implements PeerDiscovery {
     const descriptor = cloneAndValidate(local);
     StaticPeerDiscovery.advertised.set(descriptor.nodeId, descriptor);
     this.localNodeId = descriptor.nodeId;
+  }
+
+  async refreshNow(options: PeerDiscoveryOptions = {}): Promise<void> {
+    if (!this.started) throw new Error("peer discovery is not started");
+    return this.refreshPromise ??= this.refresh(options).finally(() => { this.refreshPromise = undefined; });
   }
 
   async discover(): Promise<readonly P2PPeerDescriptor[]> {
@@ -62,7 +68,7 @@ export class StaticPeerDiscovery implements PeerDiscovery {
     this.started = false;
   }
 
-  private async refresh(): Promise<void> {
+  private async refresh(_options: PeerDiscoveryOptions = this.refreshOptions ?? {}): Promise<void> {
     if (!this.started) return;
     try {
       const peers = await this.discover();
@@ -79,7 +85,7 @@ export class StaticPeerDiscovery implements PeerDiscovery {
         if (Number.isFinite(interval) && interval > 0) {
           this.refreshTimer = setTimeout(() => {
             this.refreshTimer = undefined;
-            void this.refresh();
+            void this.refreshNow();
           }, interval);
         }
       }

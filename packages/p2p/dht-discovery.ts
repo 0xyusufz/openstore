@@ -35,6 +35,7 @@ export class DhtPeerDiscovery implements PeerDiscovery {
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private refreshOptions?: PeerDiscoveryOptions;
   private lastPeerIds = new Set<string>();
+  private refreshPromise?: Promise<void>;
 
   constructor(bootstrapPeers: readonly P2PPeerDescriptor[] = []) {
     this.bootstrapPeers = bootstrapPeers.map(cloneAndValidate);
@@ -53,7 +54,7 @@ export class DhtPeerDiscovery implements PeerDiscovery {
 
   async refreshNow(options: PeerDiscoveryOptions = {}): Promise<void> {
     if (!this.started) throw new Error("peer discovery is not started");
-    await this.refresh(options);
+    return this.refreshPromise ??= this.refresh(options).finally(() => { this.refreshPromise = undefined; });
   }
 
   async start(local: P2PPeerDescriptor, options: PeerDiscoveryOptions = {}): Promise<void> {
@@ -66,10 +67,10 @@ export class DhtPeerDiscovery implements PeerDiscovery {
     try {
       await this.connectBootstrapPeers();
       await this.advertise(descriptor);
-      await this.refresh(options);
+      await this.refreshNow(options);
     } catch {
       // Bootstrap and DHT record failures are isolated from node startup.
-      await this.refresh(options);
+      await this.refreshNow(options);
     }
   }
 
@@ -130,7 +131,7 @@ export class DhtPeerDiscovery implements PeerDiscovery {
       if (this.started && options.refreshIntervalMs !== undefined) {
         this.refreshTimer = setTimeout(() => {
           this.refreshTimer = undefined;
-          void this.refresh(options);
+          void this.refreshNow(options);
         }, options.refreshIntervalMs);
       }
     }

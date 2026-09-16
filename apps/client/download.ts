@@ -31,9 +31,10 @@ import {
 } from "../../packages/manifest/index.js";
 import type { FileManifest } from "../../packages/manifest/index.js";
 import { getPieceFromNodes } from "./index.js";
+import { assertValidEndpoints } from "./index.js";
 import type { StorageNodeEndpoint } from "./index.js";
 import type { CoordinatorEndpointProvider } from "./index.js";
-import { resolveEndpoints } from "./coordinator.js";
+import { resolveEndpoints, resolveManifestReplicaEndpoints } from "./coordinator.js";
 import type { P2PTransport } from "../../packages/p2p/index.js";
 
 /**
@@ -79,8 +80,12 @@ export async function downloadBuffer(
   if (!(encryptionKey instanceof Uint8Array)) {
     throw new TypeError("encryption key must be a Uint8Array");
   }
-  endpoints = await resolveEndpoints(endpoints, options.coordinator);
-  endpoints = endpoints.filter((endpoint) => endpoint.capabilities?.pieceGet !== false);
+  // Existing files may use the last-known endpoint catalog during an outage;
+  // they must not trigger discovery of new replicas.
+  endpoints = endpoints.length === 0 && options.coordinator
+    ? (options.coordinator.getKnownEndpoints?.() ?? options.coordinator.getEndpoints())
+    : await resolveEndpoints(endpoints, undefined);
+  assertValidEndpoints(endpoints);
 
   // Reuse manifest validation (ordering, hashes, no key material).
   const checked = buildManifest({
@@ -100,7 +105,8 @@ export async function downloadBuffer(
       // next replica instead of failing the whole download. A corrupt
       // piece is never accepted just because a request succeeded.
       const problems: string[] = [];
-      for (const endpoint of endpoints) {
+      const replicas = resolveManifestReplicaEndpoints(checked, endpoints, chunk);
+      for (const endpoint of replicas) {
         let bytes: Buffer;
         try {
           const got = await getPieceFromNodes(chunk.pieceId, [endpoint], {
@@ -130,7 +136,7 @@ export async function downloadBuffer(
         }
       }
       throw new Error(
-        `piece ${chunk.index} ("${chunk.pieceId}") failed on all ${endpoints.length} replica(s): ${problems.join("; ")}`,
+        `piece ${chunk.index} ("${chunk.pieceId}") failed on all ${replicas.length} replica(s): ${problems.join("; ")}`,
       );
     }),
   );

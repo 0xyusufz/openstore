@@ -55,3 +55,11 @@ can enable the coordinator-owned expiry worker with `expiryIntervalMs` and
 `startExpiryWorker: true`, or control it explicitly with
 `startExpiryWorker()`/`stopExpiryWorker()`. Client adapters retain their
 last-known-good endpoint snapshot and expose non-secret refresh metadata.
+
+Coordinator refreshes are coalesced and a failed refresh never replaces a
+known-good snapshot. New uploads require a fresh coordinator response before
+placing replicas. Downloads and deletes of an existing manifest may continue
+using only its recorded replica identities during an outage; they never add
+replacement replicas. Discovery refreshes are likewise safe to trigger
+immediately (`refreshNow()`) or on a schedule, with bounded duplicate-dial
+suppression.

@@ -130,3 +130,10 @@ restarts and resumes its persisted running/draining mode.
 | Storage Nodes shows `demo-node-*` | No `OPENSTORE_WEB_STORAGE_DIRS` | Set it; the backend only uses demo nodes when no registry exists. |
 | Upload fails: "no storage nodes available" | Registry empty or all heartbeats expired | Check node processes/ports; check the Nodes page for Offline pills. |
 | Port already in use | Stale process or fixed-port clash | Kill it or drop `OPENSTORE_WEB_STORAGE_PORTS` for ephemeral ports. |
+### Coordinator outage behavior
+
+Treat `GET /v1/nodes` as required for new placement. If it is unavailable,
+retry the coordinator rather than uploading with a stale node list. Existing
+manifests remain readable and deletable from their known replica endpoint
+metadata while the coordinator is down; missing/offline replicas are reported
+as failures and are not silently replaced.

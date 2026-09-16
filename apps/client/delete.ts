@@ -25,7 +25,7 @@ import type { ManifestStore } from "../../packages/manifest/store.js";
 import { DEFAULT_TIMEOUT_MS } from "./index.js";
 import type { StorageNodeEndpoint } from "./index.js";
 import type { CoordinatorEndpointProvider } from "./index.js";
-import { resolveEndpoints } from "./coordinator.js";
+import { resolveEndpoints, resolveManifestReplicaEndpoints } from "./coordinator.js";
 import type { P2PTransport } from "../../packages/p2p/index.js";
 import { MixedStorageTransport, HttpStorageTransport } from "./http-transport.js";
 
@@ -119,8 +119,14 @@ export async function deleteFile(
   options: DeleteFileOptions = {},
 ): Promise<DeleteFileReport> {
   const checked = revalidateManifest(manifest);
-  endpoints = await resolveEndpoints(endpoints, options.coordinator);
-  endpoints = endpoints.filter((endpoint) => endpoint.capabilities?.pieceDelete !== false);
+  if (endpoints.length === 0 && options.coordinator) {
+    const known = options.coordinator.getKnownEndpoints?.() ?? options.coordinator.getEndpoints();
+    endpoints = resolveManifestReplicaEndpoints(checked, known);
+  } else {
+    // Explicit endpoint lists retain the historical "all known replicas"
+    // behavior, including reporting an unavailable node.
+    endpoints = await resolveEndpoints(endpoints, undefined);
+  }
   assertValidEndpoints(endpoints);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -243,6 +249,27 @@ function assertValidEndpoints(endpoints: StorageNodeEndpoint[]): void {
     ) {
       throw new TypeError(`endpoints[${i}] must be { id, baseUrl } with non-empty strings`);
     }
+    const expected = endpoint.baseUrl.startsWith("libp2p:") ? "libp2p" :
+      endpoint.baseUrl.startsWith("http:") || endpoint.baseUrl.startsWith("https:") ? "http" : undefined;
+    if (!expected || (endpoint.transport !== undefined && endpoint.transport !== expected)) {
+      throw new TypeError(`endpoints[${i}] transport does not match baseUrl`);
+    }
+    try {
+      const parsed = new URL(endpoint.baseUrl);
+      if (parsed.username || parsed.password) throw new Error("credentials");
+    } catch {
+      throw new TypeError(`endpoints[${i}] baseUrl is invalid`);
+    }
+    if (endpoint.capabilities !== undefined) {
+      for (const capability of ["pieceStore", "pieceGet", "pieceDelete"] as const) {
+        if (typeof endpoint.capabilities[capability] !== "boolean") {
+          throw new TypeError(`endpoints[${i}] capability ${capability} is invalid`);
+        }
+      }
+    }
+  }
+  if (new Set(endpoints.map((endpoint) => endpoint.id)).size !== endpoints.length) {
+    throw new TypeError("endpoints must contain distinct node identities");
   }
 }
 

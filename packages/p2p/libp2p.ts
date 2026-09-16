@@ -40,6 +40,18 @@ export interface Libp2pStorageNodeOptions {
   discovery?: PeerDiscovery;
   discoveryRefreshIntervalMs?: number;
   placementRegistry?: Registry;
+  onConnectionEvent?: (event: Libp2pConnectionEvent) => void;
+  reconnectBaseDelayMs?: number;
+  reconnectMaxDelayMs?: number;
+  maxReconnectAttempts?: number;
+}
+
+export interface Libp2pConnectionEvent {
+  type: "connection.open" | "connection.close" | "connection.error" | "reconnect.scheduled" | "reconnect.attempt" | "reconnect.exhausted";
+  peerId: string;
+  attempt?: number;
+  nextRetryAt?: number;
+  error?: string;
 }
 
 export interface Libp2pStorageNode {
@@ -49,6 +61,7 @@ export interface Libp2pStorageNode {
   readonly node: Libp2p;
   readonly listenAddrs: string[];
   readonly discoveredPeers: readonly P2PPeerDescriptor[];
+  readonly connectionStates: ReadonlyMap<string, "connected" | "disconnected" | "reconnecting">;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -87,6 +100,75 @@ export async function createLibp2pStorageNode(
     availableBytes: options.availableBytes,
   };
   let discoveredPeers: readonly P2PPeerDescriptor[] = [];
+  const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const reconnectAttempts = new Map<string, number>();
+  const knownPeers = new Map<string, P2PPeerDescriptor>();
+  const connectionStates = new Map<string, "connected" | "disconnected" | "reconnecting">();
+  const maxReconnectAttempts = options.maxReconnectAttempts ?? 5;
+  const emitConnection = (event: Libp2pConnectionEvent) => { try { options.onConnectionEvent?.(event); } catch {} };
+  const cancelReconnect = (peerId: string) => {
+    const timer = reconnectTimers.get(peerId);
+    if (timer !== undefined) clearTimeout(timer);
+    reconnectTimers.delete(peerId);
+    reconnectAttempts.delete(peerId);
+  };
+  const scheduleReconnect = (peer: P2PPeerDescriptor, error?: unknown) => {
+    if (reconnectTimers.has(peer.nodeId) || node.status !== "started") return;
+    const attempt = (reconnectAttempts.get(peer.nodeId) ?? 0) + 1;
+    if (attempt > maxReconnectAttempts) {
+      connectionStates.set(peer.nodeId, "disconnected");
+      emitConnection({
+        type: "reconnect.exhausted",
+        peerId: peer.nodeId,
+        attempt: attempt - 1,
+        ...(error === undefined ? {} : { error: String(error).replace(/https?:\/\/[^\s]+/gi, "[peer]").slice(0, 200) }),
+      });
+      return;
+    }
+    reconnectAttempts.set(peer.nodeId, attempt);
+    connectionStates.set(peer.nodeId, "reconnecting");
+    const base = options.reconnectBaseDelayMs ?? 250;
+    const max = options.reconnectMaxDelayMs ?? 5_000;
+    const delay = Math.min(max, base * 2 ** Math.min(attempt - 1, 8));
+    emitConnection({ type: "reconnect.scheduled", peerId: peer.nodeId, attempt, nextRetryAt: Date.now() + delay, ...(error === undefined ? {} : { error: String(error).slice(0, 200) }) });
+    reconnectTimers.set(peer.nodeId, setTimeout(() => {
+      reconnectTimers.delete(peer.nodeId);
+      emitConnection({ type: "reconnect.attempt", peerId: peer.nodeId, attempt });
+      void dialPeer(peer).catch((err) => scheduleReconnect(peer, err));
+    }, delay));
+  };
+  const dialPeer = async (peer: P2PPeerDescriptor): Promise<void> => {
+    if (peer.multiaddr === undefined || node.status !== "started") return;
+    if (node.getConnections().some((connection) => connection.remotePeer.toString() === peer.nodeId)) {
+      cancelReconnect(peer.nodeId);
+      return;
+    }
+    try {
+      const connection = await node.dial(multiaddr(peer.multiaddr), { signal: AbortSignal.timeout(2_000) });
+      if (connection.remotePeer.toString() !== peer.nodeId) {
+        await connection.close();
+        throw new Error("dialed peer identity mismatch");
+      }
+      cancelReconnect(peer.nodeId);
+    } catch (error) {
+      emitConnection({ type: "connection.error", peerId: peer.nodeId, error: String(error).slice(0, 200) });
+      throw error;
+    }
+  };
+  node.addEventListener("peer:connect", (event) => {
+    const peerId = event.detail.toString();
+    cancelReconnect(peerId);
+    connectionStates.set(peerId, "connected");
+    reconnectAttempts.delete(peerId);
+    emitConnection({ type: "connection.open", peerId });
+  });
+  node.addEventListener("peer:disconnect", (event) => {
+    const peerId = event.detail.toString();
+    connectionStates.set(peerId, "disconnected");
+    emitConnection({ type: "connection.close", peerId });
+    const peer = knownPeers.get(peerId);
+    if (peer) scheduleReconnect(peer);
+  });
   await node.handle(OPENSTORE_PIECE_PROTOCOL, async (stream) => {
     try {
       const request = await readMessage<PieceRequest>(stream as AsyncIterable<unknown>);
@@ -109,6 +191,9 @@ export async function createLibp2pStorageNode(
     get discoveredPeers() {
       return discoveredPeers;
     },
+    get connectionStates() {
+      return new Map(connectionStates);
+    },
     async start(): Promise<void> {
       if (node.status !== "started") await node.start();
       if (options.discovery) {
@@ -116,19 +201,28 @@ export async function createLibp2pStorageNode(
         await options.discovery.start(descriptor, {
           refreshIntervalMs: options.discoveryRefreshIntervalMs,
           onRefresh: async (peers) => {
+            for (const peer of peers) knownPeers.set(peer.nodeId, peer);
             discoveredPeers = await reconcilePeers(wrapper, peers);
             for (const peer of discoveredPeers) {
               if (options.placementRegistry) options.placementRegistry.registerDiscoveredPeer(peer);
             }
           },
           onPeerRemoved: async (nodeIds) => {
-            for (const nodeId of nodeIds) options.placementRegistry?.removeDiscoveredPeer(nodeId);
+            for (const nodeId of nodeIds) {
+              knownPeers.delete(nodeId);
+              cancelReconnect(nodeId);
+              connectionStates.set(nodeId, "disconnected");
+              options.placementRegistry?.removeDiscoveredPeer(nodeId);
+            }
           },
         });
         await options.discovery.advertise(descriptor);
       }
     },
     async stop(): Promise<void> {
+      for (const timer of reconnectTimers.values()) clearTimeout(timer);
+      reconnectTimers.clear();
+      knownPeers.clear();
       await options.discovery?.stop();
       if (node.status === "started") await node.stop();
     },
@@ -156,11 +250,9 @@ async function reconcilePeers(wrapper: Libp2pStorageNode, discovered: readonly P
       const connection = await wrapper.node.dial(multiaddr(peer.multiaddr!), {
         signal: AbortSignal.timeout(2_000),
       });
-      if (connection.remotePeer.toString() !== peer.nodeId) {
-        await connection.close();
-      }
+      if (connection.remotePeer.toString() !== peer.nodeId) await connection.close();
     } catch {
-      // Unreachable peers are retried by the next refresh pass.
+      // Unreachable peers are retried by scheduled reconciliation.
     } finally {
       pending.delete(peer.nodeId);
     }
@@ -290,6 +382,16 @@ function validateOptions(options: Libp2pStorageNodeOptions): void {
   if (options.discoveryRefreshIntervalMs !== undefined &&
     (!Number.isSafeInteger(options.discoveryRefreshIntervalMs) || options.discoveryRefreshIntervalMs <= 0)) {
     throw new TypeError("discoveryRefreshIntervalMs must be a positive safe integer");
+  }
+  for (const field of ["reconnectBaseDelayMs", "reconnectMaxDelayMs", "maxReconnectAttempts"] as const) {
+    const value = options[field];
+    if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+      throw new TypeError(`${field} must be a positive safe integer`);
+    }
+  }
+  if (options.reconnectMaxDelayMs !== undefined && options.reconnectBaseDelayMs !== undefined &&
+      options.reconnectMaxDelayMs < options.reconnectBaseDelayMs) {
+    throw new TypeError("reconnectMaxDelayMs must be at least reconnectBaseDelayMs");
   }
 }
 
