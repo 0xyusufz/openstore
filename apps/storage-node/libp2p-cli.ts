@@ -11,7 +11,7 @@ export interface StorageNodeCliOptions {
 }
 
 function usage(): string {
-  return "Usage: openstore-storage-node --storage-dir <dir> --identity <keystore> --password-env <ENV> [--listen <multiaddr>] [--bootstrap <descriptor.json>] [--capacity-bytes <n>] [--max-piece-bytes <n>] [--refresh-interval-ms <n>]";
+  return "Usage: openstore-storage-node --storage-dir <dir> --identity <keystore> --password-env <ENV> [--listen <multiaddr>] [--bootstrap <descriptor.json>] [--capacity-bytes <n>] [--max-piece-bytes <n>] [--refresh-interval-ms <n>] [--coordinator-url <url>] [--coordinator-token-env <ENV>] [--coordinator-token <token>] [--heartbeat-interval-ms <n>]";
 }
 
 export async function runStorageNodeCli(argv: string[], options: StorageNodeCliOptions = {}): Promise<number> {
@@ -24,7 +24,7 @@ export async function runStorageNodeCli(argv: string[], options: StorageNodeCliO
       const arg = argv[i];
       if (arg === "--help" || arg === "-h") { out(usage()); return 0; }
       const key = arg?.replace(/^--/, "");
-      if (!key || !["storage-dir", "identity", "identity-path", "keystore", "password-env", "listen", "bootstrap", "config", "capacity-bytes", "max-piece-bytes", "refresh-interval-ms"].includes(key)) throw new Error(`unknown option: ${arg}`);
+      if (!key || !["storage-dir", "identity", "identity-path", "keystore", "password-env", "listen", "bootstrap", "config", "capacity-bytes", "max-piece-bytes", "refresh-interval-ms", "coordinator-url", "coordinator-token-env", "coordinator-token", "heartbeat-interval-ms"].includes(key)) throw new Error(`unknown option: ${arg}`);
       const value = argv[++i];
       if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
       if (key === "listen") listens.push(value); else parsed[key] = value;
@@ -42,6 +42,14 @@ export async function runStorageNodeCli(argv: string[], options: StorageNodeCliO
     if (parsed["capacity-bytes"]) config.capacityBytes = Number(parsed["capacity-bytes"]);
     if (parsed["max-piece-bytes"]) config.maxPieceBytes = Number(parsed["max-piece-bytes"]);
     if (parsed["refresh-interval-ms"]) config.discoveryRefreshIntervalMs = Number(parsed["refresh-interval-ms"]);
+    if (parsed["coordinator-url"]) config.coordinatorUrl = parsed["coordinator-url"];
+    if (parsed["coordinator-token-env"]) {
+      const token = process.env[parsed["coordinator-token-env"]];
+      if (!token) throw new Error("coordinator token environment variable is empty or unset");
+      config.coordinatorToken = token;
+    }
+    if (parsed["coordinator-token"]) config.coordinatorToken = parsed["coordinator-token"];
+    if (parsed["heartbeat-interval-ms"]) config.heartbeatIntervalMs = Number(parsed["heartbeat-interval-ms"]);
     if (parsed.bootstrap) {
       config.bootstrapPeers = JSON.parse(await readFile(parsed.bootstrap, "utf8")) as P2PPeerDescriptor[];
     }

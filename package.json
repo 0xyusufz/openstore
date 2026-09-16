@@ -8,6 +8,7 @@
     "dev": "tsx",
     "openstore": "tsx apps/client/cli.ts",
     "storage-node": "tsx apps/storage-node/libp2p-cli.ts",
+    "registry": "tsx apps/registry/coordinator-cli.ts",
     "web": "npm run build && node dist/apps/web/server.js",
     "build": "tsc",
     "test": "vitest run",

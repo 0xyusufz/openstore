@@ -12,6 +12,8 @@ import { DhtPeerDiscovery } from "../../packages/p2p/dht-discovery.js";
 import type { P2PPeerDescriptor } from "../../packages/p2p/index.js";
 import { createLibp2pStorageNode, type Libp2pStorageNode } from "../../packages/p2p/libp2p.js";
 import { isValidPieceId } from "./index.js";
+import { createRegistryClient, type RegistryClientOptions } from "../../packages/registry/coordinator.js";
+import type { RegistryClient } from "../../packages/registry/coordinator.js";
 
 export interface Libp2pStorageNodeRuntimeConfig {
   storageDir: string;
@@ -22,6 +24,10 @@ export interface Libp2pStorageNodeRuntimeConfig {
   capacityBytes?: number;
   maxPieceBytes?: number;
   discoveryRefreshIntervalMs?: number;
+  coordinatorUrl?: string;
+  coordinatorToken?: string;
+  heartbeatIntervalMs?: number;
+  coordinatorHeartbeatIntervalMs?: number;
 }
 
 export interface Libp2pStorageNodeRuntime {
@@ -43,7 +49,11 @@ export function validateLibp2pStorageNodeRuntimeConfig(
     throw new TypeError("listenAddrs must be a non-empty string array");
   }
   if (value.bootstrapPeers !== undefined && (!Array.isArray(value.bootstrapPeers))) throw new TypeError("bootstrapPeers must be an array");
-  for (const field of ["capacityBytes", "maxPieceBytes", "discoveryRefreshIntervalMs"]) {
+  if (value.coordinatorUrl !== undefined) {
+    if (typeof value.coordinatorUrl !== "string" || !/^https?:\/\//.test(value.coordinatorUrl)) throw new TypeError("coordinatorUrl must be an HTTP URL");
+  }
+  if (value.coordinatorToken !== undefined && (typeof value.coordinatorToken !== "string" || value.coordinatorToken.length === 0)) throw new TypeError("coordinatorToken must be a non-empty string");
+  for (const field of ["capacityBytes", "maxPieceBytes", "discoveryRefreshIntervalMs", "heartbeatIntervalMs", "coordinatorHeartbeatIntervalMs"]) {
     const n = value[field];
     if (n !== undefined && (!Number.isSafeInteger(n) || (n as number) <= 0)) throw new TypeError(`${field} must be a positive safe integer`);
   }
@@ -72,11 +82,54 @@ export async function createLibp2pStorageNodeRuntime(
     getPiece: store.get,
     deletePiece: store.remove,
   });
+  const coordinator: RegistryClient | undefined = input.coordinatorUrl
+    ? createRegistryClient({ baseUrl: input.coordinatorUrl, token: input.coordinatorToken } satisfies RegistryClientOptions)
+    : undefined;
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let registered = false;
+  const descriptor = async (snapshot: { allocatedBytes: number; availableBytes: number }) => ({
+    nodeId: node.peerId,
+    baseUrl: `libp2p://${node.peerId}`,
+    multiaddr: node.listenAddrs[0],
+    identity: node.applicationIdentity,
+    identityBinding: node.peerId,
+    capabilities: { ...node.capabilities, ...snapshot },
+  });
   return {
     identity,
     node,
-    async start() { await node.start(); },
-    async stop() { await node.stop(); },
+    async start() {
+      await node.start();
+      if (coordinator) {
+        const capacitySnapshot = async () => {
+          const usedBytes = await store.usedBytes();
+          return { allocatedBytes: capacity, usedBytes, availableBytes: Math.max(0, capacity - usedBytes) };
+        };
+        const register = async () => {
+          const snapshot = await capacitySnapshot();
+          return coordinator.registerLibp2pWithIdentity(identity, await descriptor(snapshot), snapshot);
+        };
+        await register();
+        registered = true;
+        const interval = input.coordinatorHeartbeatIntervalMs ?? input.heartbeatIntervalMs ??
+          Math.max(1000, Math.floor((input.discoveryRefreshIntervalMs ?? 30_000) / 3));
+        heartbeatTimer = setInterval(() => {
+          void capacitySnapshot().then(async (snapshot) =>
+            coordinator.heartbeatLibp2pWithIdentity(identity, await descriptor(snapshot), snapshot),
+          ).catch(() => undefined);
+        }, interval);
+      }
+    },
+    async stop() {
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = undefined; }
+      if (coordinator && registered) {
+        try {
+          await coordinator.unregisterWithIdentity(identity, node.peerId);
+        } catch { /* coordinator may already be unavailable */ }
+        registered = false;
+      }
+      await node.stop();
+    },
   };
 }
 
@@ -93,6 +146,9 @@ function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number)
     return total;
   };
   return {
+    async usedBytes() {
+      return used();
+    },
     async store(id: string, data: Buffer) {
       if (maxPieceBytes !== undefined && data.length > maxPieceBytes) return 413;
       const path = pathFor(id);

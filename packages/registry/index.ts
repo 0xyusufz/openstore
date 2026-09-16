@@ -19,6 +19,7 @@ import type { Identity } from "../identity/index.js";
 import type { StorageNodeEndpoint } from "../../apps/client/index.js";
 import type { P2PPeerDescriptor } from "../p2p/index.js";
 import { validateP2PPeerDescriptor } from "../p2p/index.js";
+import { peerIdFromOpenStorePublicKey } from "../p2p/identity-binding.js";
 
 export const REGISTRY_VERSION = 1;
 export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
@@ -52,7 +53,12 @@ function heartbeatPayload(nodeId: string, capacity: NodeCapacity | undefined, ti
     const total = getAllocated(capacity);
     return `HEARTBEAT\n${nodeId}\n${total}\n${capacity.usedBytes}\n${capacity.availableBytes}\n${timestamp}\n${nonce}`;
   }
+
   return `HEARTBEAT\n${nodeId}\n${timestamp}\n${nonce}`;
+}
+
+function descriptorPayload(kind: "REGISTER" | "HEARTBEAT", descriptor: P2PPeerDescriptor, capacity: NodeCapacity | undefined, timestamp: string, nonce: string): string {
+  return `${kind}\n${JSON.stringify(descriptor)}\n${capacity ? JSON.stringify(capacity) : ""}\n${timestamp}\n${nonce}`;
 }
 
 export interface NodeCapacity {
@@ -102,6 +108,9 @@ export interface NodeRecord {
   identityBinding?: string;
   capabilities?: { pieceStore: boolean; pieceGet: boolean; pieceDelete: boolean; maxPieceBytes?: number };
 }
+
+/** Public descriptor submitted by a libp2p node. It never contains private key material. */
+export type P2PRegistrationDescriptor = P2PPeerDescriptor;
 
 /**
  * Deterministic reliability score from 0–100.
@@ -210,8 +219,10 @@ export interface Registry {
   readonly version: number;
   register(baseUrl: string, identity: Identity, capacity?: NodeCapacity): NodeRecord;
   registerSigned(signed: SignedRegistration): NodeRecord;
+  registerLibp2pSigned(signed: SignedLibp2pRegistration): NodeRecord;
   heartbeat(nodeId: string, identity: Identity, capacity?: NodeCapacity): NodeRecord;
   heartbeatSigned(signed: SignedHeartbeat): NodeRecord;
+  heartbeatLibp2pSigned(signed: SignedLibp2pHeartbeat): NodeRecord;
   unregister(nodeId: string, identity: Identity): void;
   unregisterSigned(signed: SignedUnregister): void;
   /**
@@ -237,6 +248,7 @@ export interface SignedRegistration {
   nonce: string;
   signature: string;
   capacity?: NodeCapacity;
+  descriptor?: P2PRegistrationDescriptor;
 }
 
 export interface SignedHeartbeat {
@@ -246,6 +258,15 @@ export interface SignedHeartbeat {
   nonce: string;
   signature: string;
   capacity?: NodeCapacity;
+  descriptor?: P2PRegistrationDescriptor;
+}
+
+export interface SignedLibp2pRegistration extends SignedRegistration {
+  descriptor: P2PRegistrationDescriptor;
+}
+
+export interface SignedLibp2pHeartbeat extends SignedHeartbeat {
+  descriptor: P2PRegistrationDescriptor;
 }
 
 export interface SignedUnregister {
@@ -311,6 +332,18 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     } else {
       reliability = defaultReliability();
     }
+    const transport = r["transport"] === "libp2p" ? "libp2p" as const : r["transport"] === "http" ? "http" as const : undefined;
+    if (transport === "libp2p") {
+      if (typeof r["multiaddr"] !== "string" || typeof r["identityBinding"] !== "string" ||
+          !r["capabilities"] || typeof r["capabilities"] !== "object") return null;
+      try {
+        validateP2PPeerDescriptor({
+          nodeId: r["nodeId"], baseUrl: r["baseUrl"], multiaddr: r["multiaddr"],
+          identityBinding: r["identityBinding"], identity: { publicKey: r["publicKey"] },
+          capabilities: r["capabilities"],
+        });
+      } catch { return null; }
+    }
     return {
       nodeId: r["nodeId"] as string,
       publicKey: r["publicKey"] as string,
@@ -319,6 +352,12 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       lastSeen: r["lastSeen"] as number,
       capacity,
       reliability,
+      ...(transport === undefined ? {} : {
+        transport,
+        multiaddr: r["multiaddr"] as string | undefined,
+        identityBinding: r["identityBinding"] as string | undefined,
+        capabilities: r["capabilities"] as NodeRecord["capabilities"],
+      }),
     };
   }
 
@@ -412,8 +451,8 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     } catch {
       throw new Error("malformed node record: invalid baseUrl");
     }
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      throw new Error("malformed node record: baseUrl must be http or https");
+    if (url.protocol !== "http:" && url.protocol !== "https:" && url.protocol !== "libp2p:") {
+      throw new Error("malformed node record: baseUrl must be http, https, or libp2p");
     }
   }
 
@@ -528,12 +567,19 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       if (capacity !== undefined) {
         cap = validateCapacity(capacity);
       }
-      const payload = registrationPayload(baseUrl, cap, timestamp, nonce);
+      const descriptor = signed.descriptor;
+      const nodeId = descriptor?.nodeId ?? nodeIdFromPublicKey(publicKey);
+      if (descriptor !== undefined) {
+        validateP2PPeerDescriptor(descriptor);
+        if (descriptor.baseUrl !== baseUrl || descriptor.identity.publicKey !== publicKey ||
+            descriptor.identityBinding !== descriptor.nodeId || descriptor.nodeId !== peerIdFromOpenStorePublicKey(Buffer.from(publicKey, "base64"))) {
+          throw new Error("libp2p descriptor identity does not match registration");
+        }
+      }
+      const payload = descriptor === undefined
+        ? registrationPayload(baseUrl, cap, timestamp, nonce)
+        : descriptorPayload("REGISTER", descriptor, cap, timestamp, nonce);
       verifySignature(pubkeyBuf, payload, signature);
-      const nodeId = nodeIdFromPublicKey(publicKey);
-      // Prevent registration using another node's identity: nodeId must match publicKey
-      // (already ensured by deriving nodeId from publicKey)
-
       // Preserve reliability history on re-registration; new nodes get neutral default.
       const existing = nodes.get(nodeId);
       const reliability = existing
@@ -547,10 +593,21 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         lastSeen: Date.now(),
         capacity: cap ?? { allocatedBytes: 0, totalBytes: 0, usedBytes: 0, availableBytes: 0 },
         reliability,
+        ...(descriptor === undefined ? {} : {
+          transport: "libp2p" as const,
+          multiaddr: descriptor.multiaddr,
+          identityBinding: descriptor.identityBinding,
+          capabilities: { ...descriptor.capabilities },
+        }),
       };
       nodes.set(nodeId, record);
       persist();
       return { ...record, capacity: { ...record.capacity }, reliability: { ...record.reliability } };
+    },
+
+    registerLibp2pSigned(signed: SignedLibp2pRegistration): NodeRecord {
+      if (!signed.descriptor) throw new Error("libp2p descriptor is required");
+      return registry.registerSigned(signed);
     },
 
     heartbeat(nodeId: string, identity: Identity, capacity?: NodeCapacity): NodeRecord {
@@ -580,15 +637,35 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       if (capacity !== undefined) {
         cap = validateCapacity(capacity);
       }
-      const payload = heartbeatPayload(nodeId as string, cap, timestamp as string, nonce as string);
+      const descriptor = signed.descriptor;
+      if (descriptor !== undefined) {
+        validateP2PPeerDescriptor(descriptor);
+        if (descriptor.nodeId !== nodeId || descriptor.identity.publicKey !== publicKey ||
+            descriptor.identityBinding !== descriptor.nodeId) {
+          throw new Error("libp2p descriptor identity does not match heartbeat");
+        }
+      }
+      const payload = descriptor === undefined
+        ? heartbeatPayload(nodeId as string, cap, timestamp as string, nonce as string)
+        : descriptorPayload("HEARTBEAT", descriptor, cap, timestamp as string, nonce as string);
       verifySignature(pubkeyBuf, payload, signature as string);
       const expectedId = nodeIdFromPublicKey(publicKey as string);
-      if (nodeId !== expectedId) throw new Error("invalid signature: nodeId does not match publicKey");
       const existing = nodes.get(nodeId as string);
+      if (nodeId !== expectedId && !(descriptor !== undefined &&
+          nodeId === peerIdFromOpenStorePublicKey(Buffer.from(publicKey as string, "base64")))) {
+        throw new Error("invalid signature: nodeId does not match publicKey");
+      }
       if (!existing) throw new Error("node not found");
       existing.lastSeen = Date.now();
       existing.available = true;
       if (cap) existing.capacity = cap;
+      if (descriptor) {
+        existing.baseUrl = descriptor.baseUrl;
+        existing.transport = "libp2p";
+        existing.multiaddr = descriptor.multiaddr;
+        existing.identityBinding = descriptor.identityBinding;
+        existing.capabilities = { ...descriptor.capabilities };
+      }
       // Successful authenticated heartbeat improves reliability gradually & deterministically.
       existing.reliability.successfulHeartbeats += 1;
       existing.reliability.score = computeReliabilityScore(
@@ -597,6 +674,11 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       );
       persist();
       return { ...existing, capacity: { ...existing.capacity }, reliability: { ...existing.reliability } };
+    },
+
+    heartbeatLibp2pSigned(signed: SignedLibp2pHeartbeat): NodeRecord {
+      if (!signed.descriptor) throw new Error("libp2p descriptor is required");
+      return registry.heartbeatSigned(signed);
     },
 
     unregister(nodeId: string, identity: Identity): void {
@@ -625,7 +707,11 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       const payload = `UNREGISTER\n${nodeId}\n${timestamp}\n${nonce}`;
       verifySignature(pubkeyBuf, payload, signature as string);
       const expectedId = nodeIdFromPublicKey(publicKey as string);
-      if (nodeId !== expectedId) throw new Error("invalid signature: nodeId does not match publicKey");
+      const existing = nodes.get(nodeId as string);
+      if (nodeId !== expectedId && !(existing?.transport === "libp2p" &&
+          nodeId === peerIdFromOpenStorePublicKey(Buffer.from(publicKey as string, "base64")))) {
+        throw new Error("invalid signature: nodeId does not match publicKey");
+      }
       if (!nodes.has(nodeId as string)) throw new Error("node not found");
       nodes.delete(nodeId as string);
       persist();
@@ -790,6 +876,44 @@ export function createSignedHeartbeat(
     : { nodeId, publicKey: identity.publicKey.toString("base64"), timestamp, nonce, signature: sig };
 }
 
+export function createSignedLibp2pRegistration(
+  identity: Identity,
+  descriptor: P2PRegistrationDescriptor,
+  opts: { timestamp?: number; nonce?: string; capacity?: NodeCapacity } = {},
+): SignedLibp2pRegistration {
+  validateP2PPeerDescriptor(descriptor);
+  if (descriptor.identity.publicKey !== identity.publicKey.toString("base64") ||
+      descriptor.identityBinding !== descriptor.nodeId ||
+      descriptor.nodeId !== peerIdFromOpenStorePublicKey(Buffer.from(descriptor.identity.publicKey, "base64"))) {
+    throw new Error("libp2p descriptor identity does not match signing identity");
+  }
+  const timestamp = String(opts.timestamp ?? Date.now());
+  const nonce = opts.nonce ?? randomBytes(NONCE_BYTES).toString("hex");
+  const payload = descriptorPayload("REGISTER", descriptor, opts.capacity, timestamp, nonce);
+  const signature = signMessage(identity.privateKey, Buffer.from(payload, "utf8")).toString("base64");
+  return { baseUrl: descriptor.baseUrl, publicKey: descriptor.identity.publicKey, timestamp, nonce, signature, descriptor,
+    ...(opts.capacity === undefined ? {} : { capacity: opts.capacity }) };
+}
+
+export function createSignedLibp2pHeartbeat(
+  identity: Identity,
+  descriptor: P2PRegistrationDescriptor,
+  opts: { timestamp?: number; nonce?: string; capacity?: NodeCapacity } = {},
+): SignedLibp2pHeartbeat {
+  validateP2PPeerDescriptor(descriptor);
+  if (descriptor.identity.publicKey !== identity.publicKey.toString("base64") ||
+      descriptor.identityBinding !== descriptor.nodeId ||
+      descriptor.nodeId !== peerIdFromOpenStorePublicKey(Buffer.from(descriptor.identity.publicKey, "base64"))) {
+    throw new Error("libp2p descriptor identity does not match signing identity");
+  }
+  const timestamp = String(opts.timestamp ?? Date.now());
+  const nonce = opts.nonce ?? randomBytes(NONCE_BYTES).toString("hex");
+  const payload = descriptorPayload("HEARTBEAT", descriptor, opts.capacity, timestamp, nonce);
+  const signature = signMessage(identity.privateKey, Buffer.from(payload, "utf8")).toString("base64");
+  return { nodeId: descriptor.nodeId, publicKey: descriptor.identity.publicKey, timestamp, nonce, signature, descriptor,
+    ...(opts.capacity === undefined ? {} : { capacity: opts.capacity }) };
+}
+
 export function createSignedUnregister(
   identity: Identity,
   nodeId: string,
@@ -801,3 +925,18 @@ export function createSignedUnregister(
   const sig = signMessage(identity.privateKey, Buffer.from(payload, "utf8")).toString("base64");
   return { nodeId, publicKey: identity.publicKey.toString("base64"), timestamp, nonce, signature: sig };
 }
+
+// Cross-process coordinator transport is optional and kept in its own module
+// so the in-process registry remains usable without an HTTP server.
+export {
+  REGISTRY_PROTOCOL_VERSION,
+  DEFAULT_REGISTRY_COORDINATOR_PORT,
+  createRegistryCoordinator,
+  createRegistryClient,
+} from "./coordinator.js";
+export type {
+  RegistryCoordinator,
+  RegistryCoordinatorOptions,
+  RegistryClientOptions,
+  RegistryClient,
+} from "./coordinator.js";
