@@ -54,4 +54,9 @@ describe("web static server", () => {
     const wrongMethod = await fetch(`${baseUrl}/`, { method: "POST" });
     expect(wrongMethod.status).toBe(405);
   });
+
+  it("refuses non-loopback bindings", async () => {
+    const isolated = createWebServer();
+    await expect(isolated.listen(0, "0.0.0.0")).rejects.toThrow(/loopback/i);
+  });
 });

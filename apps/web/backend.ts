@@ -120,6 +120,8 @@ export interface WebBackendOptions {
    * to the manifest catalog. Only used when `manifestDir` is set.
    */
   dekPath?: string;
+  /** Password protecting the provider node identity keystore. */
+  providerIdentityPassword?: string;
 }
 
 /** Creation result: public metadata plus the phrase shown exactly once. */
@@ -256,6 +258,10 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
   if (options.dekPath !== undefined && (typeof options.dekPath !== "string" || options.dekPath === "")) {
     throw new TypeError("dekPath must be a non-empty string");
   }
+  if (options.providerIdentityPassword !== undefined &&
+      (typeof options.providerIdentityPassword !== "string" || options.providerIdentityPassword === "")) {
+    throw new TypeError("providerIdentityPassword must be a non-empty string");
+  }
   const catalog = options.manifestDir ? createFileCatalog(createManifestStore({ dir: options.manifestDir })) : null;
   const registry = options.registry ?? null;
   const keystorePath = options.keystorePath ?? null;
@@ -265,6 +271,7 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
   const provider = createProviderManager({
     configPath: options.manifestDir ? `${options.manifestDir}.provider.json` : null,
     registry,
+    identityPassword: options.providerIdentityPassword ?? process.env["OPENSTORE_PROVIDER_IDENTITY_PASSWORD"],
   });
   // The DEK vault lives alongside the manifests (sibling file, never
   // inside the manifest directory) and only exists for live backends.

@@ -132,13 +132,18 @@ function deriveKeyPair(phrase: string[]): {
   const seed = Buffer.from(
     hkdfSync("sha256", phraseBytes, HKDF_SALT, HKDF_INFO, 32),
   );
-  const pkcs8 = Buffer.concat([DER_PREFIX, seed]);
-  const privateKeyObj = createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
-  const publicKeyObj = createPublicKey(privateKeyObj);
-  return {
-    publicKey: publicKeyObj.export({ format: "der", type: "spki" }) as Buffer,
-    privateKey: pkcs8,
-  };
+  try {
+    const pkcs8 = Buffer.concat([DER_PREFIX, seed]);
+    const privateKeyObj = createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
+    const publicKeyObj = createPublicKey(privateKeyObj);
+    return {
+      publicKey: publicKeyObj.export({ format: "der", type: "spki" }) as Buffer,
+      privateKey: pkcs8,
+    };
+  } finally {
+    phraseBytes.fill(0);
+    seed.fill(0);
+  }
 }
 
 function entropyToPhrase(entropy: Buffer): string[] {

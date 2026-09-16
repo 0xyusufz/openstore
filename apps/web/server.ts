@@ -71,6 +71,9 @@ export function createWebServer(options: WebServerOptions = {}): WebServer {
     version: WEB_SERVER_VERSION,
     server,
     async listen(port: number = DEFAULT_WEB_PORT, host: string = "127.0.0.1"): Promise<number> {
+      if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+        throw new Error("web server must bind to loopback");
+      }
       await new Promise<void>((resolveListen, rejectListen) => {
         server.once("error", rejectListen);
         server.listen(port, host, () => {
@@ -242,7 +245,7 @@ async function handleRequest(
       const created = await backend.createIdentity(password as string);
       sendJson(res, 200, { publicKey: created.publicKey, recoveryPhrase: created.recoveryPhrase });
     } catch (err) {
-      sendJson(res, identityErrorStatus((err as Error).message), { error: (err as Error).message });
+      sendJson(res, identityErrorStatus((err as Error).message), { error: toSafeIdentityError((err as Error).message) });
     }
     return;
   }
@@ -254,7 +257,7 @@ async function handleRequest(
       const unlocked = await backend.unlockIdentity(password as string);
       sendJson(res, 200, { unlocked: unlocked.unlocked, publicKey: unlocked.publicKey });
     } catch (err) {
-      sendJson(res, identityErrorStatus((err as Error).message), { error: (err as Error).message });
+      sendJson(res, identityErrorStatus((err as Error).message), { error: toSafeIdentityError((err as Error).message) });
     }
     return;
   }
@@ -274,7 +277,7 @@ async function handleRequest(
       const recovered = await backend.recoverIdentity(phrase as string[], password as string, confirmReplace);
       sendJson(res, 200, { publicKey: recovered.publicKey });
     } catch (err) {
-      sendJson(res, identityErrorStatus((err as Error).message), { error: (err as Error).message });
+      sendJson(res, identityErrorStatus((err as Error).message), { error: toSafeIdentityError((err as Error).message) });
     }
     return;
   }
@@ -415,6 +418,14 @@ function providerErrorStatus(message: string): number {
   if (/not configured/i.test(message)) return 404;
   if (/must be|invalid|requir|empty|not a directory|exceeds free|confirm|below current usage/i.test(message)) return 400;
   return 500;
+}
+
+function toSafeIdentityError(message: string): string {
+  if (typeof message !== "string" || message === "") return "Identity request failed. Please try again.";
+  if (/privatekey|recoveryphrase|mnemonic|password|secret|keystore|invalid word|checksum|corrupt|tamper|decrypt/i.test(message)) {
+    return "Identity request failed. Please verify the supplied values and try again.";
+  }
+  return "Identity request failed. Please try again.";
 }
 
 /**

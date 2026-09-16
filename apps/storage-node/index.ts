@@ -205,6 +205,14 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       return getCapacity();
     },
     async listen(port: number = 0, host: string = "127.0.0.1"): Promise<number> {
+      if (
+        host !== "127.0.0.1" &&
+        host !== "localhost" &&
+        host !== "::1" &&
+        !requireAuth
+      ) {
+        throw new Error("storage node requires authentication on non-loopback hosts");
+      }
       // Load persisted identity via encrypted keystore if configured
       if (hasKeystore) {
         if (typeof options.identityPassword !== "string" || options.identityPassword === "") {

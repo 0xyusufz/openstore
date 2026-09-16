@@ -15,8 +15,8 @@
  */
 
 import { createCipheriv, createDecipheriv, createPrivateKey, createPublicKey, randomBytes, scryptSync } from "crypto";
-import { mkdir, readFile, writeFile } from "fs/promises";
-import { dirname } from "path";
+import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "fs/promises";
+import { dirname, join } from "path";
 import type { Identity } from "./index.js";
 
 export const KEYSTORE_VERSION = 1;
@@ -111,7 +111,24 @@ export async function saveIdentity(
   const dir = dirname(filePath);
   await mkdir(dir, { recursive: true });
   const content = JSON.stringify(keystore, null, 2);
-  await writeFile(filePath, content, { mode: 0o600 });
+  const tempPath = join(dir, `.openstore-keystore-${randomBytes(8).toString("hex")}.tmp`);
+  try {
+    await writeFile(tempPath, content, { mode: 0o600, flag: "wx" });
+    await chmod(tempPath, 0o600);
+    await rename(tempPath, filePath);
+    await chmod(filePath, 0o600);
+  } catch (err) {
+    try {
+      await unlink(tempPath);
+    } catch {}
+    throw new Error("failed to persist encrypted keystore safely");
+  } finally {
+    key.fill(0);
+    ciphertext.fill(0);
+    authTag.fill(0);
+    salt.fill(0);
+    iv.fill(0);
+  }
 }
 
 /**
@@ -136,10 +153,9 @@ export async function loadIdentity(
   let raw: string;
   try {
     raw = await readFile(filePath, "utf8");
-  } catch (err) {
-    throw new Error(`failed to read keystore: ${(err as Error).message}`);
+  } catch {
+    throw new Error("failed to read keystore");
   }
-
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -148,6 +164,15 @@ export async function loadIdentity(
   }
 
   const ks = validateKeystore(parsed);
+  try {
+    const metadata = await stat(filePath);
+    if (!metadata.isFile() || (metadata.mode & 0o077) !== 0) {
+      throw new Error("keystore has unsafe permissions");
+    }
+  } catch (err) {
+    if ((err as Error).message === "keystore has unsafe permissions") throw err;
+    throw new Error("failed to read keystore");
+  }
 
   const salt = Buffer.from(ks.kdf.salt, "base64");
   const iv = Buffer.from(ks.iv, "base64");
@@ -168,8 +193,8 @@ export async function loadIdentity(
   let key: Buffer;
   try {
     key = deriveKey(password, salt, ks.kdf.N, ks.kdf.r, ks.kdf.p, ks.kdf.keyLen);
-  } catch (err) {
-    throw new Error(`failed to derive key: ${(err as Error).message}`);
+  } catch {
+    throw new Error("failed to derive keystore key");
   }
 
   let privateKey: Buffer;
@@ -178,8 +203,10 @@ export async function loadIdentity(
     decipher.setAuthTag(authTag);
     privateKey = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   } catch {
+    key.fill(0);
     throw new Error("failed to decrypt keystore: wrong password or corrupted/tampered data");
   }
+  key.fill(0);
 
   // Verify decrypted private key yields the stored public key (detects tampered publicKey)
   try {
@@ -191,8 +218,10 @@ export async function loadIdentity(
     }
   } catch (err) {
     if ((err as Error).message === "keystore public key does not match private key") {
+      privateKey.fill(0);
       throw err;
     }
+    privateKey.fill(0);
     throw new Error("failed to decrypt keystore: wrong password or corrupted/tampered data");
   }
 
@@ -230,6 +259,21 @@ function validateKeystore(parsed: unknown): EncryptedKeystore {
     if (typeof o[field] !== "string" || (o[field] as string).length === 0) {
       throw new Error(`keystore is malformed: invalid ${field}`);
     }
+    for (const field of ["publicKey", "encryptedPrivateKey", "iv", "authTag"] as const) {
+      const value = o[field] as string;
+      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) {
+        throw new Error(`keystore is malformed: invalid ${field}`);
+      }
+    }
+    if (Buffer.from(o["publicKey"] as string, "base64").length !== 44) {
+      throw new Error("keystore is malformed: invalid publicKey");
+    }
+    if (Buffer.from(o["iv"] as string, "base64").length !== IV_BYTES) {
+      throw new Error("keystore is malformed: invalid iv");
+    }
+    if (Buffer.from(o["authTag"] as string, "base64").length !== 16) {
+      throw new Error("keystore is malformed: invalid authTag");
+    }
   }
   if (!o["kdf"] || typeof o["kdf"] !== "object" || Array.isArray(o["kdf"])) {
     throw new Error("keystore is malformed: invalid kdf");
@@ -244,6 +288,14 @@ function validateKeystore(parsed: unknown): EncryptedKeystore {
   for (const field of ["N", "r", "p", "keyLen"] as const) {
     if (typeof kdf[field] !== "number" || !Number.isInteger(kdf[field] as number) || (kdf[field] as number) <= 0) {
       throw new Error(`keystore is malformed: invalid kdf ${field}`);
+    }
+    if (
+      kdf["N"] !== SCRYPT_N ||
+      kdf["r"] !== SCRYPT_R ||
+      kdf["p"] !== SCRYPT_P ||
+      kdf["keyLen"] !== KEY_LEN
+    ) {
+      throw new Error("keystore is malformed: unsupported scrypt parameters");
     }
   }
   if (!o["encryption"] || typeof o["encryption"] !== "object" || Array.isArray(o["encryption"])) {

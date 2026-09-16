@@ -84,7 +84,7 @@ interface LiveSetup {
 async function startLiveServer(): Promise<LiveSetup> {
   const manifestDir = await tempDir("openstore-prov-manifests-");
   const registry = createRegistry();
-  const web = createWebServer({ manifestDir, registry });
+  const web = createWebServer({ manifestDir, registry, providerIdentityPassword: "provider-test-password" });
   const port = await web.listen(0, "127.0.0.1");
   const extraNodes: { node: StorageNode; dir: string }[] = [];
   return {
@@ -101,6 +101,7 @@ async function startLiveServer(): Promise<LiveSetup> {
       await rm(manifestDir, { recursive: true, force: true });
       await rm(`${manifestDir}.deks.json`, { force: true });
       await rm(`${manifestDir}.provider.json`, { force: true });
+      await rm(`${manifestDir}.provider.json.identity`, { force: true });
     },
   };
 }
@@ -386,7 +387,7 @@ describe("storage provider (OPENSTORE-029)", () => {
     const manifestDir = await tempDir("openstore-prov-crash-");
     const location = await tempDir("openstore-prov-crashloc-");
     const registry = createRegistry();
-    const backend1 = createWebBackend({ manifestDir, registry });
+    const backend1 = createWebBackend({ manifestDir, registry, providerIdentityPassword: "provider-test-password" });
     try {
       await backend1.provider.setup(location, 2_000_000);
       const started = await backend1.provider.start();
@@ -395,7 +396,7 @@ describe("storage provider (OPENSTORE-029)", () => {
 
       // Simulate a reboot: a fresh backend over the same config path sees
       // the configured-but-unreachable node as offline, never as running.
-      const backend2 = createWebBackend({ manifestDir, registry });
+      const backend2 = createWebBackend({ manifestDir, registry, providerIdentityPassword: "provider-test-password" });
       const status2 = await backend2.provider.getStatus();
       expect(status2.configured).toBe(true);
       expect(status2.state).toBe("offline");
@@ -411,8 +412,11 @@ describe("storage provider (OPENSTORE-029)", () => {
     } finally {
       await rm(location, { recursive: true, force: true });
       await rm(manifestDir, { recursive: true, force: true });
+      await rm(`${manifestDir}.provider.json`, { force: true });
+      await rm(`${manifestDir}.provider.json.identity`, { force: true });
       await rm(`${manifestDir}.deks.json`, { force: true });
       await rm(`${manifestDir}.provider.json`, { force: true });
+      await rm(`${manifestDir}.provider.json.identity`, { force: true });
     }
   });
 
@@ -426,17 +430,20 @@ describe("storage provider (OPENSTORE-029)", () => {
       const mode = (await stat(configPath)).mode & 0o777;
       expect(mode).toBe(0o600);
       const text = await readFile(configPath, "utf8");
-      // The vaulted node key lives here by design (0600, registry
-      // signatures only); nothing else secret may appear. The field
-      // names themselves are expected, so check exact shape instead of
-      // naive substrings.
+      // The provider identity is kept in a separate encrypted keystore;
+      // this lifecycle config contains public identity metadata only.
       expect(Object.keys(JSON.parse(text)).sort()).toEqual(
-        ["capacityBytes", "createdAt", "nodePrivateKey", "nodePublicKey", "port", "state", "storageDir", "updatedAt", "version"].sort(),
+        ["capacityBytes", "createdAt", "identityKeystorePath", "nodePublicKey", "port", "state", "storageDir", "updatedAt", "version"].sort(),
       );
       expect(text).not.toContain("recoveryPhrase");
       expect(text.toLowerCase()).not.toContain("password");
       expect(text.toLowerCase()).not.toContain("plaintext");
       expect(text.toLowerCase()).not.toContain("mnemonic");
+      const identityKeystore = `${configPath}.identity`;
+      const identityText = await readFile(identityKeystore, "utf8");
+      expect(identityText).not.toContain("nodePrivateKey");
+      expect(identityText).not.toContain("recoveryPhrase");
+      expect((await stat(identityKeystore)).mode & 0o077).toBe(0);
       const before = (await (await fetch(`${setup.base}/api/provider`)).json()) as {
         provider: { nodeId: string };
       };

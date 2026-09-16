@@ -10,7 +10,7 @@
  * - The web backend host is already trusted with plaintext and DEKs
  *   (see backend.ts / dekstore.ts). The provider extends that same host
  *   trust to one node identity key (registry signatures only) stored in
- *   a 0o600 config file. Nothing here extends trust to storage nodes,
+ *   a separate encrypted 0o600 keystore. Nothing here extends trust to storage nodes,
  *   manifests, or browsers.
  * - The node only ever reads/writes inside its dedicated storageDir
  *   (piece IDs are charset-restricted; enforced by the storage node).
@@ -39,6 +39,7 @@ import {
 import { dirname, join, resolve } from "path";
 import { createIdentity } from "../../packages/identity/index.js";
 import type { Identity } from "../../packages/identity/index.js";
+import { loadIdentity, saveIdentity } from "../../packages/identity/keystore.js";
 import { isValidManifestFileId } from "../../packages/manifest/store.js";
 import type { Registry } from "../../packages/registry/index.js";
 import { createStorageNode } from "../storage-node/index.js";
@@ -48,6 +49,7 @@ export const PROVIDER_CONFIG_VERSION = 1;
 
 /** Marker proving a directory was created/adopted by the provider. */
 const STORAGE_MARKER = ".openstore-storage";
+const STORAGE_MARKER_VERSION = 1;
 
 /** Persisted lifecycle states (offline is derived, never persisted). */
 export type ProviderPersistedState = "running" | "draining" | "stopped";
@@ -110,6 +112,8 @@ export interface ProviderManagerOptions {
   configPath: string | null;
   /** Shared registry the provider node registers into (may be null). */
   registry: Registry | null;
+  /** Password used to encrypt the provider node identity keystore. */
+  identityPassword?: string;
 }
 
 export interface ProviderManager {
@@ -136,10 +140,31 @@ interface ProviderConfigFile {
   capacityBytes: number;
   port: number;
   nodePublicKey: string;
-  nodePrivateKey: string;
+  identityKeystorePath: string;
   state: ProviderPersistedState;
   createdAt: number;
   updatedAt: number;
+}
+
+function storageMarker(storageDir: string, createdAt: number): string {
+  return JSON.stringify({ marker: "openstore-storage", version: STORAGE_MARKER_VERSION, storageDir, createdAt });
+}
+
+async function hasValidStorageMarker(storageDir: string): Promise<boolean> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(join(storageDir, STORAGE_MARKER), "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    const marker = parsed as Record<string, unknown>;
+    return (
+      marker.marker === "openstore-storage" &&
+      marker.version === STORAGE_MARKER_VERSION &&
+      marker.storageDir === resolve(storageDir) &&
+      typeof marker.createdAt === "number" &&
+      Number.isSafeInteger(marker.createdAt)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -235,17 +260,15 @@ function parseConfig(text: string): ProviderConfigFile {
   if (typeof r["port"] !== "number" || !Number.isInteger(r["port"]) || r["port"] < 0 || r["port"] > 65535) {
     throw new Error("provider configuration is malformed: bad port");
   }
-  if (typeof r["nodePublicKey"] !== "string" || typeof r["nodePrivateKey"] !== "string") {
+  if (typeof r["nodePublicKey"] !== "string" || typeof r["identityKeystorePath"] !== "string") {
     throw new Error("provider configuration is malformed: bad node identity");
   }
   if (r["state"] !== "running" && r["state"] !== "draining" && r["state"] !== "stopped") {
     throw new Error("provider configuration is malformed: bad state");
   }
   let nodePublicKey: Buffer;
-  let nodePrivateKey: Buffer;
   try {
     nodePublicKey = Buffer.from(r["nodePublicKey"], "base64");
-    nodePrivateKey = Buffer.from(r["nodePrivateKey"], "base64");
   } catch {
     throw new Error("provider configuration is malformed: bad node identity");
   }
@@ -253,7 +276,10 @@ function parseConfig(text: string): ProviderConfigFile {
   // packages/identity); only decodability + non-emptiness is checked
   // here. The registry verifies signatures whenever the key is used,
   // so a tampered key fails safely at start/heartbeat time.
-  if (nodePublicKey.length === 0 || nodePrivateKey.length === 0) {
+  if (nodePublicKey.length === 0) {
+    throw new Error("provider configuration is malformed: bad node identity");
+  }
+  if (nodePublicKey.length !== 44 || !/^[A-Za-z0-9+/]+={0,2}$/.test(r["nodePublicKey"])) {
     throw new Error("provider configuration is malformed: bad node identity");
   }
   return {
@@ -262,7 +288,7 @@ function parseConfig(text: string): ProviderConfigFile {
     capacityBytes: r["capacityBytes"],
     port: r["port"],
     nodePublicKey: r["nodePublicKey"],
-    nodePrivateKey: r["nodePrivateKey"],
+    identityKeystorePath: r["identityKeystorePath"],
     state: r["state"],
     createdAt: typeof r["createdAt"] === "number" ? r["createdAt"] : 0,
     updatedAt: typeof r["updatedAt"] === "number" ? r["updatedAt"] : 0,
@@ -278,6 +304,10 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
   }
   const configPath = options.configPath === null ? null : resolve(options.configPath);
   const registry = options.registry ?? null;
+  const identityPassword = options.identityPassword;
+  if (identityPassword !== undefined && (typeof identityPassword !== "string" || identityPassword.length === 0)) {
+    throw new TypeError("identityPassword must be a non-empty string");
+  }
 
   let node: StorageNode | null = null;
   let nodeStartedAt: number | null = null;
@@ -299,7 +329,14 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw err;
     }
-    return parseConfig(text);
+    const config = parseConfig(text);
+    if (config.identityKeystorePath !== `${configPath}.identity`) {
+      throw new Error("provider configuration is malformed: unsafe identity keystore path");
+    }
+    if (!(await hasValidStorageMarker(config.storageDir))) {
+      throw new Error("storage provider directory marker is invalid or missing");
+    }
+    return config;
   }
 
   async function writeConfig(config: ProviderConfigFile): Promise<void> {
@@ -321,13 +358,16 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
     }
   }
 
-  function buildIdentity(config: ProviderConfigFile): Identity {
-    return {
-      version: 1,
-      publicKey: Buffer.from(config.nodePublicKey, "base64"),
-      privateKey: Buffer.from(config.nodePrivateKey, "base64"),
-      recoveryPhrase: [],
-    };
+  async function buildIdentity(config: ProviderConfigFile): Promise<Identity> {
+    if (!identityPassword) {
+      throw new Error("provider identity password is not configured");
+    }
+    const identity = await loadIdentity(identityPassword, config.identityKeystorePath);
+    if (!identity.publicKey.equals(Buffer.from(config.nodePublicKey, "base64"))) {
+      identity.privateKey.fill(0);
+      throw new Error("provider identity does not match configuration");
+    }
+    return identity;
   }
 
   /** Start the node process-side; throws with safe messages on failure. */
@@ -337,7 +377,7 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
     }
     const fresh = createStorageNode({
       storageDir: config.storageDir,
-      identity: buildIdentity(config),
+      identity: await buildIdentity(config),
       registry,
       registryHeartbeatIntervalMs: 5000,
       capacityBytes: config.capacityBytes,
@@ -478,11 +518,7 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
         throw new Error("storage location is not a directory");
       }
       // Isolation policy: only empty dirs or dirs already marked as ours.
-      let markerOurs = false;
-      try {
-        const marker = await readFile(join(storageDir, STORAGE_MARKER), "utf8");
-        markerOurs = marker.includes('"openstore-storage"');
-      } catch {}
+      const markerOurs = await hasValidStorageMarker(storageDir);
       if (!markerOurs) {
         const entries = await readdir(storageDir);
         if (entries.length > 0) {
@@ -503,11 +539,18 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
       }
       const identity = createIdentity();
       const nodePublicKey = identity.publicKey.toString("base64");
-      const nodePrivateKey = identity.privateKey.toString("base64");
-      try {
+      if (!identityPassword) {
         identity.privateKey.fill(0);
         identity.recoveryPhrase.fill("");
-      } catch {}
+        throw new Error("provider identity password is not configured");
+      }
+      const identityKeystorePath = `${configPath}.identity`;
+      try {
+        await saveIdentity(identity, identityPassword, identityKeystorePath);
+      } finally {
+        identity.privateKey.fill(0);
+        identity.recoveryPhrase.fill("");
+      }
       const now = Date.now();
       await writeConfig({
         version: PROVIDER_CONFIG_VERSION,
@@ -515,14 +558,16 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
         capacityBytes,
         port: requestedPort,
         nodePublicKey,
-        nodePrivateKey,
+        identityKeystorePath,
         state: "stopped",
         createdAt: now,
         updatedAt: now,
       });
-      try {
-        await writeFile(join(storageDir, STORAGE_MARKER), JSON.stringify({ marker: "openstore-storage", createdAt: now }), { mode: 0o600 });
-      } catch {}
+      await writeFile(join(storageDir, STORAGE_MARKER), storageMarker(storageDir, now), {
+        mode: 0o600,
+        flag: "wx",
+      });
+      await chmod(join(storageDir, STORAGE_MARKER), 0o600);
       return this.getStatus();
     },
 
@@ -531,6 +576,9 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
       const config = await readConfig();
       if (!config) {
         throw new Error("storage provider is not configured (run setup first)");
+      }
+      if (!(await hasValidStorageMarker(config.storageDir))) {
+        throw new Error("storage provider directory marker is invalid or missing");
       }
       if (await isNodeLive()) {
         // Full sharing resumes: clear any draining flag.
@@ -607,6 +655,9 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
           await unlink(configPath);
         } catch {}
       }
+      try {
+        await unlink(config.identityKeystorePath);
+      } catch {}
       try {
         await rm(config.storageDir, { force: true });
       } catch {}

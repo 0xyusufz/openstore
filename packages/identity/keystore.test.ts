@@ -219,4 +219,18 @@ describe("encrypted local identity keystore (OPENSTORE-008)", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("rejects keystores whose permissions are widened", async () => {
+    if (process.platform === "win32") return;
+    const dir = await tempDir();
+    try {
+      const filePath = join(dir, "identity.json");
+      const password = randomTestInput();
+      await saveIdentity(createIdentity(), password, filePath);
+      await chmod(filePath, 0o644);
+      await expect(loadIdentity(password, filePath)).rejects.toThrow(/unsafe permissions/i);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
