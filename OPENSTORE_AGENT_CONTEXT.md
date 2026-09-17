@@ -789,3 +789,22 @@ and freshness; failed writes preserve the previous accepted state. No
 consensus, election, promotion, fencing, LWW resolution, client failover, or
 automatic authority migration was introduced. See
 `docs/053D-coordinator-write-ordering.md`.
+
+Milestone 053E adds `CoordinatorReplicaSyncManager` around the 053C transfer
+and 053D importer. It provides idempotent start/stop, coalesced `syncNow()`,
+abort cancellation, bounded exponential retry/backoff, freshness-based stale
+status, outage retention of the last valid snapshot, and explicit
+operator-driven `resetForRebootstrap()`. Timers and clocks are injectable for
+deterministic tests; no unbounded queue or retry loop exists.
+
+Synchronization status distinguishes stopped, bootstrapping, synchronized,
+stale, conflicted, unavailable, rejected, and retry-wait outcomes. Successful
+sync records only aggregate source/revision/digest/timestamps and always
+reports `non-authoritative`. Import validation, persistence, and 053D
+revision/digest conflict rules remain the authority boundary. Conflicts do
+not choose a winner; explicit rebootstrap is required. Optional metrics are
+bounded and low-cardinality.
+
+053E does not add consensus, election, promotion, fencing, quorum, client
+failover, DHT authority, or changes to 052B behavior. See
+`docs/053E-coordinator-replica-sync.md`.

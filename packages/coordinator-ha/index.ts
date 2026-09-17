@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { signMessage, verifyMessage } from "../identity/index.js";
+import type { MetricsRegistry } from "../metrics/index.js";
 
 /**
  * Stable coordinator HA foundation contracts.
@@ -151,7 +152,49 @@ export interface CoordinatorReplicaBootstrapStatus {
 export interface CoordinatorReplicaStateTransfer {
   request(request: CoordinatorReplicaBootstrapRequest): Promise<CoordinatorReplicaBootstrapResponse>;
   import(response: CoordinatorReplicaBootstrapResponse, transportAuthenticated: boolean, signal?: AbortSignal): Promise<BootstrapResult>;
+  resetForRebootstrap(): Promise<void>;
   status(): CoordinatorReplicaBootstrapStatus;
+}
+
+export interface CoordinatorReplicaSyncSource {
+  request(request: CoordinatorReplicaBootstrapRequest, signal?: AbortSignal): Promise<CoordinatorReplicaBootstrapResponse>;
+}
+
+export type ReplicaSyncState = "stopped" | "bootstrapping" | "synchronized" | "stale" | "conflicted" | "unavailable" | "rejected" | "retry_wait";
+
+export interface CoordinatorReplicaSyncStatus {
+  readonly version: 1;
+  readonly state: ReplicaSyncState;
+  readonly authorityClassification: "non-authoritative";
+  readonly sourceInstanceId?: string;
+  readonly acceptedRevision?: number;
+  readonly snapshotDigest?: string;
+  readonly lastSuccessfulSync?: number;
+  readonly lastAttemptedSync?: number;
+  readonly lastFailure?: string;
+  readonly retryCount: number;
+  readonly nextRetryAt?: number;
+  readonly synchronizationAgeMs?: number;
+}
+
+export interface CoordinatorReplicaSyncOptions {
+  readonly freshnessMs?: number;
+  readonly maxAttempts?: number;
+  readonly initialDelayMs?: number;
+  readonly maxDelayMs?: number;
+  readonly request?: CoordinatorReplicaBootstrapRequest;
+  readonly clock?: () => number;
+  readonly setTimeout?: (callback: () => void, delayMs: number) => ReturnType<typeof globalThis.setTimeout>;
+  readonly clearTimeout?: (timer: ReturnType<typeof globalThis.setTimeout>) => void;
+  readonly metrics?: MetricsRegistry;
+}
+
+export interface CoordinatorReplicaSyncManager {
+  start(): Promise<void>;
+  stop(): void;
+  syncNow(): Promise<BootstrapResult | undefined>;
+  resetForRebootstrap(): Promise<void>;
+  status(): CoordinatorReplicaSyncStatus;
 }
 
 const MAX_BOOTSTRAP_NODES = 10_000;
@@ -540,7 +583,28 @@ function canonical(value: unknown): string {
       } else {
         this.lifecycle = reason === "stale_proof" || reason === "stale_revision" ? "stale" : "rejected";
       }
+
       return Object.freeze({ accepted: false, state: this.lifecycle === "conflicted" ? "conflicted" : "rejected", reason });
+    }
+
+    async resetForRebootstrap(): Promise<void> {
+      this.acceptedSnapshot = undefined;
+      this.acceptedProof = undefined;
+      this.lastValidatedAt = undefined;
+      this.lastSuccessfulImportAt = undefined;
+      this.lastRejectedImportAt = undefined;
+      this.lastConflictReason = undefined;
+      this.persistenceHealthy = true;
+      this.lifecycle = "uninitialized";
+      if (this.persistencePath) {
+        try { unlinkSync(this.persistencePath); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            this.persistenceHealthy = false;
+            this.lifecycle = "unavailable";
+            throw new Error("persistence failure");
+          }
+        }
+      }
     }
 
     private persist(value: PersistedReplicaState): void {
@@ -587,4 +651,163 @@ function canonical(value: unknown): string {
 
   function requirePersistedFile(path: string): string {
     return readFileSync(path, "utf8");
+  }
+
+  const DEFAULT_SYNC_FRESHNESS_MS = 30_000;
+  const DEFAULT_SYNC_MAX_ATTEMPTS = 4;
+  const DEFAULT_SYNC_INITIAL_DELAY_MS = 250;
+  const DEFAULT_SYNC_MAX_DELAY_MS = 10_000;
+
+  export function createCoordinatorReplicaSyncManager(
+    source: CoordinatorReplicaSyncSource,
+    transfer: CoordinatorReplicaStateTransfer,
+    options: CoordinatorReplicaSyncOptions = {},
+  ): CoordinatorReplicaSyncManager {
+    const clock = options.clock ?? (() => Date.now());
+    const schedule = options.setTimeout ?? ((callback, delay) => globalThis.setTimeout(callback, delay));
+    const cancel = options.clearTimeout ?? ((timer) => globalThis.clearTimeout(timer));
+    const freshnessMs = options.freshnessMs ?? DEFAULT_SYNC_FRESHNESS_MS;
+    const maxAttempts = options.maxAttempts ?? DEFAULT_SYNC_MAX_ATTEMPTS;
+    const initialDelayMs = options.initialDelayMs ?? DEFAULT_SYNC_INITIAL_DELAY_MS;
+    const maxDelayMs = options.maxDelayMs ?? DEFAULT_SYNC_MAX_DELAY_MS;
+    if (![freshnessMs, maxAttempts, initialDelayMs, maxDelayMs].every(Number.isSafeInteger) ||
+        freshnessMs <= 0 || maxAttempts <= 0 || initialDelayMs < 0 || maxDelayMs < initialDelayMs) {
+      throw new TypeError("replica synchronization bounds are invalid");
+    }
+    let state: ReplicaSyncState = "stopped";
+    let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
+    let active: Promise<BootstrapResult | undefined> | undefined;
+    let controller: AbortController | undefined;
+    let retryCount = 0;
+    let lastAttemptedSync: number | undefined;
+    let lastSuccessfulSync: number | undefined;
+    let lastFailure: string | undefined;
+    let nextRetryAt: number | undefined;
+    let stopped = true;
+    let staleReported = false;
+
+    const metric = (name: string, value = 1, labels: Record<string, string> = {}): void => {
+      try { options.metrics?.increment(name, value, labels); } catch { /* observability cannot alter sync safety */ }
+    };
+    const observe = (name: string, value: number): void => {
+      try { options.metrics?.observe(name, value); } catch { /* observability cannot alter sync safety */ }
+    };
+    const safeFailure = (reason: string): string => {
+      if (!/^[a-z][a-z0-9_.-]{0,31}$/.test(reason)) return "error";
+      return reason;
+    };
+    const clearScheduled = (): void => {
+      if (timer !== undefined) { cancel(timer); timer = undefined; }
+      nextRetryAt = undefined;
+    };
+    const scheduleRetry = (): void => {
+      if (stopped) return;
+      if (retryCount >= maxAttempts) { state = "unavailable"; return; }
+      state = "retry_wait";
+      const delay = Math.min(maxDelayMs, initialDelayMs * (2 ** Math.max(0, retryCount - 1)));
+      nextRetryAt = clock() + delay;
+      timer = schedule(() => {
+        timer = undefined;
+        void syncNow();
+      }, delay);
+      metric("coordinator_replica_sync_retry_total");
+    };
+    const run = async (): Promise<BootstrapResult | undefined> => {
+      if (stopped) return undefined;
+      state = "bootstrapping";
+      metric("coordinator_replica_sync_attempt_total");
+      lastAttemptedSync = clock();
+      const started = lastAttemptedSync;
+      controller = new AbortController();
+      try {
+        const response = await source.request({ version: 1, ...(options.request ?? {}) }, controller.signal);
+        if (controller.signal.aborted || stopped) return undefined;
+        const result = await transfer.import(response, true, controller.signal);
+        if (result.accepted) {
+          state = "synchronized";
+          lastSuccessfulSync = clock();
+          retryCount = 0;
+          staleReported = false;
+          lastFailure = undefined;
+          nextRetryAt = undefined;
+          metric("coordinator_replica_sync_success_total");
+        } else {
+          const reason = safeFailure(String(result.reason ?? "rejected"));
+          lastFailure = reason;
+          state = result.state === "conflicted" ? "conflicted" :
+            result.reason === "unavailable" || result.reason === "persistence_failure" ? "unavailable" : "rejected";
+          metric("coordinator_replica_sync_failure_total", 1, { result: "rejected" });
+          if (state === "unavailable") { retryCount += 1; scheduleRetry(); }
+        }
+        observe("coordinator_replica_sync_duration_ms", Math.max(0, clock() - started));
+        return result;
+      } catch {
+        lastFailure = "unavailable";
+        state = "unavailable";
+        retryCount += 1;
+        metric("coordinator_replica_sync_failure_total");
+        scheduleRetry();
+        return undefined;
+      } finally {
+        controller = undefined;
+      }
+    };
+    const syncNow = (): Promise<BootstrapResult | undefined> => {
+      if (active) return active;
+      if (stopped) return Promise.resolve(undefined);
+      clearScheduled();
+      active = run().finally(() => { active = undefined; });
+      return active;
+    };
+    return {
+      async start(): Promise<void> {
+        if (!stopped) return;
+        stopped = false;
+        state = "bootstrapping";
+        await syncNow();
+      },
+      stop(): void {
+        stopped = true;
+        clearScheduled();
+        controller?.abort();
+        state = "stopped";
+      },
+      syncNow,
+      async resetForRebootstrap(): Promise<void> {
+        clearScheduled();
+        controller?.abort();
+        if (active) await active;
+        retryCount = 0;
+        lastFailure = undefined;
+        lastSuccessfulSync = undefined;
+        await transfer.resetForRebootstrap();
+        state = stopped ? "stopped" : "bootstrapping";
+      },
+      status(): CoordinatorReplicaSyncStatus {
+        const imported = transfer.status();
+        const now = clock();
+        const age = lastSuccessfulSync === undefined ? undefined : Math.max(0, now - lastSuccessfulSync);
+        if (!stopped && state === "synchronized" && age !== undefined && age > freshnessMs) {
+          state = "stale";
+          if (!staleReported) {
+            staleReported = true;
+            metric("coordinator_replica_sync_stale_total");
+          }
+        }
+        return Object.freeze({
+          version: 1,
+          state,
+          authorityClassification: "non-authoritative",
+          ...(imported.sourceInstanceId ? { sourceInstanceId: imported.sourceInstanceId } : {}),
+          ...(imported.acceptedRevision === undefined ? {} : { acceptedRevision: imported.acceptedRevision }),
+          ...(imported.snapshotDigest ? { snapshotDigest: imported.snapshotDigest } : {}),
+          ...(lastSuccessfulSync === undefined ? {} : { lastSuccessfulSync }),
+          ...(lastAttemptedSync === undefined ? {} : { lastAttemptedSync }),
+          ...(lastFailure ? { lastFailure } : {}),
+          retryCount,
+          ...(nextRetryAt === undefined ? {} : { nextRetryAt }),
+          ...(age === undefined ? {} : { synchronizationAgeMs: age }),
+        });
+      },
+    };
   }

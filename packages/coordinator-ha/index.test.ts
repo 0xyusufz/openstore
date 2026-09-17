@@ -6,7 +6,7 @@ import {
 } from "./index.js";
 import { createIdentity } from "../identity/index.js";
 import { createAuthorityProof, CoordinatorBootstrapMachine, createCoordinatorInstanceIdentity, parseCoordinatorInstanceIdentity, serializeCoordinatorInstanceIdentity, verifyAuthorityProof } from "./index.js";
-import { CoordinatorReplicaImporter, createCoordinatorSnapshotExporter } from "./index.js";
+import { CoordinatorReplicaImporter, createCoordinatorSnapshotExporter, createCoordinatorReplicaSyncManager } from "./index.js";
 import { compareCoordinatorStateOrdering } from "./index.js";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -196,5 +196,73 @@ describe("coordinator HA foundation model", () => {
     expect((await replica.import({ version: 1, snapshot, proof: stale }, true)).reason).toBe("stale_proof");
     const future = createAuthorityProof(snapshot, identity.privateKey, now + 10_000);
     expect((await replica.import({ version: 1, snapshot, proof: future }, true)).reason).toBe("future_proof");
+  });
+
+  it("coalesces concurrent syncs, retries bounded outages, and recovers", async () => {
+    const identity = createIdentity();
+    const instance = createCoordinatorInstanceIdentity(identity.publicKey);
+    const now = Date.now();
+    const snapshot = { version: 1 as const, instance, revision: 1, observedAt: now, nodes: [] };
+    const exporter = createCoordinatorSnapshotExporter(() => snapshot, identity.privateKey, () => now);
+    const response = await exporter.request({ version: 1 });
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const source = {
+      async request(): Promise<typeof response> {
+        calls += 1;
+        await gate;
+        return response;
+      },
+    };
+    const replica = new CoordinatorReplicaImporter({ trustedInstanceIds: [instance.instanceId] });
+    const manager = createCoordinatorReplicaSyncManager(source, replica, { freshnessMs: 50 });
+    const first = manager.start();
+    const second = manager.syncNow();
+    expect(manager.status().state).toBe("bootstrapping");
+    release();
+    await first;
+    expect(await second).toMatchObject({ accepted: true });
+    expect(calls).toBe(1);
+    expect(manager.status().state).toBe("synchronized");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(manager.status().state).toBe("stale");
+    manager.stop();
+    expect(manager.status().state).toBe("stopped");
+  });
+
+  it("caps retry scheduling and supports explicit conflict rebootstrap", async () => {
+    const identity = createIdentity();
+    const instance = createCoordinatorInstanceIdentity(identity.publicKey);
+    const now = Date.now();
+    const snapshot = { version: 1 as const, instance, revision: 1, observedAt: now, nodes: [] };
+    const exporter = createCoordinatorSnapshotExporter(() => snapshot, identity.privateKey, () => now);
+    const response = await exporter.request({ version: 1 });
+    let calls = 0;
+    const source = {
+      async request(): Promise<typeof response> {
+        calls += 1;
+        throw new Error("temporary");
+      },
+    };
+    const replica = new CoordinatorReplicaImporter({ trustedInstanceIds: [instance.instanceId] });
+    const timers: Array<() => void> = [];
+    const manager = createCoordinatorReplicaSyncManager(source, replica, {
+      maxAttempts: 3, initialDelayMs: 0, maxDelayMs: 0,
+      setTimeout: (callback) => { timers.push(callback); return 1 as unknown as ReturnType<typeof globalThis.setTimeout>; },
+      clearTimeout: () => undefined,
+    });
+    await manager.start();
+    expect(manager.status().state).toBe("retry_wait");
+    for (let i = 0; i < 12 && calls < 3; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const callback = timers.shift();
+      if (callback) callback();
+    }
+    await Promise.resolve();
+    expect(calls).toBe(3);
+    manager.stop();
+    await manager.resetForRebootstrap();
+    expect(manager.status().state).toBe("stopped");
   });
 });
