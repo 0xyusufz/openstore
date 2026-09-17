@@ -40,6 +40,17 @@ describe("cross-process registry coordinator", () => {
     await coordinator.close();
   });
 
+  it("exposes bounded sanitized metrics without credentials", async () => {
+    const coordinator = createRegistryCoordinator({ registry: createRegistry(), token: "secret" });
+    const port = await coordinator.listen(0);
+    const response = await fetch(`http://127.0.0.1:${port}/v1/metrics`);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { counters: unknown[]; gauges: unknown[]; histograms: unknown[] };
+    expect(body.counters).toBeInstanceOf(Array);
+    expect(JSON.stringify(body)).not.toMatch(/secret|private|recovery|plaintext|ciphertext|piece-[A-Za-z0-9]/i);
+    await coordinator.close();
+  });
+
   it("exposes safe persistence status and contextual client errors", async () => {
     const events: string[] = [];
     const coordinator = createRegistryCoordinator({

@@ -7,6 +7,7 @@
  */
 
 import { randomBytes } from "crypto";
+import { defaultMetrics } from "../metrics/index.js";
 import {
   chmodSync,
   closeSync,
@@ -506,6 +507,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
 
   function persist(): void {
     if (!persistencePath) return;
+    const persistenceStarted = Date.now();
     const payload = JSON.stringify(
       { version: REGISTRY_VERSION, nodes: Array.from(nodes.values()), seenAuditIds: Array.from(seenAuditIds) },
       null,
@@ -543,12 +545,15 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EBADF") throw error;
       }
       lastWriteOutcome = "success";
+      defaultMetrics.observe("coordinator_persistence_duration_ms", Date.now() - persistenceStarted);
       markDegraded(false, "write");
       emit({ type: "persistence.write", outcome: "success", records: nodes.size });
     } catch {
       // Clean up tmp on failure, previous file remains intact
       try { io.unlinkSync(tmpPath); } catch {}
       lastWriteOutcome = "error";
+      defaultMetrics.increment("coordinator_persistence_errors_total", 1, { result: "error" });
+      defaultMetrics.observe("coordinator_persistence_duration_ms", Date.now() - persistenceStarted);
       markDegraded(true, "write");
       emit({ type: "persistence.write", outcome: "error", records: nodes.size });
     }

@@ -1,6 +1,7 @@
 import { readdir, stat } from "fs/promises";
 import { join } from "path";
 import type { PieceProvenanceStore } from "./provenance-store.js";
+import { defaultMetrics, type MetricsRegistry } from "../../packages/metrics/index.js";
 
 export type OrphanScannerState = "stopped" | "running" | "paused" | "cancelling" | "failed";
 export interface OrphanScannerEvent {
@@ -28,6 +29,7 @@ export function createOrphanScanner(options: {
   batchSize?: number;
   maxDeletionsPerRun?: number;
   onEvent?: (event: OrphanScannerEvent) => void;
+  metrics?: MetricsRegistry;
 }): OrphanScanner {
   const intervalMs = options.intervalMs ?? 15 * 60 * 1000;
   const batchSize = options.batchSize ?? 100;
@@ -38,6 +40,7 @@ export function createOrphanScanner(options: {
   let cancelled = false;
   let snapshot: { state: OrphanScannerState; scanned: number; deleted: number; retained: number; lastError?: string } = { state, scanned: 0, deleted: 0, retained: 0 };
   const emit = (event: OrphanScannerEvent) => { try { options.onEvent?.(event); } catch {} };
+  const metrics = options.metrics ?? defaultMetrics;
   const schedule = () => {
     if (state === "stopped" || state === "cancelling") return;
     timer = setTimeout(() => { void runOnce().finally(schedule); }, intervalMs);
@@ -49,6 +52,8 @@ export function createOrphanScanner(options: {
     snapshot = { ...snapshot, state };
     const operation = (async () => {
       emit({ type: "scan.started", timestamp: Date.now() });
+      metrics.increment("orphan_scan_runs_total", 1, { result: "success" });
+      const startedAt = Date.now();
       let scanned = 0, deleted = 0, retained = 0;
       try {
         const entries = (await readdir(options.pieceDir)).slice(0, batchSize);
@@ -78,6 +83,10 @@ export function createOrphanScanner(options: {
         }
         if (state !== "cancelling") state = "paused";
         snapshot = { state, scanned, deleted, retained, lastError: snapshot.lastError };
+        metrics.increment("orphan_candidates_total", scanned, { result: "success" });
+        metrics.increment("orphan_deleted_total", deleted, { result: "success" });
+        metrics.increment("orphan_protected_total", retained, { result: "success" });
+        metrics.observe("orphan_scan_duration_ms", Date.now() - startedAt);
         emit({ type: "scan.completed", timestamp: Date.now(), scanned, deleted, retained });
         return { scanned, deleted, retained };
       } catch (error) {

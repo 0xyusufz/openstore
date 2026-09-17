@@ -37,6 +37,7 @@ import type { ManifestStore } from "../../packages/manifest/store.js";
 import type { CoordinatorEndpointProvider } from "./index.js";
 import { resolveEndpoints } from "./coordinator.js";
 import type { P2PTransport } from "../../packages/p2p/index.js";
+import type { MetricsRegistry } from "../../packages/metrics/index.js";
 import { join } from "path";
 import {
   createOperationRecordStore,
@@ -69,6 +70,7 @@ export interface UploadOptions {
   transport?: P2PTransport;
   identity?: { publicKey: Buffer; privateKey: Buffer };
   operationStore?: OperationRecordStore;
+  metrics?: MetricsRegistry;
 }
 
 /**
@@ -184,6 +186,7 @@ export async function uploadBuffer(
       retryAttempts: options.retryAttempts,
       retryBackoffMs: options.retryBackoffMs,
       transport: options.transport,
+      metrics: options.metrics,
       identity: options.identity,
     });
     if (options.identity && operationStore && "claims" in report) provenancePlacements.push(...report.claims);

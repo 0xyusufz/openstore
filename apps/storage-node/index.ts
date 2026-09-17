@@ -34,6 +34,7 @@ import { createOrphanScanner, type OrphanScanner } from "./orphan-scanner.js";
 import type { PieceClaim } from "../../packages/provenance/index.js";
 import { hashPieceId } from "../../packages/manifest/index.js";
 import { safeErrorMessage } from "./safe-error.js";
+import { defaultMetrics, type MetricsRegistry } from "../../packages/metrics/index.js";
 
 export const STORAGE_NODE_VERSION = 1;
 
@@ -62,6 +63,7 @@ export interface StorageNodeOptions {
   maxHttpRequestBodyBytes?: number;
   /** Maximum remembered authenticated request nonces. */
   maxReplayCacheEntries?: number;
+  metrics?: MetricsRegistry;
   /** Optional in-memory registry for node discovery */
   registry?: Registry;
   /** Heartbeat interval for registry (ms). Defaults to 10s or 1/3 of registry timeout */
@@ -165,6 +167,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   const maxClockSkewMs = options.maxClockSkewMs ?? DEFAULT_MAX_CLOCK_SKEW_MS;
   const maxHttpRequestBodyBytes = options.maxHttpRequestBodyBytes ?? DEFAULT_MAX_HTTP_REQUEST_BODY_BYTES;
   const maxReplayCacheEntries = options.maxReplayCacheEntries ?? DEFAULT_MAX_REPLAY_CACHE_ENTRIES;
+  const metrics = options.metrics ?? defaultMetrics;
   if (!Number.isSafeInteger(maxHttpRequestBodyBytes) || maxHttpRequestBodyBytes <= 0) {
     throw new TypeError("maxHttpRequestBodyBytes must be a positive safe integer");
   }
@@ -190,6 +193,27 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   const hasKeystore = typeof options.identityPath === "string" && options.identityPath !== "";
 
   const server = createServer((req, res) => {
+    const started = Date.now();
+    const pathParts = (req.url ?? "").split("?")[0]?.split("/").filter(Boolean) ?? [];
+    const rawOperation = pathParts[0] === "pieces" || pathParts[1] === "pieces"
+      ? (req.method === "POST" ? "store" : req.method === "HEAD" ? "head" : req.method === "DELETE" ? "delete" : "get")
+      : pathParts[0] === "verify" || pathParts[1] === "verify" ? "verify" : "request";
+    const candidate = rawOperation;
+    const operation = (["store", "get", "head", "delete", "verify"].includes(candidate) ? candidate : "request") as "store" | "get" | "head" | "delete" | "verify" | "request";
+    metrics.increment("storage_requests_total", 1, { operation });
+    const originalEnd = res.end.bind(res);
+    res.end = ((...args: Parameters<typeof res.end>) => {
+      const status = res.statusCode;
+      const result = status >= 200 && status < 300 ? "success" : status === 413 ? "rejected" : "error";
+      metrics.increment("storage_request_errors_total", result === "error" ? 1 : 0, { operation, result });
+      metrics.increment("storage_request_rejections_total", result === "rejected" ? 1 : 0, { operation, result: "rejected" });
+      if (operation === "store" && result === "success") metrics.increment("storage_piece_stores_total", 1, { result: "success" });
+      if (operation === "get" && result === "success") metrics.increment("storage_piece_gets_total", 1, { result: "success" });
+      if (operation === "delete" && result === "success") metrics.increment("storage_piece_deletes_total", 1, { result: "success" });
+      if (operation === "verify" && result === "success") metrics.increment("storage_piece_verifications_total", 1, { result: "success" });
+      metrics.observe("storage_request_duration_ms", Date.now() - started, { operation });
+      return originalEnd(...args);
+    }) as typeof res.end;
     void handleRequest(req, res, storageDir, capacityBytes, provenance, { requireAuth, maxClockSkewMs, seenNonces, maxReplayCacheEntries, maxHttpRequestBodyBytes }, () => nodeIdentity, () => draining).catch((error) => {
       if (!res.headersSent) {
         sendJson(res, error instanceof RequestBodyTooLargeError ? 413 : 500, {
@@ -230,6 +254,11 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     const capacity = await getCapacity();
     let pieceCount = 0;
     try { pieceCount = (await readdir(storageDir)).length; } catch {}
+    metrics.set("storage_used_bytes", capacity.usedBytes);
+    metrics.set("storage_capacity_bytes", capacity.allocatedBytes ?? capacity.totalBytes ?? 0);
+    metrics.set("storage_piece_count", pieceCount);
+    metrics.set("storage_available", draining ? 0 : 1);
+    metrics.set("storage_draining", draining ? 1 : 0);
     return { status: draining ? "draining" : "ok", draining, capacity, pieceCount };
   }
 

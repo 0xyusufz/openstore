@@ -36,6 +36,7 @@ import type { StorageNodeEndpoint } from "./index.js";
 import type { CoordinatorEndpointProvider } from "./index.js";
 import { resolveEndpoints, resolveManifestReplicaEndpoints } from "./coordinator.js";
 import type { P2PTransport } from "../../packages/p2p/index.js";
+import type { MetricsRegistry } from "../../packages/metrics/index.js";
 
 /**
  * Options for {@link downloadBuffer}.
@@ -48,6 +49,7 @@ export interface DownloadOptions {
   coordinator?: CoordinatorEndpointProvider;
   transport?: P2PTransport;
   identity?: { publicKey: Buffer; privateKey: Buffer };
+  metrics?: MetricsRegistry;
 }
 
 /**
@@ -115,6 +117,7 @@ export async function downloadBuffer(
             retryBackoffMs: options.retryBackoffMs,
             transport: options.transport,
             identity: options.identity,
+            metrics: options.metrics,
           });
           bytes = got.bytes;
         } catch (err) {

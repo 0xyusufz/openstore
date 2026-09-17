@@ -23,6 +23,7 @@ import { HttpStorageTransport } from "./http-transport.js";
 import { MixedStorageTransport } from "./http-transport.js";
 import type { P2PTransport } from "../../packages/p2p/index.js";
 import type { P2PNodeAddress, P2PNodeIdentity } from "../../packages/p2p/index.js";
+import { defaultMetrics, type MetricsRegistry } from "../../packages/metrics/index.js";
 
 export const CLIENT_VERSION = 1;
 
@@ -86,6 +87,7 @@ export interface StorePieceOptions {
   retryAttempts?: number;
   retryBackoffMs?: number;
   transport?: P2PTransport;
+  metrics?: MetricsRegistry;
 }
 
 /**
@@ -121,6 +123,7 @@ export interface GetPieceOptions {
   /** Optional integrity check; invalid responses are treated as replica failures. */
   validate?: (bytes: Buffer, endpoint: StorageNodeEndpoint) => void | Promise<void>;
   transport?: P2PTransport;
+  metrics?: MetricsRegistry;
 }
 
 /**
@@ -172,10 +175,14 @@ export async function storePieceOnNodes(
   });
   const existing = inFlightStores.get(operationKey);
   if (existing) return existing;
+  const metrics = options.metrics ?? defaultMetrics;
+  metrics.increment("client_uploads_total", 1, { result: "success" });
   const operation = storePieceOnNodesUncoordinated(pieceId, data, endpoints, options);
   inFlightStores.set(operationKey, operation);
   try {
-    return await operation;
+    const result = await operation;
+    metrics.increment("client_replica_failures_total", result.failed.length, { result: result.failed.length ? "error" : "success" });
+    return result;
   } finally {
     if (inFlightStores.get(operationKey) === operation) inFlightStores.delete(operationKey);
   }
@@ -293,6 +300,7 @@ export async function getPieceFromNodes(
           const bytes = res.bytes;
           try {
             await options.validate?.(bytes, endpoint);
+            (options.metrics ?? defaultMetrics).increment("client_downloads_total", 1, { result: "success" });
             return { bytes, from: endpoint };
           } catch (err) {
             problems.push(`${endpoint.id}: ${toErrorMessage(err)}`);
@@ -304,8 +312,10 @@ export async function getPieceFromNodes(
       } catch (err) {
         problems.push(`${endpoint.id}: ${toErrorMessage(err)}`);
       }
+      if (attempt + 1 < attempts) (options.metrics ?? defaultMetrics).increment("client_retries_total", 1, { operation: "get", result: "error" });
       if (attempt + 1 < attempts) await backoff(options.retryBackoffMs, attempt);
     }
+    (options.metrics ?? defaultMetrics).increment("client_download_errors_total", 1, { result: "error" });
   }
   throw new Error(
     `piece "${pieceId}" unavailable from ${endpoints.length} node(s): ${problems.join("; ")}`,

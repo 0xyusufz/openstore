@@ -7,6 +7,7 @@ import {
   type RepairOptions,
   type RepairReport,
 } from "./repair.js";
+import { defaultMetrics, type MetricsRegistry } from "../../packages/metrics/index.js";
 
 export type RepairSchedulerState = "stopped" | "running" | "paused";
 export type RepairLifecycle =
@@ -75,6 +76,7 @@ export interface RepairSchedulerOptions {
     maxRetryBackoffMs?: number;
     repairOptions?: Omit<RepairOptions, "manifestStore" | "coordinator" | "lostNodeId" | "chunkIndex" | "signal">;
     onEvent?: (event: RepairSchedulerEvent) => void;
+    metrics?: MetricsRegistry;
   };
 }
 
@@ -108,6 +110,7 @@ const DEFAULT_RETRY_BACKOFF_MS = 250;
 const DEFAULT_MAX_RETRY_BACKOFF_MS = 10_000;
 
 export function createRepairScheduler(input: RepairSchedulerOptions): RepairScheduler {
+  const metrics = input.options?.metrics ?? defaultMetrics;
   if (!input || typeof input !== "object") throw new TypeError("options must be an object");
   if (!input.manifestStore || typeof input.manifestStore.list !== "function" || typeof input.manifestStore.load !== "function") {
     throw new TypeError("manifestStore must expose list and load");
@@ -146,6 +149,10 @@ export function createRepairScheduler(input: RepairSchedulerOptions): RepairSche
   };
 
   function emit(event: Omit<RepairSchedulerEvent, "queueDepth" | "activeCount" | "timestamp">): void {
+    if (event.type === "repair.confirmed-loss") metrics.increment("repair_confirmed_loss_total", 1, { result: "success" });
+    if (event.type === "repair.repairing") metrics.increment("repair_attempts_total", 1, { result: "success" });
+    if (event.type === "repair.completed") metrics.increment("repair_success_total", 1, { result: "success" });
+    if (event.type === "repair.failed") metrics.increment("repair_failures_total", 1, { result: "error" });
     options.onEvent?.({
       ...event,
       queueDepth: pending.size,

@@ -30,6 +30,7 @@ import type { P2PTransport } from "../../packages/p2p/index.js";
 import { MixedStorageTransport, HttpStorageTransport } from "./http-transport.js";
 import { createOperationRecordStore, type OperationRecordStore, releaseClaimOnNode } from "./provenance.js";
 import type { P2PProvenanceTransport } from "../../packages/p2p/index.js";
+import { defaultMetrics, type MetricsRegistry } from "../../packages/metrics/index.js";
 
 export const DELETE_VERSION = 1;
 
@@ -51,6 +52,7 @@ export interface DeleteFileOptions {
   /** Durable provenance operation records for identity-enabled upload/repair. */
   operationStore?: OperationRecordStore;
   provenanceTransport?: P2PProvenanceTransport;
+  metrics?: MetricsRegistry;
 }
 
 /**
@@ -125,6 +127,7 @@ export async function deleteFile(
   endpoints: StorageNodeEndpoint[],
   options: DeleteFileOptions = {},
 ): Promise<DeleteFileReport> {
+  (options.metrics ?? defaultMetrics).increment("client_deletes_total", 1, { result: "success" });
   const checked = revalidateManifest(manifest);
   if (endpoints.length === 0 && options.coordinator) {
     const known = options.coordinator.getKnownEndpoints?.() ?? options.coordinator.getEndpoints();
