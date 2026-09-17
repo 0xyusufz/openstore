@@ -98,6 +98,27 @@ condition responses may include the same safe aggregate when an adapter is
 wired into them. This is process-local and reset on restart; readiness,
 authentication, and operation policy are unchanged.
 
+## 052D DHT freshness and trust boundary
+
+DHT records are discovery-only and never authorize placement. OpenStore now
+wraps descriptors in a versioned record envelope containing `publishedAt`.
+Records are accepted only when their timestamp is a non-negative safe integer,
+not more than 30 seconds in the future, and no older than five minutes at
+observation time. A DHT query does not refresh or extend a record's age.
+
+The trust states are `fresh`, `stale`, `invalid`, and `unavailable`.
+Stale or invalid records are ignored rather than passed to peer refresh
+callbacks. Rejections are counted by bounded low-cardinality metrics with only
+`stale` or `invalid` reasons. Valid records continue to require the
+OpenStore Ed25519 public identity to derive the libp2p PeerId, an equal
+identity binding, and a matching `/p2p/` multiaddr suffix. Descriptor
+validation rejects private material recursively.
+
+Coordinator observations remain authoritative for placement and replacement.
+DHT does not override newer coordinator data, and no signed revocation record
+was added; revocation, durable expiry, and DHT record replacement authority
+remain future work.
+
 ## Non-goals
 
 052A does not add Raft, etcd, leader election, distributed locks, blockchain,

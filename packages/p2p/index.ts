@@ -47,6 +47,13 @@ export interface P2PPeerDescriptor extends P2PNodeDescriptor {
   identityBinding?: string;
 }
 
+/** Versioned application freshness metadata carried inside DHT records. */
+export interface OpenStoreDhtRecord {
+  version: 1;
+  publishedAt: number;
+  descriptor: P2PPeerDescriptor;
+}
+
 export interface PeerDiscovery {
   start(local: P2PPeerDescriptor, options?: PeerDiscoveryOptions): Promise<void>;
   advertise(local: P2PPeerDescriptor): Promise<void>;

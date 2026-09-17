@@ -660,3 +660,23 @@ Recommended 052D scope: reconcile client discovery state with coordinator and
 storage-node lifecycle diagnostics, add bounded reconnect outcome guidance,
 and define a future authenticated monitoring-consumer contract without
 introducing durable telemetry or coordinator HA.
+
+052D hardened DHT discovery without changing its authority boundary. DHT
+descriptors are published in a versioned record envelope with a bounded
+`publishedAt` timestamp. Records more than 30 seconds future-dated or five
+minutes old are rejected as invalid/stale; a query never renews record age.
+Fresh, stale, invalid, and unavailable are explicit trust outcomes, while
+stale/invalid records are ignored and counted through bounded
+`dht_record_rejections_total{reason=stale|invalid}` metrics.
+
+Existing identity validation remains mandatory: the OpenStore Ed25519 public
+key must derive the PeerId, identity binding must match, and a `/p2p/`
+multiaddr identity must match the descriptor. Private material is rejected.
+Static discovery behavior, bootstrap dialing, one-second DHT timeouts, and
+bounded refresh scheduling remain unchanged. Coordinator data remains the only
+placement authority; no DHT peer becomes placement eligible from discovery
+alone.
+
+Recommended 052E scope: define authenticated DHT revocation/expiry authority
+and reconciliation with coordinator observations only if a separate trust
+authority is established. Do not infer revocation from disappearance alone.

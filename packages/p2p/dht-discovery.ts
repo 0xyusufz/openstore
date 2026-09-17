@@ -8,10 +8,25 @@ import {
   type PeerDiscoveryOptions,
   type P2PPeerDescriptor,
   validateP2PPeerDescriptor,
+  type OpenStoreDhtRecord,
 } from "./index.js";
+import { defaultMetrics, type MetricsRegistry } from "../metrics/index.js";
 
 const RECORD_PREFIX = "openstore-peer-v1:";
 const DHT_OPERATION_TIMEOUT_MS = 1_000;
+const DHT_MAX_RECORD_AGE_MS = 5 * 60_000;
+const DHT_CLOCK_SKEW_MS = 30_000;
+
+export type DhtPeerTrustState = "fresh" | "stale" | "invalid" | "unavailable";
+export interface DhtTrustResult {
+  state: DhtPeerTrustState;
+  descriptor?: P2PPeerDescriptor;
+  ageMs?: number;
+}
+
+export interface DhtPeerDiscoveryOptions {
+  metrics?: MetricsRegistry;
+}
 
 type DhtNode = Libp2p<{ dht: KadDHT }>;
 
@@ -37,7 +52,10 @@ export class DhtPeerDiscovery implements PeerDiscovery {
   private lastPeerIds = new Set<string>();
   private refreshPromise?: Promise<void>;
 
-  constructor(bootstrapPeers: readonly P2PPeerDescriptor[] = []) {
+  private readonly metrics: MetricsRegistry;
+
+  constructor(bootstrapPeers: readonly P2PPeerDescriptor[] = [], options: DhtPeerDiscoveryOptions = {}) {
+    this.metrics = options.metrics ?? defaultMetrics;
     this.bootstrapPeers = bootstrapPeers.map(cloneAndValidate);
   }
 
@@ -102,7 +120,7 @@ export class DhtPeerDiscovery implements PeerDiscovery {
         // An unreachable or missing bootstrap record is not fatal.
       }
     }
-    return [...found.values()];
+    return deduplicateDhtDescriptors([...found.values()]);
   }
 
   async stop(): Promise<void> {
@@ -158,7 +176,19 @@ export class DhtPeerDiscovery implements PeerDiscovery {
         signal: AbortSignal.timeout(DHT_OPERATION_TIMEOUT_MS),
       })) {
         if (event.name !== "VALUE") continue;
-        const descriptor = decode(event.value);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(new TextDecoder().decode(event.value));
+        } catch {
+          this.recordRejection("invalid");
+          continue;
+        }
+        const trust = classifyDhtRecord(parsed);
+        if (trust.state !== "fresh" || trust.descriptor === undefined) {
+          this.recordRejection(trust.state === "stale" ? "stale" : "invalid");
+          continue;
+        }
+        const descriptor = trust.descriptor;
         if (descriptor.nodeId !== nodeId) throw new Error("DHT record peer identity mismatch");
         return descriptor;
       }
@@ -167,6 +197,10 @@ export class DhtPeerDiscovery implements PeerDiscovery {
     }
     return undefined;
   }
+
+  private recordRejection(reason: "stale" | "invalid"): void {
+    try { this.metrics.increment("dht_record_rejections_total", 1, { reason }); } catch {}
+  }
 }
 
 function recordKey(nodeId: string): Uint8Array {
@@ -174,13 +208,51 @@ function recordKey(nodeId: string): Uint8Array {
 }
 
 function encode(descriptor: P2PPeerDescriptor): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify(cloneAndValidate(descriptor)));
+  const record = createDhtRecord(descriptor);
+  return new TextEncoder().encode(JSON.stringify(record));
 }
 
-function decode(value: Uint8Array): P2PPeerDescriptor {
-  const parsed: unknown = JSON.parse(new TextDecoder().decode(value));
-  validateP2PPeerDescriptor(parsed);
-  return cloneAndValidate(parsed);
+export function createDhtRecord(descriptor: P2PPeerDescriptor, publishedAt = Date.now()): OpenStoreDhtRecord {
+  const record: OpenStoreDhtRecord = { version: 1, publishedAt, descriptor: cloneAndValidate(descriptor) };
+  validateDhtRecord(record);
+  return Object.freeze({ ...record, descriptor: Object.freeze({ ...record.descriptor, identity: Object.freeze({ ...record.descriptor.identity }), capabilities: Object.freeze({ ...record.descriptor.capabilities }) }) });
+}
+
+/** Deterministically keeps the first fresh descriptor for each peer identity. */
+export function deduplicateDhtDescriptors(peers: readonly P2PPeerDescriptor[]): P2PPeerDescriptor[] {
+  const seen = new Set<string>();
+  const result: P2PPeerDescriptor[] = [];
+  for (const peer of peers) {
+    const descriptor = cloneAndValidate(peer);
+    if (seen.has(descriptor.nodeId)) continue;
+    seen.add(descriptor.nodeId);
+    result.push(descriptor);
+  }
+  return result;
+}
+
+export function classifyDhtRecord(value: unknown, now = Date.now()): DhtTrustResult {
+  try {
+    if (!Number.isSafeInteger(now) || now < 0) throw new TypeError("invalid observation time");
+    validateDhtRecord(value);
+    const record = value as OpenStoreDhtRecord;
+    const ageMs = now - record.publishedAt;
+    if (ageMs < -DHT_CLOCK_SKEW_MS) return { state: "invalid", ageMs };
+    if (ageMs > DHT_MAX_RECORD_AGE_MS) return { state: "stale", ageMs };
+    return { state: "fresh", ageMs, descriptor: cloneAndValidate(record.descriptor) };
+  } catch {
+    return { state: "invalid" };
+  }
+}
+
+function validateDhtRecord(value: unknown): asserts value is OpenStoreDhtRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("DHT record must be an object");
+  const record = value as Record<string, unknown>;
+  if (record.version !== 1 || !Number.isSafeInteger(record.publishedAt) || (record.publishedAt as number) < 0) {
+    throw new TypeError("DHT record metadata is invalid");
+  }
+  validateP2PPeerDescriptor(record.descriptor);
+  cloneAndValidate(record.descriptor as P2PPeerDescriptor);
 }
 
 function cloneAndValidate(value: P2PPeerDescriptor): P2PPeerDescriptor {

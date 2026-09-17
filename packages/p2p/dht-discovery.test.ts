@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { multiaddr } from "@multiformats/multiaddr";
 import { peerIdFromOpenStorePrivateKey } from "./identity-binding.js";
 import { createIdentity } from "../identity/index.js";
-import { DhtPeerDiscovery } from "./dht-discovery.js";
+import { classifyDhtRecord, createDhtRecord, deduplicateDhtDescriptors, DhtPeerDiscovery } from "./dht-discovery.js";
 import { createLibp2pStorageNode, type Libp2pStorageNode } from "./libp2p.js";
 import type { P2PPeerDescriptor } from "./index.js";
 
@@ -26,6 +26,45 @@ function options(discovery: DhtPeerDiscovery) {
 }
 
 describe("DHT peer discovery (OPENSTORE-036)", () => {
+  it("classifies bounded fresh records and rejects stale/future/malformed timestamps", () => {
+    const identity = createIdentity();
+    const descriptor: P2PPeerDescriptor = {
+      nodeId: peerIdFromOpenStorePrivateKey(identity.privateKey, identity.publicKey),
+      baseUrl: "libp2p://peer",
+      identity: { publicKey: identity.publicKey.toString("base64") },
+      identityBinding: peerIdFromOpenStorePrivateKey(identity.privateKey, identity.publicKey),
+      capabilities: { pieceStore: true, pieceGet: true, pieceDelete: true },
+    };
+    expect(classifyDhtRecord(createDhtRecord(descriptor, 1_000), 1_001).state).toBe("fresh");
+    expect(classifyDhtRecord(createDhtRecord(descriptor, 1_000), 301_001).state).toBe("stale");
+    expect(classifyDhtRecord(createDhtRecord(descriptor, 40_000), 0).state).toBe("invalid");
+    expect(classifyDhtRecord({ version: 1, publishedAt: "now", descriptor }).state).toBe("invalid");
+  });
+
+  it("rejects DHT records with conflicting identity bindings", () => {
+    const identity = createIdentity();
+    const descriptor = {
+      nodeId: "not-the-peer",
+      baseUrl: "libp2p://not-the-peer",
+      identity: { publicKey: identity.publicKey.toString("base64") },
+      identityBinding: "not-the-peer",
+      capabilities: { pieceStore: true, pieceGet: true, pieceDelete: true },
+    };
+    expect(classifyDhtRecord({ version: 1, publishedAt: Date.now(), descriptor }).state).toBe("invalid");
+  });
+
+  it("deduplicates descriptor observations deterministically", () => {
+    const identity = createIdentity();
+    const descriptor: P2PPeerDescriptor = {
+      nodeId: peerIdFromOpenStorePrivateKey(identity.privateKey, identity.publicKey),
+      baseUrl: "libp2p://peer",
+      identity: { publicKey: identity.publicKey.toString("base64") },
+      identityBinding: peerIdFromOpenStorePrivateKey(identity.privateKey, identity.publicKey),
+      capabilities: { pieceStore: true, pieceGet: true, pieceDelete: true },
+    };
+    expect(deduplicateDhtDescriptors([descriptor, descriptor])).toHaveLength(1);
+  });
+
   it("publishes and discovers a local peer record, then connects", async () => {
     const secondDiscovery = new DhtPeerDiscovery();
     const second = await createLibp2pStorageNode(options(secondDiscovery));
