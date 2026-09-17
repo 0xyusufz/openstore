@@ -829,3 +829,22 @@ mutating controls; no HTTP control endpoint was added in this milestone.
 Valid persisted state remains synchronized/non-authoritative after restart;
 corrupt state remains rejected/unavailable until explicit rebootstrap. See
 `docs/053F-coordinator-replica-operations.md`.
+
+### Milestone 053G: coordinator HA integration boundary
+
+053G adds `packages/coordinator-ha/integration.ts`, a thin runtime adapter
+around the existing registry/coordinator. The registry remains the sole
+authoritative state owner; the adapter only exports bounded snapshots and
+proofs, delegates replica import/synchronization to the existing 053B–053F
+primitives, and exposes safe non-authoritative diagnostics.
+
+HA configuration defaults to disabled standalone mode. The only supported
+roles are `standalone` and `replica-observer`; observer mode requires one
+validated trusted coordinator instance ID and an injected state source.
+Invalid configuration fails closed. Startup/shutdown are explicit adapter
+`start()`/`stop()` operations, with no mandatory dependency for normal
+single-coordinator operation.
+
+053G does not add election, promotion, consensus, quorum, fencing, locks,
+client failover, DHT authority, or automatic trust migration. Existing 052B
+client outage behavior remains unchanged.
