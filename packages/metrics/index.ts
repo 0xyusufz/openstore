@@ -4,7 +4,7 @@ export interface MetricSnapshot { counters: MetricSample[]; gauges: MetricSample
 
 const NAME = /^[a-z][a-z0-9_]{0,127}$/;
 const VALUE = /^[a-z0-9][a-z0-9_.-]{0,31}$/;
-const ALLOWED_KEYS = new Set(["operation", "route", "result", "status_class", "transport", "reason"]);
+const ALLOWED_KEYS = new Set(["operation", "route", "result", "status_class", "transport", "reason", "state"]);
 const ALLOWED_VALUES: Record<string, Set<string>> = {
   operation: new Set(["request", "register", "heartbeat", "unregister", "store", "get", "head", "delete", "verify", "upload", "download", "repair"]),
   route: new Set(["request", "health", "status", "nodes", "register", "heartbeat", "unregister", "ready", "metrics", "pieces"]),
@@ -12,6 +12,7 @@ const ALLOWED_VALUES: Record<string, Set<string>> = {
   status_class: new Set(["2xx", "4xx", "5xx"]),
   transport: new Set(["http", "libp2p"]),
   reason: new Set(["capacity", "draining", "integrity", "transient", "permanent", "expired"]),
+  state: new Set(["fresh", "cached", "stale", "unavailable", "reconnecting"]),
 };
 
 function validateName(name: string): void {

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { coordinatorNodesToEndpoints, createCoordinatorAdapter, CoordinatorDiscoveryError, resolveEndpoints } from "./coordinator.js";
 import { createIdentity } from "../../packages/identity/index.js";
 import { peerIdFromOpenStorePublicKey } from "../../packages/p2p/identity-binding.js";
+import { EventStore } from "../../packages/events/index.js";
+import { MetricsRegistry } from "../../packages/metrics/index.js";
 
 const node = (id: string, transport: "http" | "libp2p" = "http") => ({
   nodeId: id,
@@ -100,5 +102,32 @@ describe("coordinator endpoint adapter (Milestone 042)", () => {
 
   it("rejects invalid freshness configuration", () => {
     expect(() => createCoordinatorAdapter({ baseUrl: "http://coordinator.test", freshness: { freshMaxAgeMs: 0 } })).toThrow();
+  });
+
+  it("emits one bounded event per discovery transition and exposes reconnecting", async () => {
+    let calls = 0;
+    let release: ((response: Response) => void) | undefined;
+    const fetch = vi.fn(() => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(new Response(JSON.stringify({ nodes: [node("stable")] }), { status: 200 }));
+      return new Promise<Response>((resolve) => { release = resolve; });
+    });
+    const events = new EventStore(20);
+    const metrics = new MetricsRegistry();
+    const adapter = createCoordinatorAdapter({ baseUrl: "http://coordinator.test", fetch, events, metrics });
+    await adapter.refresh();
+    const pending = adapter.refresh();
+    await Promise.resolve();
+    expect(adapter.discovery.freshness).toBe("reconnecting");
+    release?.(new Response(JSON.stringify({ nodes: [node("stable")] }), { status: 200 }));
+    await pending;
+    expect(adapter.discovery.freshness).toBe("fresh");
+    const transitionEvents = events.snapshot().filter((event) => event.type.startsWith("coordinator.discovery."));
+    expect(transitionEvents.map((event) => event.type)).toEqual([
+      "coordinator.discovery.fresh",
+      "coordinator.discovery.reconnecting",
+      "coordinator.discovery.fresh",
+    ]);
+    expect(metrics.snapshot().counters.find((sample) => sample.name === "coordinator_refresh_total" && sample.labels.result === "success")?.value).toBe(2);
   });
 });

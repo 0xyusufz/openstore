@@ -20,4 +20,14 @@ describe("condition evaluator", () => {
   it("rejects invalid thresholds", () => {
     expect(() => new ConditionEvaluator({ capacityWarningRatio: 2 })).toThrow();
   });
+
+  it("exposes coordinator discovery states as bounded conditions", () => {
+    const evaluator = new ConditionEvaluator();
+    const conditions = evaluator.evaluate({
+      coordinator: { discovery: { state: "stale", ageMs: 400, endpointCount: 2, freshAvailable: false } },
+    }, 5);
+    expect(conditions.find((condition) => condition.id === "coordinator-discovery-stale")).toMatchObject({ active: true, severity: "warning", observed: 400 });
+    expect(conditions.find((condition) => condition.id === "coordinator-discovery-fresh")?.active).toBe(false);
+    expect(JSON.stringify(conditions)).not.toMatch(/https?:|piece|filename|path|token/i);
+  });
 });

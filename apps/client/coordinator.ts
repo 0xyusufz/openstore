@@ -10,12 +10,16 @@ import { multiaddr } from "@multiformats/multiaddr";
 import { peerIdFromOpenStorePublicKey } from "../../packages/p2p/identity-binding.js";
 import { createRegistryClient, type RegistryClientErrorClassification } from "../../packages/registry/coordinator.js";
 import { DiscoveryCapabilityModel, type DiscoveryCapabilitySnapshot, type DiscoveryStateOptions } from "../../packages/discovery-state/index.js";
+import { defaultEvents, type EventStore } from "../../packages/events/index.js";
+import { defaultMetrics, type MetricsRegistry } from "../../packages/metrics/index.js";
 
 export interface CoordinatorAdapterOptions {
   baseUrl: string;
   token?: string;
   fetch?: typeof globalThis.fetch;
   freshness?: DiscoveryStateOptions;
+  metrics?: MetricsRegistry;
+  events?: EventStore;
 }
 
 export interface CoordinatorAdapter extends CoordinatorEndpointProvider {
@@ -136,15 +140,46 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
   };
   const baseUrl = options.baseUrl.replace(/\/+$/, "");
   const model = new DiscoveryCapabilityModel(options.freshness);
+  const metrics = options.metrics ?? defaultMetrics;
+  const events = options.events ?? defaultEvents;
   let discovery: DiscoveryCapabilitySnapshot = model.evaluate({ source: "coordinator", endpointCount: 0 });
+  let previousState = discovery.freshness;
+  const stateCode: Record<DiscoveryCapabilitySnapshot["freshness"], number> = {
+    fresh: 1, cached: 2, stale: 3, unavailable: 4, reconnecting: 5,
+  };
+  const recordDiscovery = (next: DiscoveryCapabilitySnapshot): void => {
+    metrics.set("coordinator_discovery_state", stateCode[next.freshness]);
+    metrics.set("coordinator_discovery_endpoint_count", next.endpointCount);
+    metrics.set("coordinator_discovery_observation_age_ms", next.ageMs ?? 0);
+    if (next.freshness !== previousState) {
+      try {
+        events.append({
+          version: 1, timestamp: Date.now(), component: "coordinator",
+          type: `coordinator.discovery.${next.freshness}` as
+            "coordinator.discovery.fresh" | "coordinator.discovery.cached" | "coordinator.discovery.stale" |
+            "coordinator.discovery.unavailable" | "coordinator.discovery.reconnecting",
+          severity: next.freshness === "stale" || next.freshness === "reconnecting" ? "warning" : next.freshness === "unavailable" ? "error" : "info",
+          details: { state: next.freshness, count: next.endpointCount },
+        });
+      } catch {}
+      previousState = next.freshness;
+    }
+    discovery = next;
+  };
   const refreshDiscovery = (): DiscoveryCapabilitySnapshot => {
-    discovery = model.evaluate({
+    const observation = {
       source: "coordinator",
       endpointCount: snapshot.length,
       ...(metadata.lastKnownGoodAt === undefined ? {} : { observedAt: metadata.lastKnownGoodAt }),
       now: Date.now(),
       reachable: metadata.consecutiveFailureCount === 0,
-    });
+      reconnecting: inFlight !== undefined,
+    } as const;
+    const initial = model.evaluate(observation);
+    const next = initial.freshness === "stale" && metadata.consecutiveFailureCount > 1
+      ? model.evaluate({ ...observation, usable: false })
+      : initial;
+    recordDiscovery(next);
     return discovery;
   };
 
@@ -170,6 +205,8 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
         freshAvailable: snapshot.length > 0,
       };
       discovery = model.evaluate({ source: "coordinator", endpointCount: snapshot.length, observedAt: lastRefreshAt, now: lastRefreshAt, reachable: true });
+      metrics.increment("coordinator_refresh_total", 1, { result: "success" });
+      recordDiscovery(discovery);
       return snapshot.slice();
     })().catch((error: unknown) => {
       lastError = error instanceof Error ? error : new Error(String(error));
@@ -181,6 +218,8 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
         ...(lastRefreshAt === undefined ? {} : { observedAt: lastRefreshAt }),
         reachable: false,
       });
+      metrics.increment("coordinator_refresh_total", 1, { result: "error" });
+      recordDiscovery(discovery);
       throw lastError;
     }).finally(() => {
       inFlight = undefined;

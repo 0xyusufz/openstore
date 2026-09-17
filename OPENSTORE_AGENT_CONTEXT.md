@@ -638,3 +638,25 @@ Recommended 052C scope: use these explicit state transitions in operator
 conditions/diagnostics and add lifecycle reconnect state where needed; keep
 HA/consensus, durable discovery leases, and DHT revocation/expiry as separate
 future design work.
+
+052C adds bounded coordinator discovery observability. The client adapter now
+accepts optional existing `MetricsRegistry` and `EventStore` instances and
+reports `fresh`, `cached`, `stale`, `unavailable`, and transient
+`reconnecting` state. It records only aggregate endpoint count and bounded
+observation age, increments low-cardinality refresh outcome/state metrics, and
+emits one sanitized event per state transition (not per diagnostic poll).
+Freshness policy and operation behavior are unchanged: new placement and
+repair replacement still require fresh information; existing manifest
+download/delete may use known replicas.
+
+The condition evaluator now exposes deterministic coordinator discovery
+conditions for all five states. Coordinator status, health, and conditions
+responses accept an additive safe discovery diagnostic containing only state,
+age, endpoint count, and fresh-placement availability. Readiness semantics and
+authentication are unchanged. These diagnostics/events/metrics are
+process-local and reset on restart.
+
+Recommended 052D scope: reconcile client discovery state with coordinator and
+storage-node lifecycle diagnostics, add bounded reconnect outcome guidance,
+and define a future authenticated monitoring-consumer contract without
+introducing durable telemetry or coordinator HA.

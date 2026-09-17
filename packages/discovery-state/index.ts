@@ -1,4 +1,4 @@
-export type DiscoveryFreshness = "fresh" | "cached" | "stale" | "unavailable";
+export type DiscoveryFreshness = "fresh" | "cached" | "stale" | "unavailable" | "reconnecting";
 export type DiscoverySource = "coordinator" | "cache" | "manual" | "dht";
 export type DiscoveryOperation = "upload" | "download" | "delete" | "repair";
 
@@ -22,6 +22,8 @@ export interface DiscoveryObservation {
   observedAt?: number;
   now?: number;
   reachable?: boolean;
+  reconnecting?: boolean;
+  usable?: boolean;
 }
 
 export interface DiscoveryStateOptions {
@@ -55,7 +57,11 @@ export class DiscoveryCapabilityModel {
     if (!Number.isSafeInteger(now) || now < 0) throw new TypeError("now must be a non-negative safe integer");
     let freshness: DiscoveryFreshness = "unavailable";
     let ageMs: number | undefined;
-    if (observation.endpointCount > 0 && observation.observedAt !== undefined) {
+    if (observation.usable === false) {
+      freshness = "unavailable";
+    } else if (observation.reconnecting === true) {
+      freshness = "reconnecting";
+    } else if (observation.endpointCount > 0 && observation.observedAt !== undefined) {
       if (!Number.isSafeInteger(observation.observedAt) || observation.observedAt < 0 || observation.observedAt > now) {
         throw new TypeError("observedAt must be a valid timestamp");
       }
@@ -66,7 +72,7 @@ export class DiscoveryCapabilityModel {
     } else if (observation.endpointCount > 0 && observation.source === "manual") {
       freshness = "cached";
     }
-    const usable = freshness !== "unavailable";
+    const usable = observation.endpointCount > 0 && freshness !== "unavailable";
     return Object.freeze({
       version: 1,
       freshness,

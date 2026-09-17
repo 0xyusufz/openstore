@@ -1,6 +1,8 @@
 export type EventSeverity = "info" | "warning" | "error";
 export type OperationalEventType =
   | "coordinator.started" | "coordinator.closed" | "coordinator.request"
+  | "coordinator.discovery.fresh" | "coordinator.discovery.cached" | "coordinator.discovery.stale"
+  | "coordinator.discovery.unavailable" | "coordinator.discovery.reconnecting"
   | "node.started" | "node.closed" | "node.draining" | "node.recovery"
   | "node.registration-failed" | "node.heartbeat-failed" | "node.reconnect-failed"
   | "storage.request-rejected" | "storage.request-error"
@@ -23,6 +25,8 @@ export interface OperationalEvent {
 
 const TYPES = new Set<OperationalEventType>([
   "coordinator.started", "coordinator.closed", "coordinator.request",
+  "coordinator.discovery.fresh", "coordinator.discovery.cached", "coordinator.discovery.stale",
+  "coordinator.discovery.unavailable", "coordinator.discovery.reconnecting",
   "node.started", "node.closed", "node.draining", "node.recovery",
   "node.registration-failed", "node.heartbeat-failed", "node.reconnect-failed",
   "storage.request-rejected", "storage.request-error",

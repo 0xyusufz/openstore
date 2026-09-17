@@ -75,6 +75,21 @@ describe("cross-process registry coordinator", () => {
     await coordinator.close();
   });
 
+  it("exposes safe coordinator discovery diagnostics", async () => {
+    const coordinator = createRegistryCoordinator({
+      registry: createRegistry(),
+      discovery: () => ({ state: "stale", ageMs: 5000, endpointCount: 2, freshAvailable: false }),
+    });
+    const port = await coordinator.listen(0);
+    const response = await fetch(`http://127.0.0.1:${port}/v1/status`);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { discovery?: Record<string, unknown>; conditions: Array<{ id: string; active: boolean }> };
+    expect(body.discovery).toEqual({ state: "stale", ageMs: 5000, endpointCount: 2, freshAvailable: false });
+    expect(body.conditions.some((condition) => condition.id === "coordinator-discovery-stale" && condition.active)).toBe(true);
+    expect(JSON.stringify(body)).not.toMatch(/https?:|node-id|piece|filename|path|token/i);
+    await coordinator.close();
+  });
+
   it("exposes safe persistence status and contextual client errors", async () => {
     const events: string[] = [];
     const coordinator = createRegistryCoordinator({

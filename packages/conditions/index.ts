@@ -1,4 +1,5 @@
 import type { MetricSnapshot } from "../metrics/index.js";
+import type { DiscoveryFreshness } from "../discovery-state/index.js";
 
 export type ConditionSeverity = "info" | "warning" | "critical";
 export interface Condition {
@@ -11,7 +12,7 @@ export interface Condition {
   message: string;
 }
 export interface ConditionInput {
-  coordinator?: { persistenceHealthy?: boolean; availableNodes?: number; unavailableNodes?: number };
+  coordinator?: { persistenceHealthy?: boolean; availableNodes?: number; unavailableNodes?: number; discovery?: { state?: DiscoveryFreshness; ageMs?: number; endpointCount?: number; freshAvailable?: boolean } };
   storage?: { draining?: boolean; usedBytes?: number; allocatedBytes?: number; availableBytes?: number };
   metrics?: MetricSnapshot;
   repair?: { failed?: number; queued?: number; active?: number; capacity?: number };
@@ -57,7 +58,14 @@ export class ConditionEvaluator {
     const orphanBacklog = n(input.orphan?.backlog);
     const orphanBatch = n(input.orphan?.batchSize);
     const orphanPressure = orphanBacklog !== undefined && orphanBatch !== undefined && orphanBacklog >= orphanBatch * t.orphanBacklogWarningRatio;
+    const discovery = input.coordinator?.discovery;
+    const discoveryState = discovery?.state;
     const conditions: Condition[] = [
+      { id: "coordinator-discovery-fresh", severity: "info", active: discoveryState === "fresh", timestamp, message: message(discoveryState === "fresh", "Coordinator discovery is fresh.", "Coordinator discovery is not fresh.") },
+      { id: "coordinator-discovery-cached", severity: "info", active: discoveryState === "cached", timestamp, message: message(discoveryState === "cached", "Coordinator discovery is cached and suitable only for existing replicas.", "Coordinator discovery is not cached.") },
+      { id: "coordinator-discovery-stale", severity: "warning", active: discoveryState === "stale", observed: discovery?.ageMs, timestamp, message: message(discoveryState === "stale", "Coordinator discovery is stale; new placement and repair are blocked.", "Coordinator discovery is not stale.") },
+      { id: "coordinator-discovery-unavailable", severity: "critical", active: discoveryState === "unavailable", observed: discovery?.endpointCount, threshold: 1, timestamp, message: message(discoveryState === "unavailable", "Coordinator discovery is unavailable; placement requires recovery.", "Coordinator discovery is available.") },
+      { id: "coordinator-discovery-reconnecting", severity: "warning", active: discoveryState === "reconnecting", timestamp, message: message(discoveryState === "reconnecting", "Coordinator discovery is reconnecting; wait for a fresh observation.", "Coordinator discovery is not reconnecting.") },
       { id: "coordinator-persistence-degraded", severity: "critical", active: input.coordinator?.persistenceHealthy === false, timestamp, message: message(input.coordinator?.persistenceHealthy === false, "Coordinator persistence is degraded; inspect registry storage and backups.", "Coordinator persistence is healthy.") },
       { id: "coordinator-no-available-nodes", severity: "critical", active: input.coordinator?.availableNodes === 0, observed: input.coordinator?.availableNodes, threshold: 0, timestamp, message: message(input.coordinator?.availableNodes === 0, "No storage nodes are available for placement.", "At least one storage node is available.") },
       { id: "storage-node-draining", severity: "warning", active: input.storage?.draining === true, timestamp, message: message(input.storage?.draining === true, "Storage node is draining and will reject new placement.", "Storage node is not draining.") },

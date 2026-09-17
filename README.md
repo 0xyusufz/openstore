@@ -183,3 +183,13 @@ Practical responses:
 No notifications, external alerting integration, durable condition history,
 dashboard, or exporter is provided. Operators can poll the endpoints or
 consume evaluator snapshots.
+
+Coordinator discovery diagnostics use five bounded states: `fresh` means a
+recent successful observation suitable for new placement and repair;
+`cached` means recent known information suitable only for existing replicas;
+`stale` means the bounded retention window has elapsed and placement/repair
+are blocked; `unavailable` means no usable observation exists; and
+`reconnecting` is a transient refresh-in-progress state. Discovery
+transitions are emitted once per state change and refresh outcomes are
+counted with low-cardinality metrics. These signals are process-local and
+reset on restart.

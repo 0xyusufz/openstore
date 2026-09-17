@@ -80,6 +80,24 @@ A future HA layer may replicate the registry behind this stable
 coordinator/discovery interface, but consensus, leader election, quorum, and
 external databases remain outside 052B.
 
+## 052C operational state visibility
+
+The client adapter exposes the same bounded state model through diagnostics:
+`fresh` is a recent successful coordinator observation that may drive new
+placement and repair; `cached` is known information retained after a failed
+refresh and is usable only for existing manifest replicas; `stale` is beyond
+the bounded retention window and cannot drive placement; `unavailable` means
+there is no usable observation; and `reconnecting` is a transient,
+refresh-in-progress state. Observation age, endpoint count, and placement
+availability are the only exposed fields.
+
+State transitions are emitted once through the bounded event store and
+refresh outcomes use low-cardinality metrics. The condition evaluator exposes
+one deterministic condition for each state. Coordinator status, health, and
+condition responses may include the same safe aggregate when an adapter is
+wired into them. This is process-local and reset on restart; readiness,
+authentication, and operation policy are unchanged.
+
 ## Non-goals
 
 052A does not add Raft, etcd, leader election, distributed locks, blockchain,

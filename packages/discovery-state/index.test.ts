@@ -22,4 +22,9 @@ describe("discovery capability model", () => {
     expect(() => new DiscoveryCapabilityModel({ freshMaxAgeMs: 10, staleAfterMs: 5 })).toThrow();
     expect(() => new DiscoveryCapabilityModel().evaluate({ source: "cache", endpointCount: -1 })).toThrow();
   });
+  it("distinguishes stale information from unavailable usable discovery", () => {
+    const model = new DiscoveryCapabilityModel({ freshMaxAgeMs: 10, staleAfterMs: 30 });
+    expect(model.evaluate({ source: "coordinator", endpointCount: 1, observedAt: 60, now: 100 }).freshness).toBe("stale");
+    expect(model.evaluate({ source: "coordinator", endpointCount: 1, observedAt: 60, now: 100, usable: false }).freshness).toBe("unavailable");
+  });
 });
