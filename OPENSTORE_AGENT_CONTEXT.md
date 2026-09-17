@@ -406,3 +406,41 @@ semantics are designed; blockchain, economics, consensus, public networking,
 and encryption changes remain out of scope.
 `npm run build`, `npm run typecheck`, and `git diff --check` also pass. Changes
 remain uncommitted and the pre-existing `.manual-043/` artifacts are preserved.
+
+## 20. Milestone 049A status
+
+Milestone 049A adds the explicit opt-in `RepairScheduler` in
+`apps/client/repair-scheduler.ts`. The scheduler scans persisted manifests
+once per cycle, obtains one fresh coordinator snapshot, identifies unavailable
+manifest-listed replicas, coalesces candidates by file/chunk/piece/lost-node,
+and invokes the existing `repairManifestReplica()` implementation. It does
+not duplicate source verification, opaque-piece copying, target selection, or
+manifest CAS logic.
+
+Scheduler state is in memory only and has `stopped`, `running`, and `paused`
+states. Per-candidate lifecycle events cover queueing, observation, confirmed
+loss, repair, completion, failure, cancellation, and node recovery. Events and
+status snapshots contain only safe identifiers, classifications, counters,
+timestamps, and bounded retry metadata; piece bytes, plaintext, keys,
+credentials, and signatures are never included.
+
+Global repair concurrency defaults to two and per-file concurrency defaults to
+one. Queue size, scheduler retry rounds, exponential backoff, and cooldown
+are bounded and configurable. Coordinator outages do not confirm loss or
+select targets from stale metadata. Restarting the scheduler rescans
+manifests and starts fresh observations; no repair journal was added.
+
+049A never deletes storage pieces. In particular, a successful target write
+followed by a failed or conflicting manifest CAS leaves the opaque piece
+untouched. Automatic orphan cleanup/garbage collection is explicitly deferred
+to 049B because current storage nodes lack safe ownership/provenance metadata.
+Coordinator draining semantics were not invented or expanded.
+
+Focused unit coverage is in `apps/client/repair-scheduler.test.ts`. Real
+child-process coverage is in `tests/integration/milestone-049a.test.ts`; it
+verifies restart-before-confirmation, confirmed loss, repair from A to C,
+identical ciphertext, manifest replacement, and plaintext download.
+
+Milestone 049A validation: **57 test files, 391 tests passed**;
+`npm run build`, `npm run typecheck`, and `git diff --check` passed. No commit
+or push has been made.
