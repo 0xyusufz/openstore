@@ -1,0 +1,12 @@
+.git
+.github
+.manual-043
+.env
+.env.*
+!.env.example
+node_modules
+dist
+coverage
+data
+storage
+*.log

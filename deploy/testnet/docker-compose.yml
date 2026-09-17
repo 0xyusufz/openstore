@@ -1,0 +1,86 @@
+services:
+  coordinator:
+    build:
+      context: ../..
+      dockerfile: deploy/testnet/Dockerfile
+    entrypoint: ["/usr/local/bin/entrypoint-coordinator.sh"]
+    environment:
+      OPENSTORE_COORDINATOR_TOKEN: "${OPENSTORE_COORDINATOR_TOKEN:?set in .env.testnet}"
+      OPENSTORE_COORDINATOR_PERSISTENCE: /var/lib/openstore/coordinator/registry.json
+      OPENSTORE_COORDINATOR_PORT: "4190"
+      OPENSTORE_COORDINATOR_HEARTBEAT_TIMEOUT_MS: "3000"
+    ports:
+      - "127.0.0.1:4190:4190"
+    volumes:
+      - coordinator-registry:/var/lib/openstore/coordinator
+    networks: [openstore-net]
+
+  node-1:
+    build:
+      context: ../..
+      dockerfile: deploy/testnet/Dockerfile
+    environment:
+      OPENSTORE_COORDINATOR_TOKEN: "${OPENSTORE_COORDINATOR_TOKEN:?set in .env.testnet}"
+      OPENSTORE_NODE_PASSWORD: "${OPENSTORE_NODE_1_PASSWORD:?set in .env.testnet}"
+      OPENSTORE_NODE_IDENTITY: /var/lib/openstore/identity/identity.json
+      OPENSTORE_NODE_STORAGE: /var/lib/openstore/pieces
+      OPENSTORE_NODE_LISTEN_ADDR: /dns4/node-1/tcp/4101
+      OPENSTORE_COORDINATOR_URL: http://coordinator:4190
+    ports:
+      - "127.0.0.1:4101:4101"
+    volumes:
+      - node-1-identity:/var/lib/openstore/identity
+      - node-1-pieces:/var/lib/openstore/pieces
+    networks: [openstore-net]
+    depends_on: [coordinator]
+
+  node-2:
+    build:
+      context: ../..
+      dockerfile: deploy/testnet/Dockerfile
+    environment:
+      OPENSTORE_COORDINATOR_TOKEN: "${OPENSTORE_COORDINATOR_TOKEN:?set in .env.testnet}"
+      OPENSTORE_NODE_PASSWORD: "${OPENSTORE_NODE_2_PASSWORD:?set in .env.testnet}"
+      OPENSTORE_NODE_IDENTITY: /var/lib/openstore/identity/identity.json
+      OPENSTORE_NODE_STORAGE: /var/lib/openstore/pieces
+      OPENSTORE_NODE_LISTEN_ADDR: /dns4/node-2/tcp/4102
+      OPENSTORE_COORDINATOR_URL: http://coordinator:4190
+    ports:
+      - "127.0.0.1:4102:4102"
+    volumes:
+      - node-2-identity:/var/lib/openstore/identity
+      - node-2-pieces:/var/lib/openstore/pieces
+    networks: [openstore-net]
+    depends_on: [coordinator]
+
+  node-3:
+    build:
+      context: ../..
+      dockerfile: deploy/testnet/Dockerfile
+    environment:
+      OPENSTORE_COORDINATOR_TOKEN: "${OPENSTORE_COORDINATOR_TOKEN:?set in .env.testnet}"
+      OPENSTORE_NODE_PASSWORD: "${OPENSTORE_NODE_3_PASSWORD:?set in .env.testnet}"
+      OPENSTORE_NODE_IDENTITY: /var/lib/openstore/identity/identity.json
+      OPENSTORE_NODE_STORAGE: /var/lib/openstore/pieces
+      OPENSTORE_NODE_LISTEN_ADDR: /dns4/node-3/tcp/4103
+      OPENSTORE_COORDINATOR_URL: http://coordinator:4190
+    ports:
+      - "127.0.0.1:4103:4103"
+    volumes:
+      - node-3-identity:/var/lib/openstore/identity
+      - node-3-pieces:/var/lib/openstore/pieces
+    networks: [openstore-net]
+    depends_on: [coordinator]
+
+volumes:
+  coordinator-registry:
+  node-1-identity:
+  node-1-pieces:
+  node-2-identity:
+  node-2-pieces:
+  node-3-identity:
+  node-3-pieces:
+
+networks:
+  openstore-net:
+    driver: bridge

@@ -537,3 +537,27 @@ Focused coverage is in `apps/client/delete-provenance.test.ts`; the full
 suite passed with **64 test files and 403 tests**, alongside successful
 build, typecheck, and `git diff --check`. Changes remain uncommitted and
 unpushed.
+
+## 24. Milestone 050A Docker testnet packaging
+
+050A adds packaging only under `deploy/testnet/`. The Compose topology
+contains one authenticated coordinator and three independent standalone
+libp2p storage-node services on an isolated bridge network. The coordinator
+persists its registry state; every node has separate named identity and
+piece/provenance volumes. Nodes advertise container-reachable
+`/dns4/node-N/tcp/410N` multiaddrs while host-published ports remain loopback
+only.
+
+`deploy/testnet/Dockerfile` builds the existing TypeScript runtime into a
+minimal Node image. Entrypoints inject coordinator tokens and node keystore
+passwords only through environment variables. A node generates an encrypted
+identity keystore on first start only when its persistent identity path is
+absent, using the existing identity format and restrictive permissions.
+Secrets and `.env.testnet` are excluded from the Docker build context.
+
+050A does not add a client daemon, operator orchestration wrapper, Docker
+failure smoke test, scanner CLI flags, or protocol changes. Those remain
+planned for 050B/050C. Packaging validation passed, including **65 test files
+and 405 tests**, `npm run build`, `npm run typecheck`, `git diff --check`, and
+`docker compose config` using the placeholder environment example. Changes
+remain uncommitted and unpushed.
