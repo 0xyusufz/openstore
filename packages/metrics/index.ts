@@ -11,7 +11,10 @@ const ALLOWED_VALUES: Record<string, Set<string>> = {
   result: new Set(["success", "error", "rejected", "absent"]),
   status_class: new Set(["2xx", "4xx", "5xx"]),
   transport: new Set(["http", "libp2p"]),
-  reason: new Set(["capacity", "draining", "integrity", "transient", "permanent", "expired", "stale", "invalid"]),
+  reason: new Set(["capacity", "draining", "integrity", "transient", "permanent", "expired", "stale", "invalid",
+    "missing_issuer", "uninitialized_issuer", "corrupt_issuer", "corrupt_candidate",
+    "corrupt_ownership", "epoch_mismatch", "issuer_identity_mismatch", "ownership_conflict",
+    "validation_failure", "revoked_grant"]),
   state: new Set(["fresh", "cached", "stale", "unavailable", "reconnecting"]),
 };
 

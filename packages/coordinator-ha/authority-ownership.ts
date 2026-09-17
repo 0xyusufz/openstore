@@ -38,6 +38,7 @@ export interface AuthorityOwnershipService {
   establishOwnership(token: AuthorityOwnershipToken): Promise<void>;
   inspectOwnership(): AuthorityOwnershipRecord;
   persistenceHealthy(): boolean;
+  persistenceState(): "missing" | "valid" | "corrupt";
   releaseOwnership(reason: string): Promise<void>;
   fenceOwner(reason: string): Promise<void>;
 }
@@ -88,6 +89,7 @@ export function createAuthorityOwnershipService(options: AuthorityOwnershipOptio
   if (!INSTANCE_ID.test(options.instance.instanceId) || trusted.size !== 1 || !options.persistencePath) throw new TypeError("ownership configuration is invalid");
   let record: AuthorityOwnershipRecord = Object.freeze({ version: 1, state: "non-authoritative", authorityEpoch: 0, conflict: false });
   let healthy = true;
+  let persistenceState: "missing" | "valid" | "corrupt" = "missing";
   try {
     const parsed = JSON.parse(readFileSync(options.persistencePath, "utf8")) as AuthorityOwnershipRecord;
     if (parsed.version !== 1 || !["non-authoritative", "authoritative", "released", "fenced"].includes(parsed.state) ||
@@ -96,7 +98,8 @@ export function createAuthorityOwnershipService(options: AuthorityOwnershipOptio
       (parsed.tokenId !== undefined && !ID.test(parsed.tokenId)) ||
       (parsed.acceptedGrantId !== undefined && !ID.test(parsed.acceptedGrantId))) throw new Error("invalid ownership state");
     record = Object.freeze(parsed);
-  } catch { healthy = !existsSync(options.persistencePath); }
+    persistenceState = "valid";
+  } catch { healthy = !existsSync(options.persistencePath); persistenceState = healthy ? "missing" : "corrupt"; }
   const persist = (next: AuthorityOwnershipRecord): void => {
     if (!healthy && record.state === "non-authoritative" && readFileSafe(options.persistencePath)) throw new Error("ownership persistence is unavailable");
     const path = options.persistencePath; mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -104,7 +107,7 @@ export function createAuthorityOwnershipService(options: AuthorityOwnershipOptio
     try {
       writeFileSync(fd, `${JSON.stringify(next)}\n`, "utf8"); fsyncSync(fd); closeSync(fd); chmodSync(temp, 0o600); renameSync(temp, path);
       const directoryFd = openSync(dirname(path), "r"); try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
-      record = Object.freeze(next); healthy = true;
+      record = Object.freeze(next); healthy = true; persistenceState = "valid";
     } catch (error) { try { closeSync(fd); } catch {} try { unlinkSync(temp); } catch {} healthy = false; throw error; }
   };
   const validate = (token: AuthorityOwnershipToken): void => {
@@ -148,6 +151,7 @@ export function createAuthorityOwnershipService(options: AuthorityOwnershipOptio
     },
     inspectOwnership: () => Object.freeze({ ...record }),
     persistenceHealthy: () => healthy,
+    persistenceState: () => persistenceState,
     async releaseOwnership(_reason) { persist({ ...record, state: "released", transitionedAt: now() }); },
     async fenceOwner(_reason) { persist({ ...record, state: "fenced", transitionedAt: now() }); },
   };

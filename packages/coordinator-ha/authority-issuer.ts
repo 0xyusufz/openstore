@@ -73,7 +73,7 @@ export interface AuthorityIssuerService {
   isRevoked(grantId: string): boolean;
   inspectRevocation(grantId: string): AuthorityRevocationRecord | undefined;
   revocations(): readonly AuthorityRevocationRecord[];
-  inspect(): { readonly initialized: boolean; readonly issuerInstanceId: string; readonly authorityEpoch: number; readonly auditCount: number; readonly persistenceHealthy: boolean };
+  inspect(): { readonly initialized: boolean; readonly issuerInstanceId: string; readonly authorityEpoch: number; readonly auditCount: number; readonly persistenceHealthy: boolean; readonly persistenceState: "missing" | "valid" | "corrupt" };
   audits(): readonly IssuedGrantAudit[];
 }
 
@@ -114,6 +114,7 @@ export function createAuthorityIssuer(options: AuthorityIssuerOptions): Authorit
     issuerPublicKey: issuer.publicKey, authorityEpoch: 0, audits: [], revokedGrantIds: [], revocations: [],
   };
   let persistenceHealthy = true;
+  let persistenceState: "missing" | "valid" | "corrupt" = "missing";
   try {
     const parsed = JSON.parse(readFileSync(options.persistencePath, "utf8")) as IssuerState;
     if (parsed.version !== 1 || parsed.issuerInstanceId !== issuer.instanceId || parsed.issuerPublicKey !== issuer.publicKey ||
@@ -123,8 +124,10 @@ export function createAuthorityIssuer(options: AuthorityIssuerOptions): Authorit
       parsed.revocations.some((record) => !validRevocation(record, issuer.instanceId)) ||
       parsed.revokedGrantIds.some((grantId) => typeof grantId !== "string" || !GRANT_ID.test(grantId))) throw new Error("invalid issuer state");
     current = Object.freeze({ ...parsed, audits: Object.freeze([...parsed.audits]), revokedGrantIds: Object.freeze([...parsed.revokedGrantIds]), revocations: Object.freeze([...parsed.revocations]) });
+    persistenceState = "valid";
   } catch {
     persistenceHealthy = !existsSync(options.persistencePath);
+    persistenceState = persistenceHealthy ? "missing" : "corrupt";
   }
   const persist = (next: IssuerState): void => {
     const path = options.persistencePath;
@@ -135,7 +138,7 @@ export function createAuthorityIssuer(options: AuthorityIssuerOptions): Authorit
       writeFileSync(fd, `${JSON.stringify(next)}\n`, "utf8"); fsyncSync(fd); closeSync(fd); chmodSync(temp, 0o600); renameSync(temp, path);
       const directoryFd = openSync(dirname(path), "r"); try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
       current = Object.freeze({ ...next, audits: Object.freeze([...next.audits]), revokedGrantIds: Object.freeze([...next.revokedGrantIds]), revocations: Object.freeze([...next.revocations]) });
-      persistenceHealthy = true;
+      persistenceHealthy = true; persistenceState = "valid";
     } catch (error) { try { closeSync(fd); } catch {} try { unlinkSync(temp); } catch {} persistenceHealthy = false; throw error; }
   };
   const ensureCaller = (request: AuthorityIssuanceRequest): void => {
@@ -186,7 +189,7 @@ export function createAuthorityIssuer(options: AuthorityIssuerOptions): Authorit
     isRevoked: (grantId) => current.revokedGrantIds.includes(grantId),
     inspectRevocation: (grantId) => current.revocations.find((record) => record.grantId === grantId),
     revocations: () => Object.freeze(current.revocations.map((record) => ({ ...record }))),
-    inspect: () => ({ initialized: current.initialized, issuerInstanceId: current.issuerInstanceId, authorityEpoch: current.authorityEpoch, auditCount: current.audits.length, persistenceHealthy }),
+    inspect: () => ({ initialized: current.initialized, issuerInstanceId: current.issuerInstanceId, authorityEpoch: current.authorityEpoch, auditCount: current.audits.length, persistenceHealthy, persistenceState }),
     audits: () => Object.freeze(current.audits.map((audit) => ({ ...audit }))),
   };
 }

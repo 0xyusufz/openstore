@@ -2,9 +2,16 @@ import type { AuthorityControlPlane } from "./authority-control-plane.js";
 import type { createAuthorityGrantService } from "./authority-grant.js";
 import type { AuthorityIssuerService } from "./authority-issuer.js";
 import type { AuthorityOwnershipService, AuthorityOwnershipToken } from "./authority-ownership.js";
+import type { EventStore, OperationalEventType } from "../events/index.js";
+import type { MetricsRegistry } from "../metrics/index.js";
+import type { Condition, ConditionEvaluator } from "../conditions/index.js";
 import { evaluateAuthorityState, type AuthorityEligibility } from "./authority-contract.js";
 
 export type CoordinatorAuthorityRuntimeState = "stopped" | "running" | "degraded";
+export type AuthorityRuntimeFailureCode =
+  | "missing_issuer" | "uninitialized_issuer" | "corrupt_issuer" | "corrupt_candidate"
+  | "corrupt_ownership" | "epoch_mismatch" | "issuer_identity_mismatch"
+  | "ownership_conflict" | "validation_failure";
 
 export interface CoordinatorAuthorityRuntimeStatus {
   readonly state: CoordinatorAuthorityRuntimeState;
@@ -15,6 +22,8 @@ export interface CoordinatorAuthorityRuntimeStatus {
   readonly ownershipPersistenceHealthy: boolean;
   readonly candidateState: ReturnType<ReturnType<typeof createAuthorityGrantService>["inspectState"]>;
   readonly ownership: ReturnType<AuthorityOwnershipService["inspectOwnership"]>;
+  readonly failureCode?: AuthorityRuntimeFailureCode;
+  readonly conditions: readonly Condition[];
   readonly lastTransition: "none" | "started" | "stopped" | "accepted" | "released" | "fenced" | "failed";
 }
 
@@ -34,11 +43,28 @@ export interface CoordinatorAuthorityRuntimeOptions {
   readonly ownership: AuthorityOwnershipService;
   readonly issuerInstanceId: string;
   readonly candidate: ReturnType<typeof createAuthorityGrantService>;
+  readonly events?: EventStore;
+  readonly metrics?: MetricsRegistry;
+  readonly conditions?: ConditionEvaluator;
+  readonly now?: () => number;
 }
 
 export function createCoordinatorAuthorityRuntime(options: CoordinatorAuthorityRuntimeOptions): CoordinatorAuthorityRuntime {
   let lifecycle: CoordinatorAuthorityRuntimeState = "stopped";
   let lastTransition: CoordinatorAuthorityRuntimeStatus["lastTransition"] = "none";
+  let failureCode: AuthorityRuntimeFailureCode | undefined;
+  const now = options.now ?? (() => Date.now());
+  const metric = (name: string): void => { try { options.metrics?.increment(name); } catch { /* observability cannot alter safety */ } };
+  const event = (type: OperationalEventType, severity: "info" | "warning" | "error", details: Record<string, string | number | boolean> = {}): void => {
+    try { options.events?.append({ version: 1, timestamp: now(), component: "coordinator", type, severity, details }); } catch { /* observability cannot alter safety */ }
+  };
+  const classify = (message?: string): AuthorityRuntimeFailureCode => {
+    if (message?.includes("revoked")) return "validation_failure";
+    if (message?.includes("conflict")) return "ownership_conflict";
+    if (message?.includes("issuer identity")) return "issuer_identity_mismatch";
+    if (message?.includes("epoch")) return "epoch_mismatch";
+    return "validation_failure";
+  };
 
   const status = (): CoordinatorAuthorityRuntimeStatus => {
     const issuer = options.issuer.inspect();
@@ -47,15 +73,28 @@ export function createCoordinatorAuthorityRuntime(options: CoordinatorAuthorityR
     const candidatePersistenceHealthy = options.candidate.persistenceHealthy();
     const ownershipPersistenceHealthy = options.ownership.persistenceHealthy();
     const consistent = isConsistent(issuer, candidateState, ownership, candidatePersistenceHealthy, ownershipPersistenceHealthy, options.issuerInstanceId);
+    const authority = evaluateAuthorityState(issuer.initialized && consistent && candidateState.state === "authoritative" && ownership.state === "authoritative" ? "authoritative" : "unknown");
+    const conditions = options.conditions?.evaluate({
+      authority: {
+        lifecycle,
+        authoritative: authority.placementAuthorized,
+        persistenceHealthy: issuer.persistenceHealthy && candidatePersistenceHealthy && ownershipPersistenceHealthy,
+        persistenceCorrupt: issuer.persistenceState === "corrupt" || options.candidate.persistenceState() === "corrupt" || options.ownership.persistenceState() === "corrupt",
+        ownershipConflict: ownership.conflict || failureCode === "ownership_conflict",
+        fenced: ownership.state === "fenced",
+      },
+    }, now()) ?? [];
     return Object.freeze({
       state: lifecycle === "running" && !consistent ? "degraded" : lifecycle,
-      authority: evaluateAuthorityState(issuer.initialized && consistent && candidateState.state === "authoritative" && ownership.state === "authoritative" ? "authoritative" : "unknown"),
+      authority,
       issuerInstanceId: options.issuerInstanceId,
       issuerPersistenceHealthy: issuer.persistenceHealthy,
       candidatePersistenceHealthy,
       ownershipPersistenceHealthy,
       candidateState,
       ownership,
+      failureCode,
+      conditions,
       lastTransition,
     });
   };
@@ -64,38 +103,80 @@ export function createCoordinatorAuthorityRuntime(options: CoordinatorAuthorityR
     async start() {
       if (lifecycle === "running") return;
       const current = status();
+      const issuer = options.issuer.inspect();
+      const candidateState = options.candidate.inspectState();
+      const ownership = options.ownership.inspectOwnership();
+      if (issuer.persistenceState === "corrupt") {
+        failureCode = "corrupt_issuer"; lifecycle = "degraded"; lastTransition = "failed"; metric("authority_runtime_start_failures_total"); metric("authority_persistence_corrupt_total"); event("authority.startup.blocked", "error", { classification: failureCode }); throw new Error("authority runtime persistence is corrupt and invalid");
+      }
+      if (options.candidate.persistenceState() === "corrupt") {
+        failureCode = "corrupt_candidate"; lifecycle = "degraded"; lastTransition = "failed"; metric("authority_runtime_start_failures_total"); metric("authority_persistence_corrupt_total"); event("authority.startup.blocked", "error", { classification: failureCode }); throw new Error("authority candidate persistence is corrupt and invalid");
+      }
+      if (options.ownership.persistenceState() === "corrupt") {
+        failureCode = "corrupt_ownership"; lifecycle = "degraded"; lastTransition = "failed"; metric("authority_runtime_start_failures_total"); metric("authority_persistence_corrupt_total"); event("authority.startup.blocked", "error", { classification: failureCode }); throw new Error("authority ownership persistence is corrupt and invalid");
+      }
+      if (!issuer.initialized) {
+        failureCode = issuer.persistenceState === "missing" ? "missing_issuer" : "uninitialized_issuer";
+        lifecycle = "running"; lastTransition = "started"; metric("authority_runtime_starts_total"); metric("authority_runtime_non_authoritative_total"); metric("authority_persistence_degraded_total"); event("authority.startup.blocked", "warning", { classification: failureCode }); return;
+      }
       if (!current.issuerPersistenceHealthy || !current.candidatePersistenceHealthy || !current.ownershipPersistenceHealthy ||
         (current.issuerPersistenceHealthy && options.issuer.inspect().initialized &&
           !isConsistent(options.issuer.inspect(), current.candidateState, current.ownership,
             current.candidatePersistenceHealthy, current.ownershipPersistenceHealthy, options.issuerInstanceId))) {
+        failureCode = issuer.issuerInstanceId !== options.issuerInstanceId ? "issuer_identity_mismatch" :
+          (candidateState.authorityEpoch !== issuer.authorityEpoch || ownership.authorityEpoch !== issuer.authorityEpoch) ? "epoch_mismatch" :
+          ownership.conflict ? "ownership_conflict" : "validation_failure";
         lifecycle = "degraded";
         lastTransition = "failed";
+        metric("authority_runtime_start_failures_total");
+        event("authority.startup.blocked", "error", { classification: failureCode });
         throw new Error("authority runtime persistence or state is invalid");
       }
       lifecycle = "running";
       lastTransition = "started";
+      failureCode = undefined;
+      metric("authority_runtime_starts_total");
+      event("authority.runtime.started", "info");
+      if (candidateState.state === "authoritative") { metric("authority_runtime_restored_total"); event("authority.state.restored", "info", { epoch: issuer.authorityEpoch }); }
+      if (ownership.state === "authoritative") { event("authority.ownership.restored", "info", { epoch: ownership.authorityEpoch }); }
     },
     async stop() {
       if (lifecycle === "stopped") return;
       lifecycle = "stopped";
       lastTransition = "stopped";
+      metric("authority_runtime_stops_total");
+      event("authority.runtime.stopped", "info");
     },
     status,
-    validateOwnershipToken: (token) => options.ownership.validateOwnershipToken(token),
+    validateOwnershipToken: (token) => {
+      const valid = options.ownership.validateOwnershipToken(token);
+      if (!valid) { metric("authority_token_validation_failures_total"); event("authority.token.rejected", "warning", { classification: "validation_failure" }); }
+      return valid;
+    },
     async establishOwnership() {
       if (lifecycle !== "running") throw new Error("authority runtime is not running");
-      await options.controlPlane.establishOwnership();
-      lastTransition = "accepted";
+      try {
+        await options.controlPlane.establishOwnership();
+        lastTransition = "accepted"; metric("authority_ownership_establish_success_total"); event("authority.ownership.established", "info");
+      } catch (error) {
+        failureCode = classify(error instanceof Error ? error.message : undefined);
+        metric("authority_ownership_establish_failures_total");
+        if (failureCode === "validation_failure" && error instanceof Error && error.message.includes("revoked")) { metric("authority_revoked_grant_rejections_total"); event("authority.grant.revoked", "warning", { classification: "revoked_grant" }); }
+        else event("authority.ownership.failed", "warning", { classification: failureCode });
+        throw error;
+      }
     },
     async releaseOwnership(reason) {
       if (lifecycle !== "running") throw new Error("authority runtime is not running");
       await options.controlPlane.releaseOwnership(reason);
       lastTransition = "released";
+      metric("authority_ownership_releases_total"); event("authority.ownership.released", "info");
     },
     async fenceOwner(reason) {
       if (lifecycle !== "running") throw new Error("authority runtime is not running");
       await options.controlPlane.fenceOwner(reason);
       lastTransition = "fenced";
+      metric("authority_owner_fencing_total"); event("authority.owner.fenced", "warning");
     },
   };
 }
@@ -113,6 +194,6 @@ function isConsistent(
   if (candidate.state !== "non-authoritative" && candidate.authorityEpoch !== issuer.authorityEpoch) return false;
   if (ownership.state !== "non-authoritative" &&
     (ownership.authorityEpoch !== issuer.authorityEpoch || ownership.issuerInstanceId !== issuer.issuerInstanceId)) return false;
-  if (ownership.state === "authoritative" && candidate.state !== "authoritative") return false;
+  if (ownership.conflict || (ownership.state === "authoritative" && candidate.state !== "authoritative")) return false;
   return true;
 }

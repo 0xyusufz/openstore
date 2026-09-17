@@ -996,3 +996,17 @@ unauthenticated HTTP mutation endpoint.
 Default coordinator behavior, placement authority, client outage semantics,
 DHT discovery-only behavior, and replica non-authority remain unchanged. See
 `docs/053N-cross-process-authority-runtime.md`.
+
+### Milestone 053O: authority runtime operational observability
+
+053O adds bounded EventStore events, MetricsRegistry counters, sanitized
+authority conditions, and stable runtime failure classifications around the
+053N lifecycle. Signals cover startup/shutdown, restored authority/ownership,
+missing or corrupt persistence, epoch and issuer-identity mismatches,
+ownership operations, token rejection, and revoked-grant rejection.
+
+Observability failures are swallowed and cannot affect fail-closed authority
+validation. Events contain only safe classifications and bounded epoch data;
+metrics have no per-token, per-grant, or per-instance labels. Conditions are
+diagnostic only and never authorize promotion or failover. See
+`docs/053O-authority-runtime-observability.md`.

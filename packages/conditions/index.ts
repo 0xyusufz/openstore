@@ -19,6 +19,14 @@ export interface ConditionInput {
   orphan?: { failed?: boolean; backlog?: number; batchSize?: number };
   lifecycle?: { reconnecting?: boolean; unavailable?: boolean };
   replica?: { state?: string; persistenceHealthy?: boolean; conflictReason?: string };
+  authority?: {
+    lifecycle?: "stopped" | "running" | "degraded";
+    authoritative?: boolean;
+    persistenceHealthy?: boolean;
+    persistenceCorrupt?: boolean;
+    ownershipConflict?: boolean;
+    fenced?: boolean;
+  };
 }
 export interface ConditionThresholds {
   capacityWarningRatio: number;
@@ -83,6 +91,14 @@ export class ConditionEvaluator {
         { id: "replica-conflicted", severity: "critical" as const, active: input.replica.state === "conflicted", timestamp, message: message(input.replica.state === "conflicted", "Coordinator replica state is conflicted; operator rebootstrap is required.", "Coordinator replica is not conflicted.") },
         { id: "replica-bootstrap-failed", severity: "critical" as const, active: input.replica.state === "rejected" || input.replica.state === "unavailable", timestamp, message: message(input.replica.state === "rejected" || input.replica.state === "unavailable", "Coordinator replica bootstrap or synchronization failed.", "Coordinator replica bootstrap is not failed.") },
         { id: "replica-persistence-degraded", severity: "critical" as const, active: input.replica.persistenceHealthy === false, timestamp, message: message(input.replica.persistenceHealthy === false, "Coordinator replica persistence is degraded.", "Coordinator replica persistence is healthy.") },
+      ] : []),
+      ...(input.authority ? [
+        { id: "authority_runtime_ready", severity: "info" as const, active: input.authority.lifecycle === "running" && input.authority.authoritative === true, timestamp, message: message(input.authority.lifecycle === "running" && input.authority.authoritative === true, "Authority runtime is ready and authoritative.", "Authority runtime is not authoritative.") },
+        { id: "authority_runtime_non_authoritative", severity: "warning" as const, active: input.authority.authoritative === false, timestamp, message: message(input.authority.authoritative === false, "Authority runtime is non-authoritative.", "Authority runtime is authoritative or unavailable.") },
+        { id: "authority_persistence_degraded", severity: "critical" as const, active: input.authority.persistenceHealthy === false, timestamp, message: message(input.authority.persistenceHealthy === false, "Authority persistence is degraded.", "Authority persistence is healthy.") },
+        { id: "authority_persistence_corrupt", severity: "critical" as const, active: input.authority.persistenceCorrupt === true, timestamp, message: message(input.authority.persistenceCorrupt === true, "Authority persistence is corrupt; runtime remains fail-closed.", "Authority persistence is not corrupt.") },
+        { id: "authority_ownership_conflict", severity: "critical" as const, active: input.authority.ownershipConflict === true, timestamp, message: message(input.authority.ownershipConflict === true, "Authority ownership is conflicted.", "Authority ownership is not conflicted.") },
+        { id: "authority_fenced", severity: "warning" as const, active: input.authority.fenced === true, timestamp, message: message(input.authority.fenced === true, "Authority owner is fenced.", "Authority owner is not fenced.") },
       ] : []),
     ];
     this.current = conditions.map((condition) => Object.freeze({ ...condition }));

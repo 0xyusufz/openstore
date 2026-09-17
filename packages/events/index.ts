@@ -13,7 +13,13 @@ export type OperationalEventType =
   | "replica.sync.started" | "replica.sync.succeeded" | "replica.sync.failed"
   | "replica.sync.retry" | "replica.stale" | "replica.conflict.detected"
   | "replica.rebootstrap.requested" | "replica.rebootstrap.succeeded" | "replica.rebootstrap.failed"
-  | "replica.operator.action";
+  | "replica.operator.action"
+  | "authority.runtime.started" | "authority.runtime.stopped"
+  | "authority.state.restored" | "authority.startup.blocked"
+  | "authority.ownership.restored" | "authority.ownership.established"
+  | "authority.ownership.failed" | "authority.ownership.released"
+  | "authority.owner.fenced" | "authority.token.rejected"
+  | "authority.grant.revoked";
 
 export type EventDetailValue = string | number | boolean;
 export type EventDetails = Readonly<Record<string, EventDetailValue>>;
@@ -43,12 +49,19 @@ const TYPES = new Set<OperationalEventType>([
   "replica.sync.retry", "replica.stale", "replica.conflict.detected",
   "replica.rebootstrap.requested", "replica.rebootstrap.succeeded", "replica.rebootstrap.failed",
   "replica.operator.action",
+  "authority.runtime.started", "authority.runtime.stopped",
+  "authority.state.restored", "authority.startup.blocked",
+  "authority.ownership.restored", "authority.ownership.established",
+  "authority.ownership.failed", "authority.ownership.released",
+  "authority.owner.fenced", "authority.token.rejected",
+  "authority.grant.revoked",
 ]);
 const COMPONENTS = new Set<OperationalEvent["component"]>(["coordinator", "storage-node", "client", "repair", "orphan-scanner"]);
 const DETAIL_KEYS = new Set([
   "operation", "route", "result", "reason", "statusClass", "transport", "state",
   "classification", "attempt", "retryCount", "queueDepth", "activeCount",
   "scanned", "deleted", "retained", "durationMs", "count", "action",
+  "epoch",
 ]);
 const DETAIL_STRING = /^[a-z][a-z0-9_.-]{0,31}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;

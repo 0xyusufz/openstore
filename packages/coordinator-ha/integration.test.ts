@@ -63,7 +63,7 @@ describe("coordinator HA integration boundary", () => {
     const runtime = {
       start: async () => {},
       stop: async () => { await stopPromise; stopped = true; },
-      status: () => ({ state: "stopped" as const, authority: { eligible: false, state: "unknown" as const, placementAuthorized: false, existingManifestOperationsAllowed: false, snapshotExportAllowed: false, snapshotImportAllowed: false }, issuerInstanceId: "coord-00000000000000000000000000000000", issuerPersistenceHealthy: true, candidatePersistenceHealthy: true, ownershipPersistenceHealthy: true, candidateState: { version: 1 as const, instanceId: "coord-00000000000000000000000000000000", state: "non-authoritative" as const, authorityEpoch: 0 }, ownership: { version: 1 as const, state: "non-authoritative" as const, authorityEpoch: 0, conflict: false }, lastTransition: "none" as const }),
+      status: () => ({ state: "stopped" as const, authority: { eligible: false, state: "unknown" as const, placementAuthorized: false, existingManifestOperationsAllowed: false, snapshotExportAllowed: false, snapshotImportAllowed: false }, issuerInstanceId: "coord-00000000000000000000000000000000", issuerPersistenceHealthy: true, candidatePersistenceHealthy: true, ownershipPersistenceHealthy: true, candidateState: { version: 1 as const, instanceId: "coord-00000000000000000000000000000000", state: "non-authoritative" as const, authorityEpoch: 0 }, ownership: { version: 1 as const, state: "non-authoritative" as const, authorityEpoch: 0, conflict: false }, lastTransition: "none" as const, conditions: [] }),
       validateOwnershipToken: () => false,
       establishOwnership: async () => {},
       releaseOwnership: async () => {},

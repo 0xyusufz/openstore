@@ -9,10 +9,14 @@ import { createAuthorityIssuer } from "./authority-issuer.js";
 import { createAuthorityOwnershipService } from "./authority-ownership.js";
 import { createAuthorityControlPlane } from "./authority-control-plane.js";
 import { createCoordinatorAuthorityRuntime } from "./runtime.js";
+import { EventStore } from "../events/index.js";
+import { MetricsRegistry } from "../metrics/index.js";
+import { ConditionEvaluator } from "../conditions/index.js";
 
 function fixture(
   dir = mkdtempSync(join(tmpdir(), "openstore-053n-")),
   identities?: { issuerIdentity: ReturnType<typeof createIdentity>; candidateIdentity: ReturnType<typeof createIdentity> },
+  observability?: { events: EventStore; metrics: MetricsRegistry; conditions: ConditionEvaluator },
 ) {
   const issuerIdentity = identities?.issuerIdentity ?? createIdentity();
   const candidateIdentity = identities?.candidateIdentity ?? createIdentity();
@@ -37,7 +41,7 @@ function fixture(
     issuer, candidate, ownership, candidateInstanceId: candidateInstance.instanceId, issuerInstanceId: issuerInstance.instanceId,
     revokedGrantIds: () => [...revoked],
   });
-  const runtime = createCoordinatorAuthorityRuntime({ controlPlane, issuer, ownership, candidate, issuerInstanceId: issuerInstance.instanceId });
+  const runtime = createCoordinatorAuthorityRuntime({ controlPlane, issuer, ownership, candidate, issuerInstanceId: issuerInstance.instanceId, ...observability });
   const request = { operation: "request-grant" as const, version: 1 as const, callerIdentity: caller, candidateInstanceId: candidateInstance.instanceId, authorityEpoch: 1, stateRevision: 7, stateDigest: "a".repeat(64), grantId: "runtime-grant", issuedAt: 1_000, expiresAt: 10_000 };
   return { dir, issuerIdentity, candidateIdentity, issuer, candidate, ownership, controlPlane, runtime, request, revoked, caller, candidateInstance, issuerInstance, authorizer };
 }
@@ -148,5 +152,58 @@ describe("coordinator authority runtime", () => {
     expect(f.runtime.status().authority.placementAuthorized).toBe(false);
     expect(f.runtime.validateOwnershipToken({} as never)).toBe(false);
     await expect(f.runtime.establishOwnership()).rejects.toThrow(/token/);
+  });
+
+  it("emits bounded sanitized observability for runtime and ownership transitions", async () => {
+    const events = new EventStore(5);
+    const metrics = new MetricsRegistry(32);
+    const conditions = new ConditionEvaluator();
+    const f = fixture(undefined, undefined, { events, metrics, conditions });
+    await f.issuer.bootstrap(1);
+    await f.runtime.start();
+    expect(events.recent().some((event) => event.type === "authority.runtime.started")).toBe(true);
+    expect(f.runtime.status().conditions.some((condition) => condition.id === "authority_runtime_ready")).toBe(true);
+    const grant = await f.controlPlane.issueGrant(f.request);
+    await f.controlPlane.deliverGrant(grant);
+    await f.candidate.acceptGrant(grant);
+    await f.runtime.establishOwnership();
+    await f.runtime.releaseOwnership("operator");
+    await f.runtime.fenceOwner("operator");
+    await f.runtime.stop();
+    expect(metrics.snapshot().counters.some((metric) => metric.name === "authority_ownership_establish_success_total")).toBe(true);
+    expect(metrics.snapshot().counters.some((metric) => metric.name === "authority_ownership_releases_total")).toBe(true);
+    expect(metrics.snapshot().counters.some((metric) => metric.name === "authority_owner_fencing_total")).toBe(true);
+    expect(events.snapshot().length).toBeLessThanOrEqual(5);
+    expect(JSON.stringify(events.snapshot())).not.toMatch(/private|secret|token|grant|path/i);
+  });
+
+  it("observes token validation and revoked-grant rejection without promotion", async () => {
+    const events = new EventStore(20);
+    const metrics = new MetricsRegistry(32);
+    const f = fixture(undefined, undefined, { events, metrics, conditions: new ConditionEvaluator() });
+    await f.issuer.bootstrap(1);
+    await f.runtime.start();
+    expect(f.runtime.validateOwnershipToken({} as never)).toBe(false);
+    const grant = await f.controlPlane.issueGrant(f.request);
+    await f.issuer.revoke(grant.grantId, f.caller);
+    f.revoked.add(grant.grantId);
+    await f.controlPlane.deliverGrant(grant);
+    await expect(f.runtime.establishOwnership()).rejects.toThrow(/revoked/);
+    expect(metrics.snapshot().counters.some((metric) => metric.name === "authority_token_validation_failures_total")).toBe(true);
+    expect(metrics.snapshot().counters.some((metric) => metric.name === "authority_revoked_grant_rejections_total")).toBe(true);
+    expect(events.recent().some((event) => event.type === "authority.token.rejected")).toBe(true);
+    expect(events.recent().some((event) => event.type === "authority.grant.revoked")).toBe(true);
+    expect(f.runtime.status().authority.placementAuthorized).toBe(false);
+  });
+
+  it("classifies missing and corrupt startup state without promoting", async () => {
+    const missing = fixture();
+    await missing.runtime.start();
+    expect(missing.runtime.status()).toMatchObject({ failureCode: "missing_issuer", authority: { placementAuthorized: false } });
+    const corruptDir = mkdtempSync(join(tmpdir(), "openstore-053n-corrupt-"));
+    writeFileSync(join(corruptDir, "issuer.json"), "{broken", "utf8");
+    const corrupt = fixture(corruptDir);
+    await expect(corrupt.runtime.start()).rejects.toThrow(/corrupt/);
+    expect(corrupt.runtime.status()).toMatchObject({ failureCode: "corrupt_issuer", state: "degraded", authority: { placementAuthorized: false } });
   });
 });

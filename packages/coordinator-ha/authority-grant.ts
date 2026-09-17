@@ -66,6 +66,7 @@ export function createSignedAuthorityGrant(
 export function createAuthorityGrantService(options: AuthorityGrantServiceOptions): CoordinatorAuthorityController & {
   inspectState(): AuthorityGrantState;
   persistenceHealthy(): boolean;
+  persistenceState(): "missing" | "valid" | "corrupt";
   acceptGrant(grant: SignedAuthorityGrant): Promise<void>;
   revoke(reason: string): Promise<void>;
 } {
@@ -75,14 +76,17 @@ export function createAuthorityGrantService(options: AuthorityGrantServiceOption
   for (const key of trusted) if (!PUBLIC_KEY.test(key)) throw new TypeError("trusted issuer key is invalid");
   let current: AuthorityGrantState = Object.freeze({ version: 1, instanceId: options.instance.instanceId, state: "non-authoritative", authorityEpoch: 0 });
   let persistenceHealthy = true;
+  let persistenceState: "missing" | "valid" | "corrupt" = "missing";
   if (options.persistencePath) {
     try {
       const parsed = JSON.parse(readFileSync(options.persistencePath, "utf8")) as AuthorityGrantState;
       if (parsed.version !== 1 || parsed.instanceId !== options.instance.instanceId || !["non-authoritative", "authoritative", "revoked"].includes(parsed.state) ||
         !Number.isSafeInteger(parsed.authorityEpoch) || parsed.authorityEpoch < 0) throw new Error("invalid persisted authority state");
       current = Object.freeze(parsed);
+      persistenceState = "valid";
     } catch {
       persistenceHealthy = !existsSync(options.persistencePath);
+      persistenceState = persistenceHealthy ? "missing" : "corrupt";
       current = Object.freeze({ version: 1, instanceId: options.instance.instanceId, state: "non-authoritative", authorityEpoch: 0 });
     }
   }
@@ -144,6 +148,7 @@ export function createAuthorityGrantService(options: AuthorityGrantServiceOption
     demote: revoke,
     inspectState,
     persistenceHealthy: () => persistenceHealthy,
+    persistenceState: () => persistenceState,
     acceptGrant,
     revoke,
   };
