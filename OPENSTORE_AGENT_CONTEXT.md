@@ -582,3 +582,40 @@ and 407 tests**, `npm run build`, `npm run typecheck`, shell syntax checks,
 `git diff --check`, and `docker compose config`. The full multi-node client
 and failure smoke test remains deferred to 050C. Changes remain uncommitted
 and unpushed.
+
+## 26. Milestone 052A coordinator failure-model foundation
+
+052A documents the current coordinator authority boundaries and adds the
+vendor-neutral `packages/discovery-state` capability model. The coordinator
+remains authoritative for signed node registration, heartbeats, expiry and
+pruning, placement candidates, capacity visibility, and fresh repair
+candidate discovery. Registry persistence is atomic and fsync-backed, but
+there is still one coordinator authority and no replicated or consensus layer.
+
+The client coordinator adapter retains a last-known-good endpoint snapshot.
+Fresh coordinator information is required for new upload placement and repair
+replacement selection. Existing-manifest download and delete may continue
+against known recorded replicas during a coordinator outage, but they never
+invent replacement replicas. Node startup can initialize local identity and
+storage without coordinator availability; registration and heartbeat reconnect
+later according to the existing lifecycle. DHT/static discovery is separate
+from coordinator-authoritative placement.
+
+`packages/discovery-state` classifies bounded aggregate observations as
+`fresh`, `cached`, `stale`, or `unavailable`. Cached information can support
+existing-replica reads/deletes; only fresh information can authorize new
+placement or repair. It stores no identifiers, secrets, per-piece state, or
+durable history.
+
+The DHT audit found validated versioned peer descriptors with identity
+bindings, bounded bootstrap/query timeouts, and disappearance reconciliation,
+but no application-level record expiry timestamp, revocation record, or
+durable disappearance authority. Kademlia record lifetime and stale-record
+handling remain future work.
+
+Recommended 052B scope: implement explicit coordinator adapter state
+transitions, bounded freshness leases, stale transitions, reconnect backoff,
+and operation-specific policy enforcement while preserving current fail-closed
+placement semantics. Do not add Raft, etcd, leader election, quorum,
+distributed locks, external databases, DHT consensus, or unsafe automatic
+failover.
