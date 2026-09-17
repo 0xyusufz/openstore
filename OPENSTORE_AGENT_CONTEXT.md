@@ -680,3 +680,22 @@ alone.
 Recommended 052E scope: define authenticated DHT revocation/expiry authority
 and reconciliation with coordinator observations only if a separate trust
 authority is established. Do not infer revocation from disappearance alone.
+
+052E now makes the authority boundary explicit in `packages/authority`.
+`classifyAuthority` returns immutable, aggregate-only decisions:
+`coordinator-authoritative`, `dht-discovered`, `stale`, `invalid`, or
+`unavailable`. Placement is authorized only for an explicitly
+coordinator-authoritative fresh observation with usable endpoints. DHT
+observations remain non-authoritative even when fresh and can only support
+existing peer discovery.
+
+`reconcileAuthority` deterministically gives a fresh authoritative coordinator
+observation the placement win. Stale/invalid DHT data cannot override it;
+disagreement produces no automatic failover. Both DHT disappearance and
+coordinator disappearance explicitly remain non-revocation events. The model
+is immutable and stores no identifiers, URLs, secrets, or per-peer history.
+
+Future revocation remains architecture work: it needs an independently
+authorized signer, an authenticated peer-identity binding, replay/freshness
+rules, bounded verification, and defined coordinator-outage behavior. No
+revocation or new trust service was introduced.

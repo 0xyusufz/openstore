@@ -119,6 +119,29 @@ DHT does not override newer coordinator data, and no signed revocation record
 was added; revocation, durable expiry, and DHT record replacement authority
 remain future work.
 
+## 052E authority boundary
+
+`packages/authority` provides the small immutable authority model used to make
+this boundary explicit. A fresh coordinator observation is
+`coordinator-authoritative` only when the caller explicitly marks it as
+coordinator-authoritative. A fresh DHT observation is always
+`dht-discovered` and can never authorize placement. Stale, invalid, and
+unavailable observations remain those classifications regardless of their
+source. Existing-replica usability is separate from placement authority.
+
+When observations disagree, reconciliation deterministically selects the
+coordinator as the placement winner when it has a fresh authoritative
+observation; otherwise there is no placement winner. DHT may still assist
+peer discovery. Neither DHT disappearance nor coordinator disappearance is
+interpreted as cryptographic revocation, and reconciliation exposes
+`revocation: not-established`.
+
+Future revocation requires a separately defined authorizing identity, a
+signed statement binding that identity to the revoked peer identity,
+authenticated verification and bounded freshness/replay checks, and explicit
+outage semantics. The current architecture does not provide that authority,
+so no revocation is implemented.
+
 ## Non-goals
 
 052A does not add Raft, etcd, leader election, distributed locks, blockchain,
