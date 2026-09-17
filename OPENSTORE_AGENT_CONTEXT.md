@@ -619,3 +619,22 @@ and operation-specific policy enforcement while preserving current fail-closed
 placement semantics. Do not add Raft, etcd, leader election, quorum,
 distributed locks, external databases, DHT consensus, or unsafe automatic
 failover.
+
+052B is now implemented additively. `packages/discovery-state` remains the
+single freshness-policy model, while `apps/client/coordinator.ts` owns the
+bounded runtime observation state exposed as `discovery` and metadata. The
+default freshness lease is 30 seconds and the stale retention window is five
+minutes; both are validated and configurable. Failed refreshes never erase the
+last-known-good endpoint snapshot. The adapter reports fresh, cached, stale,
+or unavailable state without exposing endpoints or identifiers in diagnostics.
+
+Coordinator-driven upload placement and repair replacement now fail closed
+when fresh information is unavailable, with contextual coordinator discovery
+errors/classifications. Existing-manifest download and delete retain their
+known-replica behavior during outages and never invent replacements. Refresh
+coalescing and existing bounded retry/backoff behavior remain unchanged.
+
+Recommended 052C scope: use these explicit state transitions in operator
+conditions/diagnostics and add lifecycle reconnect state where needed; keep
+HA/consensus, durable discovery leases, and DHT revocation/expiry as separate
+future design work.

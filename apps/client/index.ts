@@ -74,6 +74,8 @@ export interface CoordinatorEndpointProvider {
   getEndpoints(): StorageNodeEndpoint[];
   /** Optional all-record snapshot, including unavailable nodes. */
   getKnownEndpoints?: () => StorageNodeEndpoint[];
+  /** Optional bounded freshness/capability state. */
+  readonly discovery?: import("../../packages/discovery-state/index.js").DiscoveryCapabilitySnapshot;
 }
 
 /**

@@ -9,17 +9,20 @@ import type { FileManifest, ManifestChunk } from "../../packages/manifest/index.
 import { multiaddr } from "@multiformats/multiaddr";
 import { peerIdFromOpenStorePublicKey } from "../../packages/p2p/identity-binding.js";
 import { createRegistryClient, type RegistryClientErrorClassification } from "../../packages/registry/coordinator.js";
+import { DiscoveryCapabilityModel, type DiscoveryCapabilitySnapshot, type DiscoveryStateOptions } from "../../packages/discovery-state/index.js";
 
 export interface CoordinatorAdapterOptions {
   baseUrl: string;
   token?: string;
   fetch?: typeof globalThis.fetch;
+  freshness?: DiscoveryStateOptions;
 }
 
 export interface CoordinatorAdapter extends CoordinatorEndpointProvider {
   readonly lastError: Error | undefined;
   readonly lastRefreshAt: number | undefined;
   readonly metadata: CoordinatorMetadata;
+  readonly discovery: DiscoveryCapabilitySnapshot;
   /** A non-throwing snapshot suitable for best-effort callers. */
   refreshSafe(): Promise<StorageNodeEndpoint[]>;
   getKnownEndpoints(): StorageNodeEndpoint[];
@@ -32,6 +35,19 @@ export interface CoordinatorMetadata {
   consecutiveFailureCount: number;
   readonly snapshotAge: number | undefined;
   readonly isStale: boolean;
+  readonly state: DiscoveryCapabilitySnapshot["freshness"];
+  readonly freshAvailable: boolean;
+}
+
+export class CoordinatorDiscoveryError extends Error {
+  readonly state: DiscoveryCapabilitySnapshot["freshness"];
+  readonly operation: "placement" | "refresh";
+  constructor(operation: "placement" | "refresh", state: DiscoveryCapabilitySnapshot["freshness"]) {
+    super(state === "unavailable" ? "coordinator unavailable" : state === "stale" ? "coordinator information stale" : "fresh coordinator information required");
+    this.name = "CoordinatorDiscoveryError";
+    this.state = state;
+    this.operation = operation;
+  }
 }
 
 /** Resolve explicit endpoints first; discover only when none were supplied. */
@@ -41,7 +57,19 @@ export async function resolveEndpoints(
   options: { requireFresh?: boolean } = {},
 ): Promise<StorageNodeEndpoint[]> {
   if (!provider) return endpoints;
-  if (options.requireFresh || endpoints.length === 0) return provider.refresh();
+  if (options.requireFresh || endpoints.length === 0) {
+    try {
+      const result = await provider.refresh();
+      const discovery = provider.discovery;
+      if (options.requireFresh && discovery && !discovery.canPlaceNew) {
+        throw new CoordinatorDiscoveryError("placement", discovery.freshness);
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof CoordinatorDiscoveryError) throw error;
+      throw new CoordinatorDiscoveryError("refresh", provider.discovery?.freshness ?? "unavailable");
+    }
+  }
   return endpoints;
 }
 
@@ -98,8 +126,27 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
   let lastError: Error | undefined;
   let lastRefreshAt: number | undefined;
   let inFlight: Promise<StorageNodeEndpoint[]> | undefined;
-  let metadata: CoordinatorMetadata = { lastKnownGoodCount: 0, consecutiveFailureCount: 0, snapshotAge: undefined, isStale: false };
+  let metadata: CoordinatorMetadata = {
+    lastKnownGoodCount: 0,
+    consecutiveFailureCount: 0,
+    snapshotAge: undefined,
+    isStale: false,
+    state: "unavailable",
+    freshAvailable: false,
+  };
   const baseUrl = options.baseUrl.replace(/\/+$/, "");
+  const model = new DiscoveryCapabilityModel(options.freshness);
+  let discovery: DiscoveryCapabilitySnapshot = model.evaluate({ source: "coordinator", endpointCount: 0 });
+  const refreshDiscovery = (): DiscoveryCapabilitySnapshot => {
+    discovery = model.evaluate({
+      source: "coordinator",
+      endpointCount: snapshot.length,
+      ...(metadata.lastKnownGoodAt === undefined ? {} : { observedAt: metadata.lastKnownGoodAt }),
+      now: Date.now(),
+      reachable: metadata.consecutiveFailureCount === 0,
+    });
+    return discovery;
+  };
 
   const refresh = (): Promise<StorageNodeEndpoint[]> => {
     if (inFlight) return inFlight;
@@ -112,12 +159,28 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
       snapshot = endpoints;
       lastError = undefined;
       lastRefreshAt = Date.now();
-      metadata = { lastKnownGoodAt: lastRefreshAt, lastKnownGoodCount: snapshot.length, consecutiveFailureCount: 0, snapshotAge: 0, isStale: false };
+      metadata = {
+        ...metadata,
+        lastKnownGoodAt: lastRefreshAt,
+        lastKnownGoodCount: snapshot.length,
+        consecutiveFailureCount: 0,
+        snapshotAge: 0,
+        isStale: false,
+        state: "fresh",
+        freshAvailable: snapshot.length > 0,
+      };
+      discovery = model.evaluate({ source: "coordinator", endpointCount: snapshot.length, observedAt: lastRefreshAt, now: lastRefreshAt, reachable: true });
       return snapshot.slice();
     })().catch((error: unknown) => {
       lastError = error instanceof Error ? error : new Error(String(error));
       const classification = (error as { classification?: RegistryClientErrorClassification }).classification;
-      metadata = { ...metadata, lastError: lastError.message.slice(0, 300), lastErrorClassification: classification ?? "unknown", consecutiveFailureCount: metadata.consecutiveFailureCount + 1 };
+      metadata = { ...metadata, lastError: sanitizeCoordinatorError(lastError.message), lastErrorClassification: classification ?? "unknown", consecutiveFailureCount: metadata.consecutiveFailureCount + 1 };
+      discovery = model.evaluate({
+        source: "coordinator",
+        endpointCount: snapshot.length,
+        ...(lastRefreshAt === undefined ? {} : { observedAt: lastRefreshAt }),
+        reachable: false,
+      });
       throw lastError;
     }).finally(() => {
       inFlight = undefined;
@@ -130,7 +193,12 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
     get lastRefreshAt() { return lastRefreshAt; },
     get metadata() {
       const snapshotAge = metadata.lastKnownGoodAt === undefined ? undefined : Math.max(0, Date.now() - metadata.lastKnownGoodAt);
-      return { ...metadata, snapshotAge, isStale: metadata.consecutiveFailureCount > 0 };
+      refreshDiscovery();
+      return { ...metadata, snapshotAge, isStale: discovery.freshness === "stale" || discovery.freshness === "cached", state: discovery.freshness, freshAvailable: discovery.canPlaceNew };
+    },
+    get discovery() {
+      refreshDiscovery();
+      return Object.freeze({ ...discovery });
     },
     getEndpoints: () => snapshot.slice(),
     getKnownEndpoints: () => knownSnapshot.slice(),
@@ -139,6 +207,14 @@ export function createCoordinatorAdapter(options: CoordinatorAdapterOptions): Co
       try { return await refresh(); } catch { return snapshot.slice(); }
     },
   };
+}
+
+function sanitizeCoordinatorError(message: string): string {
+  return message
+    .replace(/https?:\/\/[^\s]+/gi, "[endpoint]")
+    .replace(/(?:password|token|secret|private key|recovery phrase|seed|encryption key|dek)(?:\s*[:=]\s*)?[^\s:;,)]*/gi, "[redacted]")
+    .replace(/[\/\\][^\s]*/g, "[path]")
+    .slice(0, 200);
 }
 
 async function fetchRawNodes(request: NonNullable<CoordinatorAdapterOptions["fetch"]>, url: string, token?: string): Promise<unknown[]> {

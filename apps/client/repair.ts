@@ -26,9 +26,12 @@ import {
   type OperationRecordStore,
 } from "./provenance.js";
 import type { PieceClaim } from "../../packages/provenance/index.js";
+import { CoordinatorDiscoveryError } from "./coordinator.js";
 
 export type RepairClassification =
   | "coordinator-unavailable"
+  | "coordinator-stale"
+  | "fresh-coordinator-required"
   | "source-unavailable"
   | "source-corrupt"
   | "target-unavailable"
@@ -165,7 +168,22 @@ async function observeConfirmedLoss(fileId: string, options: RepairOptions): Pro
     try {
       available = await options.coordinator.refresh();
     } catch (error) {
-      throw new RepairError("coordinator-unavailable", fileId, safeError(error));
+      const state = options.coordinator.discovery?.freshness;
+      const classification = state === "stale" || state === "cached"
+        ? "coordinator-stale"
+        : state === "unavailable"
+          ? "coordinator-unavailable"
+          : "coordinator-unavailable";
+      throw new RepairError(classification, fileId, error instanceof CoordinatorDiscoveryError ? error.message : "coordinator unavailable");
+    }
+    if (options.coordinator.discovery && !options.coordinator.discovery.canRepair) {
+      throw new RepairError(
+        options.coordinator.discovery.freshness === "stale" || options.coordinator.discovery.freshness === "cached"
+          ? "coordinator-stale"
+          : "fresh-coordinator-required",
+        fileId,
+        "fresh coordinator information required",
+      );
     }
     const known = options.coordinator.getKnownEndpoints?.() ?? available;
     if (available.some((endpoint) => endpoint.id === options.lostNodeId)) {

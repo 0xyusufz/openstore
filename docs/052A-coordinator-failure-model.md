@@ -61,12 +61,24 @@ coordinator-authoritative placement.
 
 ## Proposed 052B boundary
 
-052B should implement explicit coordinator client state transitions and
-bounded discovery leases: fresh refresh timestamps, stale transitions,
-reconnect backoff, and operation-specific policy enforcement. It should not
-select replacements from stale data. A future HA layer may replicate the
-registry behind a stable coordinator/discovery interface, but consensus,
-leader election, quorum, and external databases remain outside 052A.
+Milestone 052B implements this boundary through the additive
+`CoordinatorCapabilitySnapshot` exposed by the client adapter and the
+`packages/discovery-state` model. A successful coordinator observation with
+at least one usable endpoint is `fresh` for the configured lease (30 seconds
+by default). A failed refresh retains the last known-good endpoint set but
+marks it `cached` while within the bounded stale window (five minutes by
+default), then `stale`; no endpoints is `unavailable`.
+
+Upload/new placement and repair replacement require `fresh` and fail with
+typed contextual errors when the coordinator is unavailable or information
+is stale. Existing-manifest download and delete continue to use their known
+manifest replicas and never invent replacements. The adapter coalesces
+refreshes and retains bounded metadata only; it does not add timers or
+unbounded retries.
+
+A future HA layer may replicate the registry behind this stable
+coordinator/discovery interface, but consensus, leader election, quorum, and
+external databases remain outside 052B.
 
 ## Non-goals
 

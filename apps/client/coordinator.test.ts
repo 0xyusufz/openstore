@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { coordinatorNodesToEndpoints, createCoordinatorAdapter } from "./coordinator.js";
+import { coordinatorNodesToEndpoints, createCoordinatorAdapter, CoordinatorDiscoveryError, resolveEndpoints } from "./coordinator.js";
 import { createIdentity } from "../../packages/identity/index.js";
 import { peerIdFromOpenStorePublicKey } from "../../packages/p2p/identity-binding.js";
 
@@ -76,5 +76,29 @@ describe("coordinator endpoint adapter (Milestone 042)", () => {
     expect(() => coordinatorNodesToEndpoints({
       nodes: [{ ...node("peer", "libp2p"), baseUrl: "http://127.0.0.1:1" }],
     })).toThrow(/libp2p baseUrl/);
+  });
+
+  it("tracks fresh to cached/stale and rejects placement without fresh data", async () => {
+    let calls = 0;
+    const fetch = vi.fn(async () => {
+      calls += 1;
+      if (calls > 1) throw new Error("offline");
+      return new Response(JSON.stringify({ nodes: [node("stable")] }), { status: 200 });
+    });
+    const adapter = createCoordinatorAdapter({
+      baseUrl: "http://coordinator.test",
+      fetch,
+      freshness: { freshMaxAgeMs: 10, staleAfterMs: 20 },
+    });
+    await adapter.refresh();
+    expect(adapter.discovery.freshness).toBe("fresh");
+    await expect(adapter.refresh()).rejects.toThrow("offline");
+    expect(["cached", "stale"]).toContain(adapter.discovery.freshness);
+    await expect(resolveEndpoints([], adapter, { requireFresh: true })).rejects.toBeInstanceOf(CoordinatorDiscoveryError);
+    expect(adapter.getKnownEndpoints()).toHaveLength(1);
+  });
+
+  it("rejects invalid freshness configuration", () => {
+    expect(() => createCoordinatorAdapter({ baseUrl: "http://coordinator.test", freshness: { freshMaxAgeMs: 0 } })).toThrow();
   });
 });
