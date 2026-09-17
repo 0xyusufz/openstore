@@ -1010,3 +1010,18 @@ validation. Events contain only safe classifications and bounded epoch data;
 metrics have no per-token, per-grant, or per-instance labels. Conditions are
 diagnostic only and never authorize promotion or failover. See
 `docs/053O-authority-runtime-observability.md`.
+
+### Milestone 053P: cross-process authority recovery validation
+
+053P adds a bounded IPC test harness in
+`packages/coordinator-ha/runtime-process-worker.ts` and
+`runtime-process.test.ts`. It constructs the production issuer, candidate,
+ownership, control-plane, and runtime services in a separate Node process,
+drives explicit bootstrap/grant/delivery/acceptance/ownership operations,
+stops, restarts, and inspects the same temporary persistence.
+
+The harness verifies valid authority restoration without new epochs or grants,
+missing/corrupt persistence fail-closed behavior, explicit fencing/release
+survival, and deterministic same-epoch second-process rejection. It does not
+add a production endpoint, automatic promotion, election, failover, quorum,
+consensus, DHT authority, or client placement behavior.

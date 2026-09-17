@@ -129,7 +129,7 @@ export function createAuthorityOwnershipService(options: AuthorityOwnershipOptio
     const local = options.state?.();
     if (!local || !local.fresh || local.revision !== token.stateRevision || local.digest !== token.stateDigest) throw new Error("ownership state does not match");
     if (token.authorityEpoch < record.authorityEpoch) throw new Error("ownership token epoch is stale");
-    if (record.state === "fenced" && record.tokenId === token.tokenId) throw new Error("ownership token is fenced");
+    if ((record.state === "fenced" || record.state === "released") && record.tokenId === token.tokenId) throw new Error("ownership token is no longer active");
   };
   return {
     createToken: (grant) => {
