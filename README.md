@@ -150,3 +150,36 @@ Diagnostics are process-local and reset on restart. Recent events and metrics
 are bounded, immutable snapshots with no durable history, alerting, dashboard,
 database, or external monitoring exporter. Sensitive identifiers, paths,
 credentials, keys, plaintext, ciphertext, and raw errors are never exposed.
+
+## Operational conditions and guidance
+
+The coordinator exposes aggregate condition snapshots at `GET /v1/conditions`
+and `/conditions`; authenticated deployments receive the same bounded recent
+event context used by the existing status surfaces. Storage-node status and
+health responses include equivalent conditions. Conditions are process-local,
+immutable, deterministic snapshots and do not change readiness semantics.
+
+Defaults are conservative: capacity warning at 80% and critical at 95%,
+five or more accumulated storage request errors, one or more repair failures,
+80 queued repairs, and an orphan backlog at 80% of its scan batch. Severity is
+`info`, `warning`, or `critical`; conditions are signals for operators, not
+automatic remediation or notifications.
+
+Practical responses:
+
+- **Coordinator persistence degraded:** inspect registry volume permissions,
+  disk health, and the latest verified backup before restarting.
+- **No available nodes:** check node health/lifecycle status, coordinator
+  connectivity, and capacity; restore or add healthy nodes before placement.
+- **Storage capacity low:** increase allocation safely or add capacity; do not
+  delete data outside the provider lifecycle.
+- **Node draining:** confirm the planned maintenance, wait for replacement
+  replication, and keep the node available for reads until release is safe.
+- **Repair failures/backlog:** inspect available capacity and node
+  connectivity, then allow bounded retries or address the underlying outage.
+- **Orphan scanner failure:** inspect storage/provenance availability and
+  rerun after recovery; cleanup remains fail-closed.
+
+No notifications, external alerting integration, durable condition history,
+dashboard, or exporter is provided. Operators can poll the endpoints or
+consume evaluator snapshots.

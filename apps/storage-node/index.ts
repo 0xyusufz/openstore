@@ -36,6 +36,7 @@ import { hashPieceId } from "../../packages/manifest/index.js";
 import { safeErrorMessage } from "./safe-error.js";
 import { defaultMetrics, type MetricsRegistry } from "../../packages/metrics/index.js";
 import { defaultEvents, type EventStore } from "../../packages/events/index.js";
+import { ConditionEvaluator } from "../../packages/conditions/index.js";
 
 export const STORAGE_NODE_VERSION = 1;
 
@@ -82,6 +83,7 @@ export interface StorageNodeStatusSnapshot {
   capacity: NodeCapacity;
   pieceCount: number;
   diagnostics?: { metrics: ReturnType<MetricsRegistry["snapshot"]>; events: ReturnType<EventStore["recent"]> };
+  conditions?: ReturnType<ConditionEvaluator["snapshot"]>;
 }
 
 export interface NodeCapacity {
@@ -178,6 +180,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   const maxReplayCacheEntries = options.maxReplayCacheEntries ?? DEFAULT_MAX_REPLAY_CACHE_ENTRIES;
   const metrics = options.metrics ?? defaultMetrics;
   const events = options.events ?? defaultEvents;
+  const conditions = new ConditionEvaluator();
   if (!Number.isSafeInteger(maxHttpRequestBodyBytes) || maxHttpRequestBodyBytes <= 0) {
     throw new TypeError("maxHttpRequestBodyBytes must be a positive safe integer");
   }
@@ -276,7 +279,17 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     metrics.set("storage_piece_count", pieceCount);
     metrics.set("storage_available", draining ? 0 : 1);
     metrics.set("storage_draining", draining ? 1 : 0);
-    return { status: draining ? "draining" : "ok", draining, capacity, pieceCount, diagnostics: { metrics: metrics.snapshot(), events: events.recent(100) } };
+    return {
+      status: draining ? "draining" : "ok",
+      draining,
+      capacity,
+      pieceCount,
+      conditions: conditions.evaluate({
+        storage: { draining, usedBytes: capacity.usedBytes, allocatedBytes: capacity.allocatedBytes ?? capacity.totalBytes, availableBytes: capacity.availableBytes },
+        metrics: metrics.snapshot(),
+      }),
+      diagnostics: { metrics: metrics.snapshot(), events: events.recent(100) },
+    };
   }
 
   const node: StorageNode = {

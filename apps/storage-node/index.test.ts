@@ -160,6 +160,7 @@ describe("storage node MVP (OPENSTORE-003)", () => {
     expect(snapshot.capacity.availableBytes).toBeGreaterThanOrEqual(0);
     expect(snapshot.pieceCount).toBeGreaterThan(0);
     expect(snapshot.diagnostics.events.length).toBeLessThanOrEqual(100);
+    expect(snapshot).toHaveProperty("conditions");
     expect(JSON.stringify(snapshot)).not.toMatch(/piece-alpha|storageDir|privateKey|plaintext|ciphertext/i);
   });
 });
