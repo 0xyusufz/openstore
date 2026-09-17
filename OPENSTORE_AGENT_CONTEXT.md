@@ -163,6 +163,10 @@ piece transport. It must not be coupled to client encryption/storage logic.
   authorization/revocation persistence, runtime/control-plane enforcement,
   bounded observability, and fail-closed recovery checks without automatic
   promotion or election.
+- **054:** Added the operational recovery drill for inspect/diagnose/prepare/
+  execute/verify flows, with degraded-state diagnostics, restart-safe drill
+  persistence, explicit 053Q enforcement, and cross-process safety checks
+  guarding against two-candidate reuse of a single authorization.
 
 ## 7. State after Milestone 043
 

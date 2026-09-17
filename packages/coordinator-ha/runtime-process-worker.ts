@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { createIdentity, recoverIdentity } from "../identity/index.js";
 import { createCoordinatorInstanceIdentity } from "./index.js";
@@ -102,8 +103,31 @@ lines.on("line", (line) => {
         const result = controlPlane.executeExplicitRecoveryAction((request.action as "inspect" | "approve" | "reset" | "fence"), request.evidence as never, request.authorization as never);
         response(request.id, result);
         return;
-      } else throw new Error("unknown 053P operation");
-      response(request.id, true);
+      } else if (request.operation === "drill-inspect") {
+        response(request.id, runtime.inspectRecoveryDrill(request.evidence as never));
+        return;
+      } else if (request.operation === "drill-diagnose") {
+        response(request.id, runtime.diagnoseRecoveryDrill(request.evidence as never));
+        return;
+      } else if (request.operation === "drill-prepare") {
+        response(request.id, controlPlane.prepareRecoveryDrill(request.evidence as never, request.authorization as never));
+        return;
+      } else if (request.operation === "drill-execute") {
+        response(request.id, controlPlane.executeRecoveryDrill((request.action as "inspect" | "approve" | "reset" | "fence"), request.evidence as never, request.authorization as never));
+        return;
+      } else if (request.operation === "drill-verify") {
+        response(request.id, controlPlane.verifyRecoveryDrill(request.evidence as never, request.authorization as never));
+        return;
+      } else if (request.operation === "simulate-degraded") {
+        writeFileSync(`${dir}/issuer.json`, "{corrupt-json", "utf8");
+        response(request.id, { degraded: true });
+        return;
+      } else if (request.operation === "reset-degraded") {
+        const issuer = createAuthorityIssuer({ identity: issuerIdentity, persistencePath: `${dir}/issuer.json`, authorizer, now: () => Date.now() });
+        await issuer.bootstrap(1);
+        response(request.id, { restored: true });
+        return;
+      } else throw new Error("unknown 053P operation");      response(request.id, true);
       if (request.operation === "stop") setImmediate(() => process.exit(0));
     } catch (error) {
       failure(request.id, error);

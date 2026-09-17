@@ -7,6 +7,7 @@ import type { MetricsRegistry } from "../metrics/index.js";
 import type { Condition, ConditionEvaluator } from "../conditions/index.js";
 import { evaluateAuthorityState, type AuthorityEligibility } from "./authority-contract.js";
 import type { AuthorityRecoveryEvidence, AuthorityRecoveryPolicy, RecoveryOperatorAuthorization } from "./authority-recovery-policy.js";
+import { createAuthorityRecoveryDrill } from "./authority-recovery-drill.js";
 
 export type CoordinatorAuthorityRuntimeState = "stopped" | "running" | "degraded";
 export type AuthorityRuntimeFailureCode =
@@ -37,6 +38,8 @@ export interface CoordinatorAuthorityRuntime {
   releaseOwnership(reason: string): Promise<void>;
   fenceOwner(reason: string): Promise<void>;
   inspectRecovery(evidence?: AuthorityRecoveryEvidence): ReturnType<AuthorityRecoveryPolicy["evaluateRecovery"]>;
+  inspectRecoveryDrill(evidence?: AuthorityRecoveryEvidence): ReturnType<ReturnType<typeof createAuthorityRecoveryDrill>["inspect"]>;
+  diagnoseRecoveryDrill(evidence?: AuthorityRecoveryEvidence): ReturnType<ReturnType<typeof createAuthorityRecoveryDrill>["diagnose"]>;
 }
 
 export interface CoordinatorAuthorityRuntimeOptions {
@@ -103,6 +106,15 @@ export function createCoordinatorAuthorityRuntime(options: CoordinatorAuthorityR
   };
 
   const recoveryPolicy = options.recoveryPolicy;
+  const recoveryDrill = createAuthorityRecoveryDrill({
+    policy: recoveryPolicy,
+    runtime: undefined,
+    controlPlane: undefined,
+    now,
+    events: options.events,
+    metrics: options.metrics,
+    conditions: options.conditions,
+  });
   const checkRecoveryPolicy = (evidence?: AuthorityRecoveryEvidence): ReturnType<AuthorityRecoveryPolicy["evaluateRecovery"]> | undefined => {
     if (!recoveryPolicy) return undefined;
     return recoveryPolicy.evaluateRecovery(evidence, undefined);
@@ -224,6 +236,12 @@ export function createCoordinatorAuthorityRuntime(options: CoordinatorAuthorityR
     },
     inspectRecovery(evidence) {
       return recoveryPolicy ? recoveryPolicy.evaluateRecovery(evidence, undefined) : { decision: "denied", state: "missing-evidence", reason: "missing_evidence", requiresOperatorAuthorization: false, authorized: false };
+    },
+    inspectRecoveryDrill(evidence) {
+      return recoveryDrill.inspect(evidence);
+    },
+    diagnoseRecoveryDrill(evidence) {
+      return recoveryDrill.diagnose(evidence);
     },
   };
 }

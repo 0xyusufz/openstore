@@ -4,6 +4,7 @@ import { type AuthorityIssuerService, type AuthorityIssuanceRequest } from "./au
 import { evaluateAuthorityState, type AuthorityEligibility } from "./authority-contract.js";
 import type { AuthorityOwnershipService, AuthorityOwnershipToken, AuthorityOwnershipRecord } from "./authority-ownership.js";
 import { createAuthorityRecoveryPolicy, type AuthorityRecoveryEvidence, type AuthorityRecoveryPolicy, type AuthorityRecoveryPolicyEvaluation, type AuthorityRecoveryPolicyInspection, type RecoveryOperatorAuthorization, type RecoveryOperatorAuthorizationRequest } from "./authority-recovery-policy.js";
+import { createAuthorityRecoveryDrill, type AuthorityRecoveryDrill, type RecoveryDrillResult } from "./authority-recovery-drill.js";
 
 export interface AuthorityControlPlaneRequest extends AuthorityIssuanceRequest {
   readonly operation: "request-grant";
@@ -44,6 +45,11 @@ export interface AuthorityControlPlane {
   approveRecovery(evidence: AuthorityRecoveryEvidence, authorization: RecoveryOperatorAuthorization): AuthorityRecoveryPolicyEvaluation;
   rejectRecoveryAuthorization(authorizationId: string, reason: string): Promise<void>;
   executeExplicitRecoveryAction(action: "inspect" | "approve" | "reset" | "fence", evidence: AuthorityRecoveryEvidence, authorization?: RecoveryOperatorAuthorization): AuthorityRecoveryPolicyEvaluation;
+  inspectRecoveryDrill(evidence?: AuthorityRecoveryEvidence): RecoveryDrillResult;
+  diagnoseRecoveryDrill(evidence?: AuthorityRecoveryEvidence): ReturnType<AuthorityRecoveryDrill["diagnose"]>;
+  prepareRecoveryDrill(evidence: AuthorityRecoveryEvidence, authorization?: RecoveryOperatorAuthorization): RecoveryDrillResult;
+  executeRecoveryDrill(action: "inspect" | "approve" | "reset" | "fence", evidence: AuthorityRecoveryEvidence, authorization?: RecoveryOperatorAuthorization): RecoveryDrillResult;
+  verifyRecoveryDrill(evidence: AuthorityRecoveryEvidence, authorization?: RecoveryOperatorAuthorization): RecoveryDrillResult;
   establishOwnership(): Promise<void>;
   releaseOwnership(reason: string): Promise<void>;
   fenceOwner(reason: string): Promise<void>;
@@ -67,6 +73,7 @@ export interface AuthorityControlPlaneOptions {
   }) => AuthorityRecoveryPolicy;
   readonly recoveryPersistencePath?: string;
   readonly issuerIdentity?: { publicKey: Buffer; privateKey: Buffer };
+  readonly drillPersistencePath?: string;
   readonly now?: () => number;
 }
 
@@ -86,6 +93,13 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
       now: options.now,
     }) : undefined
   );
+  const recoveryDrill = createAuthorityRecoveryDrill({
+    policy: recoveryPolicy,
+    runtime: undefined,
+    controlPlane: undefined,
+    persistencePath: options.drillPersistencePath,
+    now: options.now,
+  });
   let delivered: SignedAuthorityGrant | undefined;
   let lastTransition: AuthorityControlPlaneInspection["lastTransition"] = "none";
   let recoveryAuthorizationState: AuthorityRecoveryAuthorizationState = "none";
@@ -199,6 +213,21 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
       const result = recoveryPolicy.executeExplicitRecoveryAction(action, evidence, authorization);
       recoveryAuthorizationState = result.authorized ? "accepted" : result.state === "rejected" ? "rejected" : "none";
       return result;
+    },
+    inspectRecoveryDrill(evidence) {
+      return recoveryDrill.inspect(evidence);
+    },
+    diagnoseRecoveryDrill(evidence) {
+      return recoveryDrill.diagnose(evidence);
+    },
+    prepareRecoveryDrill(evidence, authorization) {
+      return recoveryDrill.prepare(evidence, authorization);
+    },
+    executeRecoveryDrill(action, evidence, authorization) {
+      return recoveryDrill.execute(action, evidence, authorization);
+    },
+    verifyRecoveryDrill(evidence, authorization) {
+      return recoveryDrill.verify(evidence, authorization);
     },
     async establishOwnership() {
       if (!options.ownership || !delivered) throw new Error("ownership token is not available");

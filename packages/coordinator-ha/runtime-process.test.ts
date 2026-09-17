@@ -154,6 +154,76 @@ describe("053P cross-process authority recovery", () => {
     await stop(restartedA); await stop(b);
   });
 
+  it("054 drill rejects degraded state and protects the same authorization from two candidates", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "openstore-054-dual-owner-"));
+    const issuer = createIdentity();
+    const candidateA = createIdentity();
+    const candidateB = createIdentity();
+    const a = worker(dir, issuer.recoveryPhrase.join(" "), candidateA.recoveryPhrase.join(" "));
+    const b = worker(dir, issuer.recoveryPhrase.join(" "), candidateB.recoveryPhrase.join(" "));
+    expect((await a.command("bootstrap")).ok).toBe(true);
+    expect((await a.command("start")).ok).toBe(true);
+    const grantA = await a.command("issue", { grantId: "grant-dual-054" });
+    expect(grantA.ok).toBe(true);
+    await a.command("deliver", { grant: grantA.result });
+    await a.command("accept", { grantId: "grant-dual-054" });
+    await a.command("establish");
+    const issuerInstanceId = createCoordinatorInstanceIdentity(issuer.publicKey).instanceId;
+    const candidateAId = createCoordinatorInstanceIdentity(candidateA.publicKey).instanceId;
+    const candidateBId = createCoordinatorInstanceIdentity(candidateB.publicKey).instanceId;
+    const request = {
+      version: 1,
+      candidateInstanceId: candidateAId,
+      authorityEpoch: 1,
+      stateRevision: 7,
+      stateDigest: "a".repeat(64),
+      issuerInstanceId,
+      operatorIdentity: "operator:dual-054",
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    };
+    const auth = await a.command("request-recovery-authorization", { requestAuthorization: request });
+    expect(auth.ok).toBe(true);
+    const degraded = await a.command("simulate-degraded");
+    expect(degraded.ok).toBe(true);
+    const diag = await a.command("drill-diagnose", { evidence: { version: 1, issuerInstanceId, issuerInitialized: true, issuerPersistenceState: "corrupt", candidateInstanceId: candidateAId, authorityEpoch: 1, candidateEpoch: 1, candidateState: "non-authoritative", ownershipState: "non-authoritative", ownershipEpoch: 1, ownerInstanceId: candidateAId, stateRevision: 7, stateDigest: "a".repeat(64), stateFresh: true, validGrant: true, grantRevoked: false, issuerIdentityMatches: true, persistedStateHealthy: true, activeOwnershipConflict: false } });
+    expect(diag.ok).toBe(true);
+    expect(diag.result.state).toBe("degraded");
+    const evidenceB = {
+      version: 1,
+      issuerInstanceId,
+      issuerInitialized: true,
+      issuerPersistenceState: "valid",
+      candidateInstanceId: candidateBId,
+      authorityEpoch: 1,
+      candidateEpoch: 1,
+      candidateState: "non-authoritative",
+      ownershipState: "non-authoritative",
+      ownershipEpoch: 1,
+      ownerInstanceId: candidateBId,
+      stateRevision: 7,
+      stateDigest: "a".repeat(64),
+      stateFresh: true,
+      validGrant: true,
+      grantRevoked: false,
+      issuerIdentityMatches: true,
+      persistedStateHealthy: true,
+      activeOwnershipConflict: false,
+    };
+    const aUse = await a.command("drill-prepare", { evidence: { version: 1, issuerInstanceId, issuerInitialized: true, issuerPersistenceState: "valid", candidateInstanceId: candidateAId, authorityEpoch: 1, candidateEpoch: 1, candidateState: "non-authoritative", ownershipState: "non-authoritative", ownershipEpoch: 1, ownerInstanceId: candidateAId, stateRevision: 7, stateDigest: "a".repeat(64), stateFresh: true, validGrant: true, grantRevoked: false, issuerIdentityMatches: true, persistedStateHealthy: true, activeOwnershipConflict: false }, authorization: auth.result });
+    expect(aUse.ok).toBe(true);
+    const bUse = await b.command("drill-prepare", { evidence: evidenceB, authorization: auth.result });
+    expect(bUse.ok).toBe(true);
+    expect(bUse.result.state).toBe("rejected");
+    expect(bUse.result.reason).toMatch(/invalid|mismatch|candidate|binding/i);
+    const aStatus = (await a.command("inspect")).result;
+    const bStatus = (await b.command("inspect")).result;
+    expect(aStatus.authority.placementAuthorized).toBe(true);
+    expect(bStatus.authority.placementAuthorized).toBe(false);
+    await stop(a);
+    await stop(b);
+  });
+
   it("requires the same authorization to stay bound to one candidate and cannot create two authority owners", async () => {
     const dir = mkdtempSync(join(tmpdir(), "openstore-053q-dual-owner-"));
     const issuer = createIdentity();
@@ -236,6 +306,101 @@ describe("053P cross-process authority recovery", () => {
     expect(replay.ok).toBe(false);
     expect(String(replay.error)).toMatch(/invalid|mismatch|candidate|binding|epoch/i);
 
+    await stop(a);
+    await stop(b);
+  });
+
+  it("054 drill controls degraded recovery and does not authorize a second owner", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "openstore-054-two-candidate-"));
+    const issuer = createIdentity();
+    const candidateA = createIdentity();
+    const candidateB = createIdentity();
+    const a = worker(dir, issuer.recoveryPhrase.join(" "), candidateA.recoveryPhrase.join(" "));
+    const b = worker(dir, issuer.recoveryPhrase.join(" "), candidateB.recoveryPhrase.join(" "));
+    expect((await a.command("bootstrap")).ok).toBe(true);
+    expect((await a.command("start")).ok).toBe(true);
+    const grantA = await a.command("issue", { grantId: "grant-054-a" });
+    expect(grantA.ok).toBe(true);
+    await a.command("deliver", { grant: grantA.result });
+    await a.command("accept", { grantId: "grant-054-a" });
+    await a.command("establish");
+
+    const auth = await a.command("request-recovery-authorization", {
+      requestAuthorization: {
+        version: 1,
+        candidateInstanceId: createCoordinatorInstanceIdentity(candidateA.publicKey).instanceId,
+        authorityEpoch: 1,
+        stateRevision: 7,
+        stateDigest: "a".repeat(64),
+        issuerInstanceId: createCoordinatorInstanceIdentity(issuer.publicKey).instanceId,
+        operatorIdentity: "operator:054-drill",
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      },
+    });
+    expect(auth.ok).toBe(true);
+
+    const degraded = await a.command("simulate-degraded");
+    expect(degraded.ok).toBe(true);
+
+    const diag = await a.command("drill-diagnose", {
+      evidence: {
+        version: 1,
+        issuerInstanceId: createCoordinatorInstanceIdentity(issuer.publicKey).instanceId,
+        issuerInitialized: true,
+        issuerPersistenceState: "corrupt",
+        candidateInstanceId: createCoordinatorInstanceIdentity(candidateA.publicKey).instanceId,
+        authorityEpoch: 1,
+        candidateEpoch: 1,
+        candidateState: "non-authoritative",
+        ownershipState: "non-authoritative",
+        ownershipEpoch: 1,
+        ownerInstanceId: createCoordinatorInstanceIdentity(candidateA.publicKey).instanceId,
+        stateRevision: 7,
+        stateDigest: "a".repeat(64),
+        stateFresh: true,
+        validGrant: true,
+        grantRevoked: false,
+        issuerIdentityMatches: true,
+        persistedStateHealthy: true,
+        activeOwnershipConflict: false,
+      },
+    });
+    expect(diag.ok).toBe(true);
+    expect(diag.result.state).toBe("degraded");
+
+    const candidateBId = createCoordinatorInstanceIdentity(candidateB.publicKey).instanceId;
+    const evidenceB = {
+      version: 1,
+      issuerInstanceId: createCoordinatorInstanceIdentity(issuer.publicKey).instanceId,
+      issuerInitialized: true,
+      issuerPersistenceState: "valid",
+      candidateInstanceId: candidateBId,
+      authorityEpoch: 1,
+      candidateEpoch: 1,
+      candidateState: "non-authoritative",
+      ownershipState: "non-authoritative",
+      ownershipEpoch: 1,
+      ownerInstanceId: candidateBId,
+      stateRevision: 7,
+      stateDigest: "a".repeat(64),
+      stateFresh: true,
+      validGrant: true,
+      grantRevoked: false,
+      issuerIdentityMatches: true,
+      persistedStateHealthy: true,
+      activeOwnershipConflict: false,
+    };
+
+    const candidateBAttempt = await b.command("drill-prepare", { evidence: evidenceB, authorization: auth.result });
+    expect(candidateBAttempt.ok).toBe(true);
+    expect(candidateBAttempt.result.state).toBe("rejected");
+    expect(String(candidateBAttempt.result.reason)).toMatch(/invalid|mismatch|candidate|binding/i);
+
+    const aStatus = (await a.command("inspect")).result;
+    const bStatus = (await b.command("inspect")).result;
+    expect(aStatus.authority.placementAuthorized).toBe(true);
+    expect(bStatus.authority.placementAuthorized).toBe(false);
     await stop(a);
     await stop(b);
   });
