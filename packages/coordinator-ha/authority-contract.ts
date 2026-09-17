@@ -65,6 +65,7 @@ export interface AuthorityGrant {
   readonly issuerPublicKey?: string;
   readonly expiresAt?: number;
   readonly signature?: string;
+  readonly revoked?: boolean;
 }
 
 /** Contract only: implementations must be supplied by a future explicit authority mechanism. */

@@ -888,3 +888,24 @@ authority, or client failover was added. Existing 052B/052E behavior remains
 unchanged. A future control plane must provide authenticated operator intent,
 trusted grant issuance, replay protection, split-brain exclusion, and durable
 audit evidence.
+
+### Milestone 053J: trusted authority issuer
+
+053J adds `packages/coordinator-ha/authority-issuer.ts`, a vendor-neutral
+trusted issuer boundary for 053I grants. The issuer uses an Ed25519 identity,
+requires authenticated caller authorization through an injected modular
+authorizer, and rejects candidate self-issuance. Requests must explicitly
+provide candidate, epoch, revision, digest, grant ID, and bounded timestamps.
+
+Issuer authority epochs are durable and issuer-owned. Initialization requires
+an explicit `bootstrap(initialEpoch)` operation; missing or corrupt state fails
+closed and never invents an epoch. Restart preserves issuer identity, epoch,
+bounded audit records, and revocations. Grant IDs are durable and unique.
+
+Issuance audits are sanitized and exclude private keys, secrets, credentials,
+and file contents. Persistence uses restrictive atomic writes with fsync and
+parent-directory fsync. Explicit revocation is persisted and exposed through a
+bounded candidate-side revocation lookup; ambiguous revocation must reject.
+
+053J adds no HTTP control plane, automatic promotion, election, quorum,
+leases, fencing, DHT authority, coordinator failover, or client failover.

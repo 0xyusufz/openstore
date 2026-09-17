@@ -36,6 +36,7 @@ export interface AuthorityGrantServiceOptions {
   readonly persistencePath?: string;
   readonly now?: () => number;
   readonly state?: () => { revision: number; digest: string; fresh: boolean };
+  readonly revokedGrantIds?: () => readonly string[];
 }
 
 const INSTANCE_ID = /^coord-[a-f0-9]{32}$/;
@@ -101,6 +102,7 @@ export function createAuthorityGrantService(options: AuthorityGrantServiceOption
     if (!validateAuthorityGrant(grant) || !grant.issuerInstanceId || !grant.issuerPublicKey || !grant.signature ||
       !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt < grant.issuedAt) throw new Error("authority grant is invalid");
     if (grant.candidateInstanceId !== options.instance.instanceId) throw new Error("authority grant candidate does not match local instance");
+    if (options.revokedGrantIds?.().includes(grant.grantId) || grant.revoked === true) throw new Error("authority grant is revoked");
     if (!trusted.has(grant.issuerPublicKey)) throw new Error("authority grant issuer is untrusted");
     const issuerKey = Buffer.from(grant.issuerPublicKey, "base64");
     if (createCoordinatorInstanceIdentity(issuerKey).instanceId !== grant.issuerInstanceId) throw new Error("authority grant issuer identity is invalid");
