@@ -37,19 +37,29 @@ operator ports.
 
 ## Operations
 
+The small lifecycle helper keeps the secret environment file out of command
+arguments and logs. It never deletes volumes except for an explicitly
+confirmed reset:
+
 ```sh
-docker compose -f deploy/testnet/docker-compose.yml ps
-docker compose -f deploy/testnet/docker-compose.yml logs -f coordinator
-docker compose -f deploy/testnet/docker-compose.yml logs -f node-1
-docker compose -f deploy/testnet/docker-compose.yml stop
-docker compose -f deploy/testnet/docker-compose.yml restart node-2
-docker compose -f deploy/testnet/docker-compose.yml up -d
+deploy/testnet/testnet.sh start
+deploy/testnet/testnet.sh status
+deploy/testnet/testnet.sh logs coordinator
+deploy/testnet/testnet.sh stop
+deploy/testnet/testnet.sh restart
 ```
 
 The named volumes preserve coordinator registry state, each node identity,
 and each node's piece/provenance directory across stop/start and restart.
+Services also use Docker's `unless-stopped` restart policy so an unexpected
+container exit does not discard persistent state.
 
-To inspect the coordinator from the host:
+The helper reads `deploy/testnet/.env.testnet` by default. Set
+`OPENSTORE_TESTNET_ENV_FILE` to use another local environment file. It does
+not print or pass secret values as command-line arguments.
+
+To inspect coordinator health from the host, use the token in your current
+shell environment rather than putting it in a committed script:
 
 ```sh
 curl -fsS \
@@ -60,18 +70,19 @@ curl -fsS \
   http://127.0.0.1:4190/v1/nodes
 ```
 
-`docker compose down` removes containers but keeps named volumes. `down -v`
-is destructive and removes all testnet persistence. A full reset is:
+`testnet.sh stop` and `docker compose down` without `-v` preserve named
+volumes. `testnet.sh reset --yes` is explicitly destructive and removes all
+testnet persistence:
 
 ```sh
-docker compose --env-file deploy/testnet/.env.testnet \
-  -f deploy/testnet/docker-compose.yml down -v
-docker compose --env-file deploy/testnet/.env.testnet \
-  -f deploy/testnet/docker-compose.yml up -d
+deploy/testnet/testnet.sh reset --yes
+deploy/testnet/testnet.sh start
 ```
 
-050B will add dedicated status/log/reset helpers. 050C will add the complete
-three-node client and failure smoke test.
+The reset command does not restart the testnet implicitly. This prevents an
+accidental destructive command from immediately creating new state.
+
+050C will add the complete three-node client and failure smoke test.
 
 ## Troubleshooting
 

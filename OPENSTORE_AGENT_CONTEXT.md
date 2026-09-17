@@ -561,3 +561,24 @@ planned for 050B/050C. Packaging validation passed, including **65 test files
 and 405 tests**, `npm run build`, `npm run typecheck`, `git diff --check`, and
 `docker compose config` using the placeholder environment example. Changes
 remain uncommitted and unpushed.
+
+## 25. Milestone 050B operational persistence
+
+050B adds `deploy/testnet/testnet.sh`, a small secret-safe lifecycle helper
+for `start`, `stop`, `restart`, `status`, `logs`, and explicitly confirmed
+`reset --yes`. It reads `.env.testnet` through an environment-file path,
+never embeds coordinator tokens or node passwords, preserves named volumes
+for ordinary stop/restart, and does not restart after a destructive reset.
+The Compose services use `restart: unless-stopped` while retaining localhost
+host bindings and container-reachable libp2p advertised addresses.
+
+The 050A storage entrypoint already performs the required persistence
+behavior: it generates an encrypted identity keystore only when the mounted
+identity path is absent, then always reuses that path. Coordinator registry
+state remains mounted at the persistent registry volume. Focused static
+coverage is in `tests/integration/milestone-050b.test.ts`; no Docker
+containers are started by tests. Full validation passed with **66 test files
+and 407 tests**, `npm run build`, `npm run typecheck`, shell syntax checks,
+`git diff --check`, and `docker compose config`. The full multi-node client
+and failure smoke test remains deferred to 050C. Changes remain uncommitted
+and unpushed.

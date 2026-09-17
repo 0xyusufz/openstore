@@ -18,7 +18,7 @@ describe("Milestone 050A Docker packaging", () => {
     expect(compose.match(/127\.0\.0\.1:410[1-3]:410[1-3]/g)).toHaveLength(3);
     expect(compose).toContain("openstore-net:");
     expect(compose).toContain("coordinator-registry:/var/lib/openstore/coordinator");
-    expect(compose).toMatch(/OPENSTORE_COORDINATOR_TOKEN: "\$\{OPENSTORE_COORDINATOR_TOKEN:\?[^"]+\}"/);
+    expect(compose).toMatch(/OPENSTORE_COORDINATOR_TOKEN: "\$\{OPENSTORE_COORDINATOR_TOKEN:\?required\}"/);
   });
 
   it("keeps secrets out of the image and uses encrypted identity bootstrap", async () => {
