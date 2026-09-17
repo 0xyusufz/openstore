@@ -1,6 +1,18 @@
 services:
   coordinator:
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    cpus: 0.50
+    mem_limit: 512m
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     build:
       context: ../..
       dockerfile: deploy/testnet/Dockerfile
@@ -19,6 +31,18 @@ services:
 
   node-1:
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    cpus: 1.00
+    mem_limit: 1536m
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     build:
       context: ../..
       dockerfile: deploy/testnet/Dockerfile
@@ -41,6 +65,18 @@ services:
 
   node-2:
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    cpus: 1.00
+    mem_limit: 1536m
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     build:
       context: ../..
       dockerfile: deploy/testnet/Dockerfile
@@ -63,6 +99,18 @@ services:
 
   node-3:
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    cpus: 1.00
+    mem_limit: 1536m
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     build:
       context: ../..
       dockerfile: deploy/testnet/Dockerfile

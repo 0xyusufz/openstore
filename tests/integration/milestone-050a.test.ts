@@ -19,6 +19,11 @@ describe("Milestone 050A Docker packaging", () => {
     expect(compose).toContain("openstore-net:");
     expect(compose).toContain("coordinator-registry:/var/lib/openstore/coordinator");
     expect(compose).toMatch(/OPENSTORE_COORDINATOR_TOKEN: "\$\{OPENSTORE_COORDINATOR_TOKEN:\?required\}"/);
+    expect(compose.match(/no-new-privileges:true/g)).toHaveLength(4);
+    expect(compose.match(/cap_drop: \[ALL\]/g)).toHaveLength(4);
+    expect(compose.match(/mem_limit:/g)).toHaveLength(4);
+    expect(compose.match(/pids_limit:/g)).toHaveLength(4);
+    expect(compose.match(/max-size: 10m/g)).toHaveLength(4);
   });
 
   it("keeps secrets out of the image and uses encrypted identity bootstrap", async () => {
@@ -34,6 +39,11 @@ describe("Milestone 050A Docker packaging", () => {
     expect(nodeEntrypoint).toContain("createIdentity()");
     expect(nodeEntrypoint).toContain("saveIdentity(");
     expect(nodeEntrypoint).toContain("OPENSTORE_NODE_PASSWORD");
+    expect(dockerfile).toContain("useradd --system");
+    expect(dockerfile).toContain("npm prune --omit=dev");
+    expect(nodeEntrypoint).toContain("gosu openstore");
+    expect(coordinatorEntrypoint).toContain("gosu openstore");
+    expect(nodeEntrypoint).not.toContain("--coordinator-token ");
     expect(envExample).toContain("replace-with");
     expect(envExample).not.toMatch(/(BEGIN .*PRIVATE KEY|sk_live|ghp_|password123|token123)/i);
   });

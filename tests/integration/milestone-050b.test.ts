@@ -35,5 +35,7 @@ describe("Milestone 050B operator lifecycle packaging", () => {
     expect(entrypoint).toContain("saveIdentity(");
     expect(entrypoint).toContain("--identity \"$OPENSTORE_NODE_IDENTITY\"");
     expect(entrypoint).not.toContain("rm -rf");
+    expect(entrypoint).toContain("chown -R openstore:openstore");
+    expect(entrypoint).toContain("gosu openstore");
   });
 });

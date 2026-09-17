@@ -54,6 +54,24 @@ and each node's piece/provenance directory across stop/start and restart.
 Services also use Docker's `unless-stopped` restart policy so an unexpected
 container exit does not discard persistent state.
 
+The image performs a minimal root-owned volume initialization/migration, then
+executes the coordinator and storage-node processes as the dedicated
+unprivileged `openstore` user. Mounted directories are kept private (`0700`)
+and files are created restrictively (`0600`); no volume is made
+world-writable. The Compose profile drops all capabilities except the
+short-lived volume-init capabilities needed by the entrypoint, enables
+`no-new-privileges`, limits coordinator/node CPU, memory, and process counts,
+and rotates JSON logs at 10 MiB with three retained files. A 1.5 GiB node
+memory limit is independent of the node's logical 1 GiB piece quota.
+
+The final image prunes development dependencies after the build. It retains
+only runtime packages and compiled output; the entrypoints use environment
+variable names for passwords and coordinator tokens. The legacy
+`--coordinator-token` CLI option remains supported for compatibility but is
+deprecated and is never used by the Docker testnet. Non-local deployments
+must provide a secure transport boundary (for example, a TLS reverse proxy);
+TLS is intentionally not part of this testnet milestone.
+
 The helper reads `deploy/testnet/.env.testnet` by default. Set
 `OPENSTORE_TESTNET_ENV_FILE` to use another local environment file. It does
 not print or pass secret values as command-line arguments.

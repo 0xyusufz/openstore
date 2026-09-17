@@ -16,6 +16,7 @@ import { createRegistryClient, type RegistryClientOptions } from "../../packages
 import type { RegistryClient } from "../../packages/registry/coordinator.js";
 import { createPieceProvenanceStore } from "./provenance-store.js";
 import { createOrphanScanner, type OrphanScanner } from "./orphan-scanner.js";
+import { safeErrorMessage } from "./safe-error.js";
 
 export interface Libp2pStorageNodeRuntimeConfig {
   storageDir: string;
@@ -317,11 +318,7 @@ export async function createLibp2pStorageNodeRuntime(
 }
 
 function safeLifecycleError(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  return raw
-    .replace(/https?:\/\/[^\s]+/gi, "[coordinator]")
-    .replace(/(password|token|secret|private key|recovery phrase|seed)(?:\s*[:=]\s*)?[^\s:;,)]*/gi, "$1 [redacted]")
-    .slice(0, 300);
+  return safeErrorMessage(error);
 }
 
 function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number) {

@@ -33,6 +33,7 @@ import { createPieceProvenanceStore, type PieceProvenanceStore } from "./provena
 import { createOrphanScanner, type OrphanScanner } from "./orphan-scanner.js";
 import type { PieceClaim } from "../../packages/provenance/index.js";
 import { hashPieceId } from "../../packages/manifest/index.js";
+import { safeErrorMessage } from "./safe-error.js";
 
 export const STORAGE_NODE_VERSION = 1;
 
@@ -180,7 +181,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   let draining = false;
   const emit = (event: StorageNodeLifecycleEvent): void => {
     try {
-      const error = event.error?.replace(/(token|password|secret|private key)[^\s]*/gi, "$1 [redacted]").slice(0, 300);
+      const error = event.error === undefined ? undefined : safeErrorMessage(event.error);
       options.onLifecycleEvent?.({ ...event, ...(error ? { error } : {}) });
     } catch {}
   };
@@ -569,9 +570,7 @@ function safeClaim(claim: PieceClaim): Omit<PieceClaim, "clientNamespace"> & { c
 }
 
 function safeProvenanceError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error))
-    .replace(/(password|token|secret|private key|recovery phrase|seed|dek)(?:\s*[:=]\s*)?[^\s:;,)]*/gi, "$1 [redacted]")
-    .slice(0, 300);
+  return safeErrorMessage(error);
 }
 
 function hasAuthHeaders(headers: Record<string, string | undefined>): boolean {

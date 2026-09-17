@@ -2,6 +2,7 @@
 import { readFile } from "fs/promises";
 import { createLibp2pStorageNodeRuntime, validateLibp2pStorageNodeRuntimeConfig, type Libp2pStorageNodeRuntimeConfig } from "./libp2p-runtime.js";
 import type { P2PPeerDescriptor } from "../../packages/p2p/index.js";
+import { safeErrorMessage } from "./safe-error.js";
 
 export interface StorageNodeCliOptions {
   configPath?: string;
@@ -19,12 +20,11 @@ function errorMessage(error: unknown): string {
     if (current instanceof Error) { messages.push(current.message); current = current.cause; }
     else { messages.push(typeof current === "string" ? current : "storage node failed"); break; }
   }
-  return (messages.filter(Boolean).join(": ") || "storage node failed")
-    .replace(/(password|token|secret|private key|recovery phrase|seed)(?:\s*[:=]\s*)?[^\s:;,)]*/gi, "$1 [redacted]");
+  return safeErrorMessage(messages.filter(Boolean).join(": ") || "storage node failed");
 }
 
 function usage(): string {
-  return "Usage: openstore-storage-node --storage-dir <dir> --identity <keystore> --password-env <ENV> [--listen <multiaddr>] [--advertise <multiaddr>] [--bootstrap <descriptor.json>] [--capacity-bytes <n>] [--max-piece-bytes <n>] [--refresh-interval-ms <n>] [--coordinator-url <url>] [--coordinator-token-env <ENV>] [--coordinator-token <token>] [--heartbeat-interval-ms <n>] [--coordinator-retry-attempts <n>] [--coordinator-retry-backoff-ms <n>] [--coordinator-retry-max-backoff-ms <n>]";
+  return "Usage: openstore-storage-node --storage-dir <dir> --identity <keystore> --password-env <ENV> [--listen <multiaddr>] [--advertise <multiaddr>] [--bootstrap <descriptor.json>] [--capacity-bytes <n>] [--max-piece-bytes <n>] [--refresh-interval-ms <n>] [--coordinator-url <url>] [--coordinator-token-env <ENV>] [--coordinator-token <token> (deprecated)] [--heartbeat-interval-ms <n>] [--coordinator-retry-attempts <n>] [--coordinator-retry-backoff-ms <n>] [--coordinator-retry-max-backoff-ms <n>]";
 }
 
 export async function runStorageNodeCli(argv: string[], options: StorageNodeCliOptions = {}): Promise<number> {
@@ -62,7 +62,10 @@ export async function runStorageNodeCli(argv: string[], options: StorageNodeCliO
       if (!token) throw new Error("coordinator token environment variable is empty or unset");
       config.coordinatorToken = token;
     }
-    if (parsed["coordinator-token"]) config.coordinatorToken = parsed["coordinator-token"];
+    if (parsed["coordinator-token"]) {
+      err("warning: --coordinator-token is deprecated; use --coordinator-token-env instead");
+      config.coordinatorToken = parsed["coordinator-token"];
+    }
     if (parsed["heartbeat-interval-ms"]) config.heartbeatIntervalMs = Number(parsed["heartbeat-interval-ms"]);
     if (parsed["coordinator-retry-attempts"]) config.coordinatorRetryAttempts = Number(parsed["coordinator-retry-attempts"]);
     if (parsed["coordinator-retry-backoff-ms"]) config.coordinatorRetryBackoffMs = Number(parsed["coordinator-retry-backoff-ms"]);
