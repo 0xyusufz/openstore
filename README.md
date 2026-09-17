@@ -63,3 +63,76 @@ using only its recorded replica identities during an outage; they never add
 replacement replicas. Discovery refreshes are likewise safe to trigger
 immediately (`refreshNow()`) or on a schedule, with bounded duplicate-dial
 suppression.
+
+## Backup and recovery foundation
+
+`npm run backup -- create` creates a versioned directory backup without
+decrypting or interpreting any stored data. The client keystore, manifests,
+operation records, and optional web DEK vault should be backed up together.
+For a storage node, always back up its encrypted identity and the complete
+piece directory (including `.provenance`) together; never mix those from
+different nodes. The coordinator registry is an independent component.
+
+Stop or quiesce the relevant client, coordinator, or storage node before
+backing it up. This version does not provide a transactional live snapshot.
+Backups contain opaque encrypted bytes and metadata only; recovery phrases,
+passwords, coordinator tokens, private keys in plaintext, and plaintext file
+contents are never included.
+
+Example:
+
+```sh
+npm run backup -- create --destination ./backup-2026-09-17 \
+  --client-keystore ./openstore-identity.json \
+  --client-manifests ./openstore-manifests \
+  --client-operations ./openstore-manifests/.provenance-operations \
+  --client-dek ./web-vault.deks.json
+npm run backup -- verify --backup ./backup-2026-09-17
+npm run backup -- restore --backup ./backup-2026-09-17 \
+  --destination ./restored-state
+```
+
+Backup creation refuses existing destinations by default. Restore refuses
+non-empty destinations unless `--replace` is explicitly supplied, validates
+all SHA-256 checksums before staging, rejects symlinks and unsafe paths, and
+never extracts outside the selected destination. Losing the encrypted client
+keystore can make encrypted files unrecoverable even when storage replicas
+still exist. Backups should be verified regularly and retained according to
+the operator's recovery objectives; no backup guarantees protection from every
+filesystem, device, or operator failure.
+
+## Metrics foundation
+
+Coordinator instances expose a sanitized JSON snapshot at `GET /v1/metrics`
+(and `/metrics`). Storage nodes and clients use the same lightweight
+`MetricsRegistry` abstraction in `packages/metrics`; callers may inject a
+registry to inspect process-local metrics. The coordinator snapshot includes
+request/error counts, registration and heartbeat activity, expiry activity,
+capacity/persistence gauges, and request timings. Storage-node metrics cover
+bounded operation counts, rejections, capacity, draining state, and timings.
+Client, repair, and orphan-scanner boundaries record aggregate operation,
+retry, replica-failure, repair, and cleanup activity.
+
+Metric names use lowercase `snake_case`. Labels are restricted to a small
+allowlist of operation, route, result, status class, transport, and reason
+values; IDs, filenames, URLs, tokens, keys, plaintext, ciphertext, and
+recovery material are never labels. The registry has a bounded series limit
+and rejects invalid names/labels. Metrics are process-local and reset on
+restart; this milestone provides no durable storage, alerting, dashboard, or
+Prometheus/OpenTelemetry exporter. The unauthenticated coordinator endpoint
+is intended for the local/testnet boundary and must not be exposed directly
+to an untrusted network.
+
+## Operational events
+
+Coordinator, storage-node, client, repair, and orphan-cleanup boundaries can
+emit a versioned operational event stream backed by a bounded, process-local
+buffer. Events are sanitized through an allowlisted detail schema and retain
+only aggregate lifecycle, failure, retry, and scan information; sensitive
+material, identifiers, paths, URLs, request bodies, and raw errors are
+rejected. The coordinator exposes the bounded authenticated snapshot at
+`GET /v1/events` (or `/events`).
+
+The buffer defaults to 1,000 events, evicts the oldest entries
+deterministically, and resets on process restart. There is no durable event
+log, alerting, dashboard, or external exporter in this milestone.

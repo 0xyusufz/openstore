@@ -2,6 +2,7 @@ import { readdir, stat } from "fs/promises";
 import { join } from "path";
 import type { PieceProvenanceStore } from "./provenance-store.js";
 import { defaultMetrics, type MetricsRegistry } from "../../packages/metrics/index.js";
+import { defaultEvents, type EventStore } from "../../packages/events/index.js";
 
 export type OrphanScannerState = "stopped" | "running" | "paused" | "cancelling" | "failed";
 export interface OrphanScannerEvent {
@@ -30,6 +31,7 @@ export function createOrphanScanner(options: {
   maxDeletionsPerRun?: number;
   onEvent?: (event: OrphanScannerEvent) => void;
   metrics?: MetricsRegistry;
+  events?: EventStore;
 }): OrphanScanner {
   const intervalMs = options.intervalMs ?? 15 * 60 * 1000;
   const batchSize = options.batchSize ?? 100;
@@ -39,8 +41,15 @@ export function createOrphanScanner(options: {
   let active: Promise<{ scanned: number; deleted: number; retained: number }> | undefined;
   let cancelled = false;
   let snapshot: { state: OrphanScannerState; scanned: number; deleted: number; retained: number; lastError?: string } = { state, scanned: 0, deleted: 0, retained: 0 };
-  const emit = (event: OrphanScannerEvent) => { try { options.onEvent?.(event); } catch {} };
+  const emit = (event: OrphanScannerEvent) => { try { options.onEvent?.(event); } catch {} try { recordEvent(event); } catch {} };
   const metrics = options.metrics ?? defaultMetrics;
+  const events = options.events ?? defaultEvents;
+  const recordEvent = (event: OrphanScannerEvent): void => {
+    try {
+      const type = event.type === "scan.started" ? "orphan.scan-started" : event.type === "scan.completed" ? "orphan.scan-completed" : "orphan.scan-failed";
+      events.append({ version: 1, timestamp: event.timestamp, component: "orphan-scanner", type, severity: event.type === "scan.completed" ? "info" : "warning", details: { ...(event.scanned !== undefined ? { scanned: event.scanned } : {}), ...(event.deleted !== undefined ? { deleted: event.deleted } : {}), ...(event.retained !== undefined ? { retained: event.retained } : {}) } });
+    } catch {}
+  };
   const schedule = () => {
     if (state === "stopped" || state === "cancelling") return;
     timer = setTimeout(() => { void runOnce().finally(schedule); }, intervalMs);
@@ -92,6 +101,7 @@ export function createOrphanScanner(options: {
       } catch (error) {
         state = "failed";
         snapshot = { ...snapshot, state, lastError: error instanceof Error ? error.message.slice(0, 200) : "scan failed" };
+        try { events.append({ version: 1, timestamp: Date.now(), component: "orphan-scanner", type: "orphan.scan-failed", severity: "error", details: { scanned, deleted, retained } }); } catch {}
         emit({ type: "scan.completed", timestamp: Date.now(), scanned, deleted, retained });
         throw error;
       } finally { active = undefined; }

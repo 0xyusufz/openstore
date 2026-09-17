@@ -38,6 +38,7 @@ import type { CoordinatorEndpointProvider } from "./index.js";
 import { resolveEndpoints } from "./coordinator.js";
 import type { P2PTransport } from "../../packages/p2p/index.js";
 import type { MetricsRegistry } from "../../packages/metrics/index.js";
+import { defaultEvents, type EventStore } from "../../packages/events/index.js";
 import { join } from "path";
 import {
   createOperationRecordStore,
@@ -71,6 +72,7 @@ export interface UploadOptions {
   identity?: { publicKey: Buffer; privateKey: Buffer };
   operationStore?: OperationRecordStore;
   metrics?: MetricsRegistry;
+  events?: EventStore;
 }
 
 /**
@@ -234,6 +236,7 @@ export async function uploadBuffer(
         const { deletePieceFromNodes } = await import("./index.js");
         await Promise.all(attemptedPieces.map(({ pieceId, endpoints: eps }) => deletePieceFromNodes(pieceId, eps, { timeoutMs: options.timeoutMs })));
       }
+      try { (options.events ?? defaultEvents).append({ version: 1, timestamp: Date.now(), component: "client", type: "client.upload-failed", severity: "error", details: { reason: "permanent" } }); } catch {}
       throw err;
     }
 
@@ -263,6 +266,7 @@ export async function uploadBuffer(
           const { deletePieceFromNodes } = await import("./index.js");
           await Promise.all(attemptedPieces.map(({ pieceId, endpoints: eps }) => deletePieceFromNodes(pieceId, eps, { timeoutMs: options.timeoutMs })));
         }
+        try { (options.events ?? defaultEvents).append({ version: 1, timestamp: Date.now(), component: "client", type: "client.upload-failed", severity: "error", details: { reason: "permanent" } }); } catch {}
         throw err;
       }
     }

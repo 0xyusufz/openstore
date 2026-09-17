@@ -3,6 +3,7 @@ import { createIdentity } from "../identity/index.js";
 import { createRegistry } from "./index.js";
 import { DEFAULT_REGISTRY_COORDINATOR_PORT, createRegistryClient, createRegistryCoordinator } from "./coordinator.js";
 import { peerIdFromOpenStorePublicKey } from "../p2p/identity-binding.js";
+import { EventStore } from "../events/index.js";
 
 describe("cross-process registry coordinator", () => {
   it("registers, heartbeats, lists and removes nodes over HTTP", async () => {
@@ -48,6 +49,17 @@ describe("cross-process registry coordinator", () => {
     const body = await response.json() as { counters: unknown[]; gauges: unknown[]; histograms: unknown[] };
     expect(body.counters).toBeInstanceOf(Array);
     expect(JSON.stringify(body)).not.toMatch(/secret|private|recovery|plaintext|ciphertext|piece-[A-Za-z0-9]/i);
+    await coordinator.close();
+  });
+
+  it("exposes bounded authenticated operational events", async () => {
+    const events = new EventStore(10);
+    const coordinator = createRegistryCoordinator({ registry: createRegistry(), token: "secret", events });
+    const port = await coordinator.listen(0);
+    expect((await fetch(`http://127.0.0.1:${port}/v1/events`)).status).toBe(401);
+    const response = await fetch(`http://127.0.0.1:${port}/v1/events`, { headers: { authorization: "Bearer secret" } });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ type: "coordinator.started", version: 1 })]));
     await coordinator.close();
   });
 

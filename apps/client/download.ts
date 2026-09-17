@@ -37,6 +37,7 @@ import type { CoordinatorEndpointProvider } from "./index.js";
 import { resolveEndpoints, resolveManifestReplicaEndpoints } from "./coordinator.js";
 import type { P2PTransport } from "../../packages/p2p/index.js";
 import type { MetricsRegistry } from "../../packages/metrics/index.js";
+import { defaultEvents, type EventStore } from "../../packages/events/index.js";
 
 /**
  * Options for {@link downloadBuffer}.
@@ -50,6 +51,7 @@ export interface DownloadOptions {
   transport?: P2PTransport;
   identity?: { publicKey: Buffer; privateKey: Buffer };
   metrics?: MetricsRegistry;
+  events?: EventStore;
 }
 
 /**
@@ -138,6 +140,7 @@ export async function downloadBuffer(
           continue;
         }
       }
+      try { (options.events ?? defaultEvents).append({ version: 1, timestamp: Date.now(), component: "client", type: "client.download-failed", severity: "error", details: { reason: "permanent" } }); } catch {}
       throw new Error(
         `piece ${chunk.index} ("${chunk.pieceId}") failed on all ${replicas.length} replica(s): ${problems.join("; ")}`,
       );

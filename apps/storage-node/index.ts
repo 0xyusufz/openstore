@@ -35,6 +35,7 @@ import type { PieceClaim } from "../../packages/provenance/index.js";
 import { hashPieceId } from "../../packages/manifest/index.js";
 import { safeErrorMessage } from "./safe-error.js";
 import { defaultMetrics, type MetricsRegistry } from "../../packages/metrics/index.js";
+import { defaultEvents, type EventStore } from "../../packages/events/index.js";
 
 export const STORAGE_NODE_VERSION = 1;
 
@@ -64,6 +65,7 @@ export interface StorageNodeOptions {
   /** Maximum remembered authenticated request nonces. */
   maxReplayCacheEntries?: number;
   metrics?: MetricsRegistry;
+  events?: EventStore;
   /** Optional in-memory registry for node discovery */
   registry?: Registry;
   /** Heartbeat interval for registry (ms). Defaults to 10s or 1/3 of registry timeout */
@@ -157,6 +159,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       intervalMs: options.orphanCleanup.intervalMs,
       batchSize: options.orphanCleanup.batchSize,
       maxDeletionsPerRun: options.orphanCleanup.maxDeletionsPerRun,
+      events: options.events,
       deletePiece: async (pieceId) => {
         try { await unlink(join(storageDir, pieceId)); return "deleted"; }
         catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return "not-found"; throw error; }
@@ -168,6 +171,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   const maxHttpRequestBodyBytes = options.maxHttpRequestBodyBytes ?? DEFAULT_MAX_HTTP_REQUEST_BODY_BYTES;
   const maxReplayCacheEntries = options.maxReplayCacheEntries ?? DEFAULT_MAX_REPLAY_CACHE_ENTRIES;
   const metrics = options.metrics ?? defaultMetrics;
+  const events = options.events ?? defaultEvents;
   if (!Number.isSafeInteger(maxHttpRequestBodyBytes) || maxHttpRequestBodyBytes <= 0) {
     throw new TypeError("maxHttpRequestBodyBytes must be a positive safe integer");
   }
@@ -186,6 +190,10 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     try {
       const error = event.error === undefined ? undefined : safeErrorMessage(event.error);
       options.onLifecycleEvent?.({ ...event, ...(error ? { error } : {}) });
+    } catch {}
+    try {
+      const type = event.type === "storage-node.started" ? "node.started" : event.type === "storage-node.closed" ? "node.closed" : event.type === "storage-node.draining" ? "node.draining" : "node.recovery";
+      events.append({ version: 1, timestamp: Date.now(), component: "storage-node", type, severity: event.error ? "error" : "info", details: event.error ? { reason: "transient" } : {} });
     } catch {}
   };
 
@@ -206,6 +214,9 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       const status = res.statusCode;
       const result = status >= 200 && status < 300 ? "success" : status === 413 ? "rejected" : "error";
       metrics.increment("storage_request_errors_total", result === "error" ? 1 : 0, { operation, result });
+      if (result === "error" || result === "rejected") {
+        try { events.append({ version: 1, timestamp: Date.now(), component: "storage-node", type: result === "rejected" ? "storage.request-rejected" : "storage.request-error", severity: result === "rejected" ? "warning" : "error", details: { operation, result } }); } catch {}
+      }
       metrics.increment("storage_request_rejections_total", result === "rejected" ? 1 : 0, { operation, result: "rejected" });
       if (operation === "store" && result === "success") metrics.increment("storage_piece_stores_total", 1, { result: "success" });
       if (operation === "get" && result === "success") metrics.increment("storage_piece_gets_total", 1, { result: "success" });
@@ -342,6 +353,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
           options.registry.registerSigned(signed);
         } catch (err) {
           // Clean up server if registration fails
+          try { events.append({ version: 1, timestamp: Date.now(), component: "storage-node", type: "node.registration-failed", severity: "error", details: { reason: "transient" } }); } catch {}
           await new Promise<void>((res) => server.close(() => res()));
           throw new Error(`registry registration failed: ${(err as Error).message}`);
         }
@@ -355,7 +367,9 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
               const { createSignedHeartbeat } = await import("../../packages/registry/index.js");
               const signed = createSignedHeartbeat(nodeIdentity as Identity, registeredNodeId as string, { capacity: cap });
               (options.registry as Registry).heartbeatSigned(signed);
-            } catch {}
+            } catch {
+              try { events.append({ version: 1, timestamp: Date.now(), component: "storage-node", type: "node.heartbeat-failed", severity: "warning", details: { reason: "transient" } }); } catch {}
+            }
           })();
         }, intervalMs);
         // Don't keep process alive just for heartbeat

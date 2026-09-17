@@ -31,6 +31,7 @@ import { MixedStorageTransport, HttpStorageTransport } from "./http-transport.js
 import { createOperationRecordStore, type OperationRecordStore, releaseClaimOnNode } from "./provenance.js";
 import type { P2PProvenanceTransport } from "../../packages/p2p/index.js";
 import { defaultMetrics, type MetricsRegistry } from "../../packages/metrics/index.js";
+import { defaultEvents, type EventStore } from "../../packages/events/index.js";
 
 export const DELETE_VERSION = 1;
 
@@ -53,6 +54,7 @@ export interface DeleteFileOptions {
   operationStore?: OperationRecordStore;
   provenanceTransport?: P2PProvenanceTransport;
   metrics?: MetricsRegistry;
+  events?: EventStore;
 }
 
 /**
@@ -127,7 +129,7 @@ export async function deleteFile(
   endpoints: StorageNodeEndpoint[],
   options: DeleteFileOptions = {},
 ): Promise<DeleteFileReport> {
-  (options.metrics ?? defaultMetrics).increment("client_deletes_total", 1, { result: "success" });
+  const events = options.events ?? defaultEvents;
   const checked = revalidateManifest(manifest);
   if (endpoints.length === 0 && options.coordinator) {
     const known = options.coordinator.getKnownEndpoints?.() ?? options.coordinator.getEndpoints();
@@ -189,6 +191,7 @@ export async function deleteFile(
 
   if (failed.length > 0) {
     // Unresolved failures: keep the local manifest and fail loudly.
+    try { events.append({ version: 1, timestamp: Date.now(), component: "client", type: "client.delete-failed", severity: "error", details: { reason: "permanent" } }); } catch {}
     throw new DeleteFileError(report);
   }
 
