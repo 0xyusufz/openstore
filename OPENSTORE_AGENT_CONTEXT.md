@@ -158,6 +158,11 @@ piece transport. It must not be coupled to client encryption/storage logic.
   events, coordinator-owned expiry scheduling, read-only node status snapshots,
   sanitized runtime lifecycle/recovery telemetry, client last-known-good
   metadata, and focused lifecycle integration coverage.
+- **053Q:** Added the authority recovery policy and operator safety boundary,
+  with typed recovery evidence, explicit operator authorization, durable
+  authorization/revocation persistence, runtime/control-plane enforcement,
+  bounded observability, and fail-closed recovery checks without automatic
+  promotion or election.
 
 ## 7. State after Milestone 043
 

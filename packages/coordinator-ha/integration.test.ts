@@ -68,6 +68,7 @@ describe("coordinator HA integration boundary", () => {
       establishOwnership: async () => {},
       releaseOwnership: async () => {},
       fenceOwner: async () => {},
+      inspectRecovery: () => ({ decision: "denied" as const, state: "missing-evidence" as const, reason: "missing_evidence" as const, requiresOperatorAuthorization: false, authorized: false }),
     };
     const identity = createIdentity();
     const adapter = createCoordinatorHaAdapter({

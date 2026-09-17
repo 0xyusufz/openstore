@@ -6,6 +6,7 @@ import type { EventStore, OperationalEventType } from "../events/index.js";
 import type { MetricsRegistry } from "../metrics/index.js";
 import type { Condition, ConditionEvaluator } from "../conditions/index.js";
 import { evaluateAuthorityState, type AuthorityEligibility } from "./authority-contract.js";
+import type { AuthorityRecoveryEvidence, AuthorityRecoveryPolicy, RecoveryOperatorAuthorization } from "./authority-recovery-policy.js";
 
 export type CoordinatorAuthorityRuntimeState = "stopped" | "running" | "degraded";
 export type AuthorityRuntimeFailureCode =
@@ -35,6 +36,7 @@ export interface CoordinatorAuthorityRuntime {
   establishOwnership(): Promise<void>;
   releaseOwnership(reason: string): Promise<void>;
   fenceOwner(reason: string): Promise<void>;
+  inspectRecovery(evidence?: AuthorityRecoveryEvidence): ReturnType<AuthorityRecoveryPolicy["evaluateRecovery"]>;
 }
 
 export interface CoordinatorAuthorityRuntimeOptions {
@@ -43,6 +45,7 @@ export interface CoordinatorAuthorityRuntimeOptions {
   readonly ownership: AuthorityOwnershipService;
   readonly issuerInstanceId: string;
   readonly candidate: ReturnType<typeof createAuthorityGrantService>;
+  readonly recoveryPolicy?: AuthorityRecoveryPolicy;
   readonly events?: EventStore;
   readonly metrics?: MetricsRegistry;
   readonly conditions?: ConditionEvaluator;
@@ -99,6 +102,12 @@ export function createCoordinatorAuthorityRuntime(options: CoordinatorAuthorityR
     });
   };
 
+  const recoveryPolicy = options.recoveryPolicy;
+  const checkRecoveryPolicy = (evidence?: AuthorityRecoveryEvidence): ReturnType<AuthorityRecoveryPolicy["evaluateRecovery"]> | undefined => {
+    if (!recoveryPolicy) return undefined;
+    return recoveryPolicy.evaluateRecovery(evidence, undefined);
+  };
+
   return {
     async start() {
       if (lifecycle === "running") return;
@@ -117,7 +126,15 @@ export function createCoordinatorAuthorityRuntime(options: CoordinatorAuthorityR
       }
       if (!issuer.initialized) {
         failureCode = issuer.persistenceState === "missing" ? "missing_issuer" : "uninitialized_issuer";
-        lifecycle = "running"; lastTransition = "started"; metric("authority_runtime_starts_total"); metric("authority_runtime_non_authoritative_total"); metric("authority_persistence_degraded_total"); event("authority.startup.blocked", "warning", { classification: failureCode }); return;
+        lifecycle = "running"; lastTransition = "started"; metric("authority_runtime_starts_total"); metric("authority_runtime_non_authoritative_total"); metric("authority_persistence_degraded_total"); event("authority.startup.blocked", "warning", { classification: failureCode });
+        if (recoveryPolicy) {
+          const result = checkRecoveryPolicy();
+          if (result && result.state === "authorization-required") {
+            metric("authority_recovery_blocked_total");
+            event("authority.recovery.blocked", "warning", { classification: "missing_evidence" });
+          }
+        }
+        return;
       }
       if (!current.issuerPersistenceHealthy || !current.candidatePersistenceHealthy || !current.ownershipPersistenceHealthy ||
         (current.issuerPersistenceHealthy && options.issuer.inspect().initialized &&
@@ -139,6 +156,33 @@ export function createCoordinatorAuthorityRuntime(options: CoordinatorAuthorityR
       event("authority.runtime.started", "info");
       if (candidateState.state === "authoritative") { metric("authority_runtime_restored_total"); event("authority.state.restored", "info", { epoch: issuer.authorityEpoch }); }
       if (ownership.state === "authoritative") { event("authority.ownership.restored", "info", { epoch: ownership.authorityEpoch }); }
+      if (recoveryPolicy) {
+        const result = checkRecoveryPolicy({
+          version: 1,
+          issuerInstanceId: options.issuerInstanceId,
+          issuerInitialized: issuer.initialized,
+          issuerPersistenceState: issuer.persistenceState,
+          candidateInstanceId: candidateState.instanceId,
+          authorityEpoch: issuer.authorityEpoch,
+          candidateEpoch: candidateState.authorityEpoch,
+          candidateState: candidateState.state,
+          ownershipState: ownership.state,
+          ownershipEpoch: ownership.authorityEpoch,
+          ownerInstanceId: ownership.ownerInstanceId,
+          stateRevision: candidateState.stateRevision ?? 0,
+          stateDigest: candidateState.stateDigest ?? "0".repeat(64),
+          stateFresh: true,
+          validGrant: candidateState.state === "authoritative" || ownership.state === "authoritative",
+          grantRevoked: false,
+          issuerIdentityMatches: issuer.issuerInstanceId === options.issuerInstanceId,
+          persistedStateHealthy: current.issuerPersistenceHealthy && current.candidatePersistenceHealthy && current.ownershipPersistenceHealthy,
+          activeOwnershipConflict: ownership.conflict,
+        });
+        if (result && result.decision === "requires_operator_authorization") {
+          metric("authority_recovery_blocked_total");
+          event("authority.recovery.blocked", "warning", { classification: "authorization_required", state: "authorization-required" });
+        }
+      }
     },
     async stop() {
       if (lifecycle === "stopped") return;
@@ -177,6 +221,9 @@ export function createCoordinatorAuthorityRuntime(options: CoordinatorAuthorityR
       await options.controlPlane.fenceOwner(reason);
       lastTransition = "fenced";
       metric("authority_owner_fencing_total"); event("authority.owner.fenced", "warning");
+    },
+    inspectRecovery(evidence) {
+      return recoveryPolicy ? recoveryPolicy.evaluateRecovery(evidence, undefined) : { decision: "denied", state: "missing-evidence", reason: "missing_evidence", requiresOperatorAuthorization: false, authorized: false };
     },
   };
 }

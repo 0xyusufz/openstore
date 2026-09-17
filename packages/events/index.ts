@@ -19,7 +19,10 @@ export type OperationalEventType =
   | "authority.ownership.restored" | "authority.ownership.established"
   | "authority.ownership.failed" | "authority.ownership.released"
   | "authority.owner.fenced" | "authority.token.rejected"
-  | "authority.grant.revoked";
+  | "authority.grant.revoked"
+  | "authority.recovery.authorization.requested" | "authority.recovery.authorization.accepted"
+  | "authority.recovery.authorization.rejected" | "authority.recovery.authorization.revoked"
+  | "authority.recovery.blocked" | "authority.recovery.action.executed";
 
 export type EventDetailValue = string | number | boolean;
 export type EventDetails = Readonly<Record<string, EventDetailValue>>;
@@ -55,6 +58,9 @@ const TYPES = new Set<OperationalEventType>([
   "authority.ownership.failed", "authority.ownership.released",
   "authority.owner.fenced", "authority.token.rejected",
   "authority.grant.revoked",
+  "authority.recovery.authorization.requested", "authority.recovery.authorization.accepted",
+  "authority.recovery.authorization.rejected", "authority.recovery.authorization.revoked",
+  "authority.recovery.blocked", "authority.recovery.action.executed",
 ]);
 const COMPONENTS = new Set<OperationalEvent["component"]>(["coordinator", "storage-node", "client", "repair", "orphan-scanner"]);
 const DETAIL_KEYS = new Set([

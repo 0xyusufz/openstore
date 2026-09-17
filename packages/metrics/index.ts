@@ -14,8 +14,10 @@ const ALLOWED_VALUES: Record<string, Set<string>> = {
   reason: new Set(["capacity", "draining", "integrity", "transient", "permanent", "expired", "stale", "invalid",
     "missing_issuer", "uninitialized_issuer", "corrupt_issuer", "corrupt_candidate",
     "corrupt_ownership", "epoch_mismatch", "issuer_identity_mismatch", "ownership_conflict",
-    "validation_failure", "revoked_grant"]),
-  state: new Set(["fresh", "cached", "stale", "unavailable", "reconnecting"]),
+    "validation_failure", "revoked_grant", "authorization_required", "authorization_revoked",
+    "authorization_invalid", "authorization_expired", "authorization_accepted", "stale_evidence",
+    "missing_evidence", "conflicted_evidence", "recovery_approved", "recovery_blocked"]),
+  state: new Set(["fresh", "cached", "stale", "unavailable", "reconnecting", "authorization-required", "authorized", "recovered", "rejected", "conflicted", "missing-evidence"]),
 };
 
 function validateName(name: string): void {

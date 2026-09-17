@@ -26,6 +26,7 @@ export interface ConditionInput {
     persistenceCorrupt?: boolean;
     ownershipConflict?: boolean;
     fenced?: boolean;
+    recoveryState?: "unavailable" | "missing-evidence" | "stale" | "conflicted" | "authorization-required" | "authorized" | "recovered" | "rejected";
   };
 }
 export interface ConditionThresholds {
@@ -99,6 +100,9 @@ export class ConditionEvaluator {
         { id: "authority_persistence_corrupt", severity: "critical" as const, active: input.authority.persistenceCorrupt === true, timestamp, message: message(input.authority.persistenceCorrupt === true, "Authority persistence is corrupt; runtime remains fail-closed.", "Authority persistence is not corrupt.") },
         { id: "authority_ownership_conflict", severity: "critical" as const, active: input.authority.ownershipConflict === true, timestamp, message: message(input.authority.ownershipConflict === true, "Authority ownership is conflicted.", "Authority ownership is not conflicted.") },
         { id: "authority_fenced", severity: "warning" as const, active: input.authority.fenced === true, timestamp, message: message(input.authority.fenced === true, "Authority owner is fenced.", "Authority owner is not fenced.") },
+        { id: "authority_recovery_authorization_required", severity: "warning" as const, active: input.authority.recoveryState === "authorization-required", timestamp, message: message(input.authority.recoveryState === "authorization-required", "Authority recovery requires explicit operator authorization.", "Authority recovery authorization is not required.") },
+        { id: "authority_recovery_conflicted", severity: "critical" as const, active: input.authority.recoveryState === "conflicted" || input.authority.recoveryState === "stale", timestamp, message: message(input.authority.recoveryState === "conflicted" || input.authority.recoveryState === "stale", "Authority recovery evidence is stale or conflicted.", "Authority recovery evidence is not stale or conflicted.") },
+        { id: "authority_recovery_blocked", severity: "critical" as const, active: input.authority.recoveryState === "rejected" || input.authority.recoveryState === "unavailable", timestamp, message: message(input.authority.recoveryState === "rejected" || input.authority.recoveryState === "unavailable", "Authority recovery is blocked by invalid or unavailable evidence.", "Authority recovery is not blocked.") },
       ] : []),
     ];
     this.current = conditions.map((condition) => Object.freeze({ ...condition }));

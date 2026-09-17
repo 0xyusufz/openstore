@@ -153,4 +153,90 @@ describe("053P cross-process authority recovery", () => {
     expect((await restartedA.command("inspect")).result.ownership.state).toBe("released");
     await stop(restartedA); await stop(b);
   });
+
+  it("requires the same authorization to stay bound to one candidate and cannot create two authority owners", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "openstore-053q-dual-owner-"));
+    const issuer = createIdentity();
+    const candidateA = createIdentity();
+    const candidateB = createIdentity();
+    const issuerInstanceId = createCoordinatorInstanceIdentity(issuer.publicKey).instanceId;
+    const candidateAInstanceId = createCoordinatorInstanceIdentity(candidateA.publicKey).instanceId;
+    const candidateBInstanceId = createCoordinatorInstanceIdentity(candidateB.publicKey).instanceId;
+    const a = worker(dir, issuer.recoveryPhrase.join(" "), candidateA.recoveryPhrase.join(" "));
+    const b = worker(dir, issuer.recoveryPhrase.join(" "), candidateB.recoveryPhrase.join(" "));
+
+    expect((await a.command("bootstrap")).ok).toBe(true);
+    expect((await a.command("start")).ok).toBe(true);
+    const grantA = await a.command("issue", { grantId: "grant-dual-owner-a" });
+    expect(grantA.ok).toBe(true);
+    await a.command("deliver", { grant: grantA.result });
+    await a.command("accept", { grantId: "grant-dual-owner-a" });
+    await a.command("establish");
+
+    const authorizationRequest = {
+      version: 1,
+      candidateInstanceId: candidateAInstanceId,
+      authorityEpoch: 1,
+      stateRevision: 7,
+      stateDigest: "a".repeat(64),
+      issuerInstanceId: issuerInstanceId,
+      operatorIdentity: "operator:dual-owner",
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    };
+    const authorizationResult = await a.command("request-recovery-authorization", { requestAuthorization: authorizationRequest });
+    expect(authorizationResult.ok).toBe(true);
+    const authorization = authorizationResult.result;
+    expect(authorization.candidateInstanceId).toBe(candidateAInstanceId);
+
+    expect((await b.command("start")).ok).toBe(true);
+
+    const bEvidence = {
+      version: 1,
+      issuerInstanceId: issuerInstanceId,
+      issuerInitialized: true,
+      issuerPersistenceState: "valid",
+      candidateInstanceId: candidateBInstanceId,
+      authorityEpoch: 1,
+      candidateEpoch: 1,
+      candidateState: "non-authoritative",
+      ownershipState: "non-authoritative",
+      ownershipEpoch: 1,
+      ownerInstanceId: candidateBInstanceId,
+      stateRevision: 7,
+      stateDigest: "a".repeat(64),
+      stateFresh: true,
+      validGrant: true,
+      grantRevoked: false,
+      issuerIdentityMatches: true,
+      persistedStateHealthy: true,
+      activeOwnershipConflict: false,
+    };
+
+    const bRejected = await b.command("approve-recovery", { evidence: bEvidence, authorization });
+    expect(bRejected.ok).toBe(false);
+    expect(String(bRejected.error)).toMatch(/invalid|mismatch|candidate|binding|epoch/i);
+
+    const bExplicitRejected = await b.command("execute-explicit-recovery", {
+      action: "approve",
+      evidence: bEvidence,
+      authorization,
+    });
+    expect(bExplicitRejected.ok).toBe(false);
+    expect(String(bExplicitRejected.error)).toMatch(/invalid|mismatch|candidate|binding|epoch/i);
+
+    const statusA = (await a.command("inspect")).result;
+    const statusB = (await b.command("inspect")).result;
+    expect(statusA.authority.placementAuthorized).toBe(true);
+    expect(statusA.ownership.state).toBe("authoritative");
+    expect(statusB.authority.placementAuthorized).toBe(false);
+    expect(statusB.ownership.state).toBe("non-authoritative");
+
+    const replay = await b.command("approve-recovery", { evidence: bEvidence, authorization });
+    expect(replay.ok).toBe(false);
+    expect(String(replay.error)).toMatch(/invalid|mismatch|candidate|binding|epoch/i);
+
+    await stop(a);
+    await stop(b);
+  });
 });

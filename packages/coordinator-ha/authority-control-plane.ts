@@ -3,10 +3,13 @@ import { createAuthorityGrantService, type SignedAuthorityGrant } from "./author
 import { type AuthorityIssuerService, type AuthorityIssuanceRequest } from "./authority-issuer.js";
 import { evaluateAuthorityState, type AuthorityEligibility } from "./authority-contract.js";
 import type { AuthorityOwnershipService, AuthorityOwnershipToken, AuthorityOwnershipRecord } from "./authority-ownership.js";
+import { createAuthorityRecoveryPolicy, type AuthorityRecoveryEvidence, type AuthorityRecoveryPolicy, type AuthorityRecoveryPolicyEvaluation, type AuthorityRecoveryPolicyInspection, type RecoveryOperatorAuthorization, type RecoveryOperatorAuthorizationRequest } from "./authority-recovery-policy.js";
 
 export interface AuthorityControlPlaneRequest extends AuthorityIssuanceRequest {
   readonly operation: "request-grant";
 }
+
+export type AuthorityRecoveryAuthorizationState = "none" | "requested" | "accepted" | "rejected" | "revoked";
 
 export interface AuthorityControlPlaneInspection {
   readonly issuerInstanceId: string;
@@ -21,6 +24,12 @@ export interface AuthorityControlPlaneInspection {
   readonly revocations: ReturnType<AuthorityIssuerService["revocations"]>;
   readonly lastTransition: "none" | "issued" | "delivered" | "accepted" | "revoked" | "failed";
   readonly ownership?: AuthorityOwnershipRecord;
+  readonly recovery?: {
+    readonly state: AuthorityRecoveryPolicyInspection["lastState"];
+    readonly decision: AuthorityRecoveryPolicyInspection["lastDecision"];
+    readonly reason: AuthorityRecoveryPolicyInspection["lastReason"];
+    readonly authorizationState: AuthorityRecoveryAuthorizationState;
+  };
 };
 
 export interface AuthorityControlPlane {
@@ -30,6 +39,11 @@ export interface AuthorityControlPlane {
   acceptGrant(grantId: string): Promise<void>;
   revokeGrant(grantId: string, callerIdentity: string): Promise<void>;
   inspectRevocation(grantId: string): ReturnType<AuthorityIssuerService["inspectRevocation"]>;
+  inspectRecovery(evidence?: AuthorityRecoveryEvidence): AuthorityRecoveryPolicyEvaluation;
+  requestRecoveryAuthorization(request: RecoveryOperatorAuthorizationRequest): Promise<RecoveryOperatorAuthorization>;
+  approveRecovery(evidence: AuthorityRecoveryEvidence, authorization: RecoveryOperatorAuthorization): AuthorityRecoveryPolicyEvaluation;
+  rejectRecoveryAuthorization(authorizationId: string, reason: string): Promise<void>;
+  executeExplicitRecoveryAction(action: "inspect" | "approve" | "reset" | "fence", evidence: AuthorityRecoveryEvidence, authorization?: RecoveryOperatorAuthorization): AuthorityRecoveryPolicyEvaluation;
   establishOwnership(): Promise<void>;
   releaseOwnership(reason: string): Promise<void>;
   fenceOwner(reason: string): Promise<void>;
@@ -43,6 +57,17 @@ export interface AuthorityControlPlaneOptions {
   readonly issuerInstanceId: string;
   readonly revokedGrantIds?: () => readonly string[];
   readonly ownership?: AuthorityOwnershipService;
+  readonly recoveryPolicy?: AuthorityRecoveryPolicy;
+  readonly recoveryPolicyFactory?: (options: {
+    readonly issuerIdentity: { publicKey: Buffer; privateKey: Buffer };
+    readonly issuerInstanceId: string;
+    readonly candidateInstanceId: string;
+    readonly persistencePath?: string;
+    readonly now?: () => number;
+  }) => AuthorityRecoveryPolicy;
+  readonly recoveryPersistencePath?: string;
+  readonly issuerIdentity?: { publicKey: Buffer; privateKey: Buffer };
+  readonly now?: () => number;
 }
 
 const INSTANCE_ID = /^coord-[a-f0-9]{32}$/;
@@ -52,8 +77,18 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
   if (!INSTANCE_ID.test(options.candidateInstanceId) || !INSTANCE_ID.test(options.issuerInstanceId)) {
     throw new TypeError("control-plane instance identity is invalid");
   }
+  const recoveryPolicy = options.recoveryPolicy ?? (
+    options.issuerIdentity ? createAuthorityRecoveryPolicy({
+      issuerIdentity: options.issuerIdentity,
+      issuerInstanceId: options.issuerInstanceId,
+      candidateInstanceId: options.candidateInstanceId,
+      persistencePath: options.recoveryPersistencePath,
+      now: options.now,
+    }) : undefined
+  );
   let delivered: SignedAuthorityGrant | undefined;
   let lastTransition: AuthorityControlPlaneInspection["lastTransition"] = "none";
+  let recoveryAuthorizationState: AuthorityRecoveryAuthorizationState = "none";
 
   const validateRequest = (request: AuthorityControlPlaneRequest): void => {
     if (!request || request.operation !== "request-grant" || request.version !== 1 ||
@@ -91,6 +126,18 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
     delivered = grant;
     lastTransition = "delivered";
   };
+  const recoveryInspection = (): AuthorityControlPlaneInspection["recovery"] => {
+    if (!recoveryPolicy) return undefined as never;
+    const result = recoveryPolicy.inspect();
+    const authorizationState = result.authorizations.length > 0 ? "requested" : "none";
+    return Object.freeze({
+      state: result.lastState,
+      decision: result.lastDecision,
+      reason: result.lastReason,
+      authorizationState,
+    });
+  };
+
   return {
     requestGrant: issueGrant,
     issueGrant,
@@ -123,6 +170,36 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
         throw error;
       }
     },
+    inspectRecovery(evidence) {
+      if (!recoveryPolicy) {
+        return { decision: "denied", state: "missing-evidence", reason: "missing_evidence", requiresOperatorAuthorization: false, authorized: false };
+      }
+      const result = recoveryPolicy.evaluateRecovery(evidence, undefined);
+      return result;
+    },
+    async requestRecoveryAuthorization(request) {
+      if (!recoveryPolicy) throw new Error("recovery policy is unavailable");
+      const authorization = await recoveryPolicy.requestAuthorization(request);
+      recoveryAuthorizationState = "requested";
+      return authorization;
+    },
+    approveRecovery(evidence, authorization) {
+      if (!recoveryPolicy) throw new Error("recovery policy is unavailable");
+      const result = recoveryPolicy.approveRecovery(evidence, authorization);
+      recoveryAuthorizationState = result.authorized ? "accepted" : "rejected";
+      return result;
+    },
+    async rejectRecoveryAuthorization(authorizationId, reason) {
+      if (!recoveryPolicy) throw new Error("recovery policy is unavailable");
+      await recoveryPolicy.rejectAuthorization(authorizationId, reason);
+      recoveryAuthorizationState = "revoked";
+    },
+    executeExplicitRecoveryAction(action, evidence, authorization) {
+      if (!recoveryPolicy) throw new Error("recovery policy is unavailable");
+      const result = recoveryPolicy.executeExplicitRecoveryAction(action, evidence, authorization);
+      recoveryAuthorizationState = result.authorized ? "accepted" : result.state === "rejected" ? "rejected" : "none";
+      return result;
+    },
     async establishOwnership() {
       if (!options.ownership || !delivered) throw new Error("ownership token is not available");
       await options.ownership.establishOwnership(options.ownership.createToken(delivered));
@@ -139,6 +216,7 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
     inspect() {
       const candidateState = options.candidate.inspectState();
       const revokedGrantIds = options.revokedGrantIds?.() ?? [];
+      const recovery = recoveryInspection();
       return Object.freeze({
         issuerInstanceId: options.issuerInstanceId,
         candidateInstanceId: options.candidateInstanceId,
@@ -152,6 +230,7 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
         revocations: options.issuer.revocations(),
         ownership: options.ownership?.inspectOwnership(),
         lastTransition,
+        recovery,
       });
     },
   };
