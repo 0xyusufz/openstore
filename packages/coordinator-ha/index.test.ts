@@ -6,6 +6,10 @@ import {
 } from "./index.js";
 import { createIdentity } from "../identity/index.js";
 import { createAuthorityProof, CoordinatorBootstrapMachine, createCoordinatorInstanceIdentity, parseCoordinatorInstanceIdentity, serializeCoordinatorInstanceIdentity, verifyAuthorityProof } from "./index.js";
+import { CoordinatorReplicaImporter, createCoordinatorSnapshotExporter } from "./index.js";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("coordinator HA foundation model", () => {
   it("creates immutable authoritative snapshots and monotonic revisions", () => {
@@ -84,5 +88,61 @@ describe("coordinator HA foundation model", () => {
       nodeId: `node-${i}`, publicKey: instance.publicKey, endpoint: "http://node", available: true,
       lastSeen: 100, capacity: { allocatedBytes: 1, usedBytes: 0, availableBytes: 1 }, reliability: {},
     })) }, identity.privateKey, now)).toThrow();
+  });
+
+  it("transfers state transactionally, persists it, and never grants replica authority", async () => {
+    const identity = createIdentity();
+    const instance = createCoordinatorInstanceIdentity(identity.publicKey);
+    const now = Date.now();
+    const snapshot = { version: 1 as const, instance, revision: 1, observedAt: now, nodes: [] };
+    const exporter = createCoordinatorSnapshotExporter(() => snapshot, identity.privateKey, () => now);
+    const response = await exporter.request({ version: 1, maxNodes: 2, maxBytes: 4096 });
+    const directory = mkdtempSync(join(tmpdir(), "openstore-053c-"));
+    const persistencePath = join(directory, "replica.json");
+    const replica = new CoordinatorReplicaImporter({ trustedInstanceIds: [instance.instanceId], persistencePath });
+    expect((await replica.import(response, true)).accepted).toBe(true);
+    expect(replica.status().authorityClassification).toBe("non-authoritative");
+    expect(replica.status().acceptedRevision).toBe(1);
+    expect((await replica.import(response, true)).accepted).toBe(true);
+    const reloaded = new CoordinatorReplicaImporter({ trustedInstanceIds: [instance.instanceId], persistencePath });
+    expect(reloaded.status().state).toBe("accepted");
+    expect(reloaded.status().authorityClassification).toBe("non-authoritative");
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("rejects conflicts, untrusted revisions, cancellation, corruption, and persistence failure", async () => {
+    const identity = createIdentity();
+    const instance = createCoordinatorInstanceIdentity(identity.publicKey);
+    const now = Date.now();
+    const make = (revision: number, nodeId?: string) => ({
+      version: 1 as const, instance, revision, observedAt: now,
+      nodes: nodeId ? [{ nodeId, publicKey: instance.publicKey, endpoint: "http://node", available: true,
+        lastSeen: now, capacity: { allocatedBytes: 1, usedBytes: 0, availableBytes: 1 }, reliability: {} }] : [],
+    });
+    const first = make(2);
+    const exporter = createCoordinatorSnapshotExporter(() => first, identity.privateKey, () => now);
+    const response = await exporter.request({ version: 1 });
+    const directory = mkdtempSync(join(tmpdir(), "openstore-053c-"));
+    const path = join(directory, "state.json");
+    const replica = new CoordinatorReplicaImporter({ trustedInstanceIds: [instance.instanceId], persistencePath: path });
+    await replica.import(response, true);
+    const lower = make(1);
+    const lowerResponse = { version: 1 as const, snapshot: lower, proof: createAuthorityProof(lower, identity.privateKey, now) };
+    expect((await replica.import(lowerResponse, true)).accepted).toBe(false);
+    const conflict = make(2, "node-conflict");
+    const conflictResponse = { version: 1 as const, snapshot: conflict, proof: createAuthorityProof(conflict, identity.privateKey, now) };
+    expect((await replica.import(conflictResponse, true)).accepted).toBe(false);
+    const canceled = new AbortController();
+    canceled.abort();
+    expect((await replica.import(response, true, canceled.signal)).reason).toBe("unavailable");
+    const corruptPath = join(directory, "corrupt.json");
+    await import("node:fs/promises").then(({ writeFile }) => writeFile(corruptPath, "{bad", "utf8"));
+    expect(new CoordinatorReplicaImporter({ trustedInstanceIds: [instance.instanceId], persistencePath: corruptPath }).status().state).toBe("unavailable");
+    const persistenceDirectory = join(directory, "existing");
+    mkdirSync(persistenceDirectory);
+    const failing = new CoordinatorReplicaImporter({ trustedInstanceIds: [instance.instanceId], persistencePath: persistenceDirectory });
+    expect((await failing.import(response, true)).accepted).toBe(false);
+    expect(failing.status().authorityClassification).toBe("non-authoritative");
+    rmSync(directory, { recursive: true, force: true });
   });
 });

@@ -744,3 +744,26 @@ leader election, fencing, automatic failover, revocation, or client changes.
 The proof demonstrates integrity and signer identity, not exclusive
 single-coordinator authority; split-brain prevention and write ordering remain
 future HA work. See `docs/053B-coordinator-replica-bootstrap.md`.
+
+Milestone 053C adds `CoordinatorReplicaStateTransfer`,
+`createCoordinatorSnapshotExporter`, and `CoordinatorReplicaImporter` to the
+coordinator HA package. The exporter provides a bounded versioned snapshot
+and 053B authority proof. The importer distinguishes transport
+authentication, snapshot integrity, signer identity, coordinator authority,
+and replica authority; even accepted state is always diagnosed as
+`non-authoritative`.
+
+Replica installation validates the trusted source identity, canonical digest,
+proof, timestamps, node records, size/count bounds, and revision tuple before
+replacement. Same revision and digest is idempotent; same revision with a
+different digest, lower revisions, unknown sources, and conflicting instance
+identities are rejected. Higher revisions require an explicitly trusted
+source and valid proof. Persistence uses restrictive temporary files,
+flush/rename semantics, schema validation, and fail-closed reload behavior.
+Corrupt or missing state, cancellation, malformed input, and persistence
+failure cannot grant authority or partially replace accepted state.
+
+053C does not add a coordinator HTTP endpoint, consensus, election,
+promotion, fencing, replication ordering, client failover, or DHT authority.
+The current coordinator remains the sole runtime authority; see
+`docs/053C-coordinator-state-transfer.md`.

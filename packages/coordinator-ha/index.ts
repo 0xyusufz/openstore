@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { signMessage, verifyMessage } from "../identity/index.js";
 
 /**
@@ -108,14 +110,59 @@ export type BootstrapState = "uninitialized" | "bootstrapping" | "authoritative"
 export interface BootstrapResult {
   readonly accepted: boolean;
   readonly state: BootstrapState;
-  readonly reason?: "invalid" | "stale" | "incomplete" | "identity-mismatch" | "revision-mismatch" | "untrusted";
+  readonly reason?: "invalid" | "stale" | "incomplete" | "identity-mismatch" | "revision-mismatch" | "untrusted" | "unavailable";
   readonly snapshot?: CoordinatorBootstrapSnapshot;
+}
+
+export interface CoordinatorReplicaBootstrapRequest {
+  readonly version: 1;
+  readonly maxNodes?: number;
+  readonly maxBytes?: number;
+  readonly knownInstanceId?: string;
+  readonly knownRevision?: number;
+}
+
+export interface CoordinatorReplicaBootstrapResponse {
+  readonly version: 1;
+  readonly snapshot: CoordinatorBootstrapSnapshot;
+  readonly proof: CoordinatorAuthorityProof;
+}
+
+export type ReplicaBootstrapLifecycle = "uninitialized" | "bootstrapping" | "accepted" | "rejected" | "stale" | "unavailable";
+
+export interface CoordinatorReplicaBootstrapStatus {
+  readonly version: 1;
+  readonly state: ReplicaBootstrapLifecycle;
+  readonly authorityClassification: "non-authoritative";
+  readonly sourceInstanceId?: string;
+  readonly acceptedRevision?: number;
+  readonly snapshotDigest?: string;
+  readonly lastValidatedAt?: number;
+  readonly persistenceHealthy: boolean;
+}
+
+export interface CoordinatorReplicaStateTransfer {
+  request(request: CoordinatorReplicaBootstrapRequest): Promise<CoordinatorReplicaBootstrapResponse>;
+  import(response: CoordinatorReplicaBootstrapResponse, transportAuthenticated: boolean, signal?: AbortSignal): Promise<BootstrapResult>;
+  status(): CoordinatorReplicaBootstrapStatus;
 }
 
 const MAX_BOOTSTRAP_NODES = 10_000;
 const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 const HEX64 = /^[a-f0-9]{64}$/;
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+
+function freezeSnapshot(snapshot: CoordinatorBootstrapSnapshot): CoordinatorBootstrapSnapshot {
+  return Object.freeze({
+    ...snapshot,
+    instance: Object.freeze({ ...snapshot.instance }),
+    nodes: Object.freeze(snapshot.nodes.map((node) => Object.freeze({
+      ...node,
+      capacity: Object.freeze({ ...node.capacity }),
+      reliability: Object.freeze({ ...node.reliability }),
+    }))),
+  });
+}
 
 export function createCoordinatorInstanceIdentity(publicKey: Buffer): CoordinatorInstanceIdentity {
   if (publicKey.length !== 44) throw new TypeError("coordinator public key is invalid");
@@ -326,4 +373,166 @@ function canonical(value: unknown): string {
       return Object.freeze({ accepted: false, state: "rejected", reason });
     }
     markUnavailable(): void { if (this.currentState !== "authoritative") this.currentState = "unavailable"; }
+  }
+
+  export interface CoordinatorSnapshotExporter {
+    request(request: CoordinatorReplicaBootstrapRequest): Promise<CoordinatorReplicaBootstrapResponse>;
+  }
+
+  export function createCoordinatorSnapshotExporter(
+    snapshotProvider: () => CoordinatorBootstrapSnapshot,
+    privateKey: Buffer,
+    now: () => number = () => Date.now(),
+  ): CoordinatorSnapshotExporter {
+    return {
+      async request(request): Promise<CoordinatorReplicaBootstrapResponse> {
+        if (!request || request.version !== 1) throw new TypeError("bootstrap request is invalid");
+        const snapshot = freezeSnapshot(snapshotProvider());
+        validateBootstrapSnapshot(snapshot, now());
+        if (request.maxNodes !== undefined && (!Number.isSafeInteger(request.maxNodes) || request.maxNodes < 0 || snapshot.nodes.length > request.maxNodes)) {
+          throw new RangeError("bootstrap snapshot exceeds requested node bound");
+        }
+        const serialized = canonical(snapshot);
+        if (request.maxBytes !== undefined && (!Number.isSafeInteger(request.maxBytes) || request.maxBytes <= 0 || Buffer.byteLength(serialized) > request.maxBytes)) {
+          throw new RangeError("bootstrap snapshot exceeds requested byte bound");
+        }
+        if (request.knownInstanceId !== undefined && request.knownInstanceId !== snapshot.instance.instanceId) {
+          throw new TypeError("bootstrap source identity does not match request");
+        }
+        return Object.freeze({ version: 1, snapshot, proof: createAuthorityProof(snapshot, privateKey, now()) });
+      },
+    };
+  }
+
+  interface PersistedReplicaState {
+    readonly version: 1;
+    readonly snapshot: CoordinatorBootstrapSnapshot;
+    readonly proof: CoordinatorAuthorityProof;
+  }
+
+  export interface ReplicaPersistenceOptions {
+    readonly persistencePath?: string;
+    readonly trustedInstanceIds: readonly string[];
+  }
+
+  export class CoordinatorReplicaImporter implements CoordinatorReplicaStateTransfer {
+    private lifecycle: ReplicaBootstrapLifecycle = "uninitialized";
+    private acceptedSnapshot?: CoordinatorBootstrapSnapshot;
+    private acceptedProof?: CoordinatorAuthorityProof;
+    private lastValidatedAt?: number;
+    private persistenceHealthy = true;
+    private readonly trustedInstanceIds: ReadonlySet<string>;
+    private readonly persistencePath?: string;
+
+    constructor(options: ReplicaPersistenceOptions) {
+      if (!Array.isArray(options.trustedInstanceIds) || options.trustedInstanceIds.length > 64) {
+        throw new TypeError("trusted coordinator identities are invalid");
+      }
+      this.trustedInstanceIds = new Set(options.trustedInstanceIds);
+      this.persistencePath = options.persistencePath;
+      if (this.persistencePath) this.loadPersisted();
+    }
+
+    async request(_request: CoordinatorReplicaBootstrapRequest): Promise<CoordinatorReplicaBootstrapResponse> {
+      throw new Error("replica cannot export coordinator state");
+    }
+
+    async import(response: CoordinatorReplicaBootstrapResponse, transportAuthenticated: boolean, signal?: AbortSignal): Promise<BootstrapResult> {
+      this.lifecycle = "bootstrapping";
+      const now = Date.now();
+      try {
+        if (signal?.aborted) return this.reject("unavailable");
+        if (!transportAuthenticated || !response || response.version !== 1 ||
+          !this.trustedInstanceIds.has(response.snapshot.instance.instanceId)) {
+          return this.reject("untrusted");
+        }
+        validateBootstrapSnapshot(response.snapshot, now);
+        const digest = coordinatorSnapshotDigest(response.snapshot);
+        if (response.proof.snapshotDigest !== digest) return this.reject("invalid");
+        if (!verifyAuthorityProof(response.snapshot, response.proof, now)) {
+          return this.reject(response.proof.issuedAt < now ? "stale" : "invalid");
+        }
+        const current = this.acceptedSnapshot;
+        if (current) {
+          if (current.instance.instanceId !== response.snapshot.instance.instanceId) return this.reject("identity-mismatch");
+          if (response.snapshot.revision < current.revision) return this.reject("revision-mismatch");
+          if (response.snapshot.revision === current.revision) {
+            if (coordinatorSnapshotDigest(current) !== digest) return this.reject("revision-mismatch");
+            this.lastValidatedAt = now;
+            return Object.freeze({ accepted: true, state: "authoritative", snapshot: current });
+          }
+        }
+        const nextSnapshot = freezeSnapshot(response.snapshot);
+        const nextProof = Object.freeze({ ...response.proof });
+        this.persist({ version: 1, snapshot: nextSnapshot, proof: nextProof });
+        this.acceptedSnapshot = nextSnapshot;
+        this.acceptedProof = nextProof;
+        this.lastValidatedAt = now;
+        this.lifecycle = "accepted";
+        return Object.freeze({ accepted: true, state: "authoritative", snapshot: nextSnapshot });
+      } catch (error) {
+        this.persistenceHealthy = false;
+        this.lifecycle = "rejected";
+        return Object.freeze({ accepted: false, state: "rejected", reason: error instanceof RangeError ? "incomplete" : "invalid" });
+      }
+    }
+
+    status(): CoordinatorReplicaBootstrapStatus {
+      return Object.freeze({
+        version: 1,
+        state: this.lifecycle,
+        authorityClassification: "non-authoritative",
+        ...(this.acceptedSnapshot ? {
+          sourceInstanceId: this.acceptedSnapshot.instance.instanceId,
+          acceptedRevision: this.acceptedSnapshot.revision,
+          snapshotDigest: coordinatorSnapshotDigest(this.acceptedSnapshot),
+        } : {}),
+        ...(this.lastValidatedAt === undefined ? {} : { lastValidatedAt: this.lastValidatedAt }),
+        persistenceHealthy: this.persistenceHealthy,
+      });
+    }
+
+    private reject(reason: BootstrapResult["reason"]): BootstrapResult {
+      this.lifecycle = reason === "stale" ? "stale" : "rejected";
+      return Object.freeze({ accepted: false, state: "rejected", reason });
+    }
+
+    private persist(value: PersistedReplicaState): void {
+      if (!this.persistencePath) return;
+      const path = this.persistencePath;
+      const dir = dirname(path);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const temp = `${path}.tmp`;
+      const payload = canonical(value);
+      writeFileSync(temp, payload, { encoding: "utf8", mode: 0o600 });
+      const fd = openSync(temp, "r");
+      try { fsyncSync(fd); } finally { closeSync(fd); }
+      renameSync(temp, path);
+      try {
+        const directoryFd = openSync(dir, "r");
+        try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
+      } catch { /* directory fsync is not available on every platform */ }
+    }
+
+    private loadPersisted(): void {
+      try {
+        const raw = requirePersistedFile(this.persistencePath as string);
+        if (Buffer.byteLength(raw, "utf8") > MAX_SNAPSHOT_BYTES + 4096) throw new RangeError("persisted replica state is too large");
+        const value = JSON.parse(raw) as PersistedReplicaState;
+        if (value.version !== 1) throw new TypeError("persisted replica state version is invalid");
+        validateBootstrapSnapshot(value.snapshot, Date.now());
+        if (!this.trustedInstanceIds.has(value.snapshot.instance.instanceId) ||
+          !verifyAuthorityProof(value.snapshot, value.proof)) throw new TypeError("persisted replica state is not trusted");
+        this.acceptedSnapshot = freezeSnapshot(value.snapshot);
+        this.acceptedProof = Object.freeze({ ...value.proof });
+        this.lifecycle = "accepted";
+      } catch {
+        this.persistenceHealthy = false;
+        this.lifecycle = "unavailable";
+      }
+    }
+  }
+
+  function requirePersistedFile(path: string): string {
+    return readFileSync(path, "utf8");
   }
