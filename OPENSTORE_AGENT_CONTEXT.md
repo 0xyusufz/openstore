@@ -953,3 +953,22 @@ revoked/non-authoritative state. DHT, reachability, heartbeat, newer revision,
 and coordinator startup cannot bypass revocation. Existing client and
 placement/outage semantics remain unchanged. See
 `docs/053L-authority-revocation-safety.md`.
+
+### Milestone 053M: split-brain exclusion and fencing boundary
+
+053M adds `packages/coordinator-ha/authority-ownership.ts`, a durable
+single-owner boundary with signed ownership tokens. Tokens bind issuer,
+authority epoch, owner instance, grant ID, state revision/digest, issuance
+time, and unique token ID using existing Ed25519 primitives.
+
+At a given issuer-owned epoch, a different owner is always rejected. Same
+owner/same token is idempotent. Higher epoch ownership requires a new explicit
+trusted grant; local epoch creation is impossible. Release and fencing are
+explicit durable transitions that invalidate old tokens and never promote
+another coordinator.
+
+The 053K control plane exposes explicit ownership establishment, release,
+fencing, and sanitized ownership inspection. Corrupt ownership state fails
+closed. DHT, reachability, heartbeat, latest revision, network partition, and
+replica observations cannot establish authority. See
+`docs/053M-split-brain-exclusion-fencing.md`.

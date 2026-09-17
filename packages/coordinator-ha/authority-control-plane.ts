@@ -2,6 +2,7 @@ import type { AuthorityGrantServiceOptions } from "./authority-grant.js";
 import { createAuthorityGrantService, type SignedAuthorityGrant } from "./authority-grant.js";
 import { type AuthorityIssuerService, type AuthorityIssuanceRequest } from "./authority-issuer.js";
 import { evaluateAuthorityState, type AuthorityEligibility } from "./authority-contract.js";
+import type { AuthorityOwnershipService, AuthorityOwnershipToken, AuthorityOwnershipRecord } from "./authority-ownership.js";
 
 export interface AuthorityControlPlaneRequest extends AuthorityIssuanceRequest {
   readonly operation: "request-grant";
@@ -19,6 +20,7 @@ export interface AuthorityControlPlaneInspection {
   readonly revokedGrantIds: readonly string[];
   readonly revocations: ReturnType<AuthorityIssuerService["revocations"]>;
   readonly lastTransition: "none" | "issued" | "delivered" | "accepted" | "revoked" | "failed";
+  readonly ownership?: AuthorityOwnershipRecord;
 };
 
 export interface AuthorityControlPlane {
@@ -28,6 +30,9 @@ export interface AuthorityControlPlane {
   acceptGrant(grantId: string): Promise<void>;
   revokeGrant(grantId: string, callerIdentity: string): Promise<void>;
   inspectRevocation(grantId: string): ReturnType<AuthorityIssuerService["inspectRevocation"]>;
+  establishOwnership(): Promise<void>;
+  releaseOwnership(reason: string): Promise<void>;
+  fenceOwner(reason: string): Promise<void>;
   inspect(): AuthorityControlPlaneInspection;
 }
 
@@ -37,6 +42,7 @@ export interface AuthorityControlPlaneOptions {
   readonly candidateInstanceId: string;
   readonly issuerInstanceId: string;
   readonly revokedGrantIds?: () => readonly string[];
+  readonly ownership?: AuthorityOwnershipService;
 }
 
 const INSTANCE_ID = /^coord-[a-f0-9]{32}$/;
@@ -117,6 +123,18 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
         throw error;
       }
     },
+    async establishOwnership() {
+      if (!options.ownership || !delivered) throw new Error("ownership token is not available");
+      await options.ownership.establishOwnership(options.ownership.createToken(delivered));
+    },
+    async releaseOwnership(reason) {
+      if (!options.ownership) throw new Error("ownership service is unavailable");
+      await options.ownership.releaseOwnership(reason);
+    },
+    async fenceOwner(reason) {
+      if (!options.ownership) throw new Error("ownership service is unavailable");
+      await options.ownership.fenceOwner(reason);
+    },
     inspectRevocation: (grantId) => options.issuer.inspectRevocation(grantId),
     inspect() {
       const candidateState = options.candidate.inspectState();
@@ -132,6 +150,7 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
         audits: options.issuer.audits(),
         revokedGrantIds: Object.freeze([...revokedGrantIds]),
         revocations: options.issuer.revocations(),
+        ownership: options.ownership?.inspectOwnership(),
         lastTransition,
       });
     },
