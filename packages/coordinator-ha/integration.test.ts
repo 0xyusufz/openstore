@@ -55,4 +55,30 @@ describe("coordinator HA integration boundary", () => {
     expect(response.snapshot.nodes).toHaveLength(0);
     expect(adapter.status()).toMatchObject({ state: "uninitialized", authorityClassification: "non-authoritative" });
   });
+
+  it("awaits authority runtime shutdown", async () => {
+    let stopped = false;
+    let resolveStop!: () => void;
+    const stopPromise = new Promise<void>((resolve) => { resolveStop = resolve; });
+    const runtime = {
+      start: async () => {},
+      stop: async () => { await stopPromise; stopped = true; },
+      status: () => ({ state: "stopped" as const, authority: { eligible: false, state: "unknown" as const, placementAuthorized: false, existingManifestOperationsAllowed: false, snapshotExportAllowed: false, snapshotImportAllowed: false }, issuerInstanceId: "coord-00000000000000000000000000000000", issuerPersistenceHealthy: true, candidatePersistenceHealthy: true, ownershipPersistenceHealthy: true, candidateState: { version: 1 as const, instanceId: "coord-00000000000000000000000000000000", state: "non-authoritative" as const, authorityEpoch: 0 }, ownership: { version: 1 as const, state: "non-authoritative" as const, authorityEpoch: 0, conflict: false }, lastTransition: "none" as const }),
+      validateOwnershipToken: () => false,
+      establishOwnership: async () => {},
+      releaseOwnership: async () => {},
+      fenceOwner: async () => {},
+    };
+    const identity = createIdentity();
+    const adapter = createCoordinatorHaAdapter({
+      config: { enabled: false, role: "standalone", syncIntervalMs: 5_000, staleAfterMs: 30_000 },
+      registry: createRegistry(), instance: createCoordinatorInstanceIdentity(identity.publicKey),
+      signingKey: identity.privateKey, authorityRuntime: runtime,
+    });
+    const stopping = adapter.stop();
+    expect(stopped).toBe(false);
+    resolveStop();
+    await stopping;
+    expect(stopped).toBe(true);
+  });
 });

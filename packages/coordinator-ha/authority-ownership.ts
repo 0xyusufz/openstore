@@ -1,4 +1,4 @@
-import { closeSync, chmodSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, chmodSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createCoordinatorInstanceIdentity, type CoordinatorInstanceIdentity } from "./index.js";
 import { signMessage, verifyMessage } from "../identity/index.js";
@@ -37,6 +37,7 @@ export interface AuthorityOwnershipService {
   validateOwnershipToken(token: AuthorityOwnershipToken): boolean;
   establishOwnership(token: AuthorityOwnershipToken): Promise<void>;
   inspectOwnership(): AuthorityOwnershipRecord;
+  persistenceHealthy(): boolean;
   releaseOwnership(reason: string): Promise<void>;
   fenceOwner(reason: string): Promise<void>;
 }
@@ -95,7 +96,7 @@ export function createAuthorityOwnershipService(options: AuthorityOwnershipOptio
       (parsed.tokenId !== undefined && !ID.test(parsed.tokenId)) ||
       (parsed.acceptedGrantId !== undefined && !ID.test(parsed.acceptedGrantId))) throw new Error("invalid ownership state");
     record = Object.freeze(parsed);
-  } catch { healthy = false; }
+  } catch { healthy = !existsSync(options.persistencePath); }
   const persist = (next: AuthorityOwnershipRecord): void => {
     if (!healthy && record.state === "non-authoritative" && readFileSafe(options.persistencePath)) throw new Error("ownership persistence is unavailable");
     const path = options.persistencePath; mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -146,6 +147,7 @@ export function createAuthorityOwnershipService(options: AuthorityOwnershipOptio
       persist({ version: 1, state: "authoritative", authorityEpoch: token.authorityEpoch, ownerInstanceId: token.ownerInstanceId, acceptedGrantId: token.grantId, tokenId: token.tokenId, stateRevision: token.stateRevision, stateDigest: token.stateDigest, issuerInstanceId: token.issuerInstanceId, transitionedAt: now(), conflict: false });
     },
     inspectOwnership: () => Object.freeze({ ...record }),
+    persistenceHealthy: () => healthy,
     async releaseOwnership(_reason) { persist({ ...record, state: "released", transitionedAt: now() }); },
     async fenceOwner(_reason) { persist({ ...record, state: "fenced", transitionedAt: now() }); },
   };

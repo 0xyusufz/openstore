@@ -972,3 +972,27 @@ fencing, and sanitized ownership inspection. Corrupt ownership state fails
 closed. DHT, reachability, heartbeat, latest revision, network partition, and
 replica observations cannot establish authority. See
 `docs/053M-split-brain-exclusion-fencing.md`.
+
+### Milestone 053N: cross-process authority runtime integration
+
+053N adds `packages/coordinator-ha/runtime.ts`, a lifecycle adapter around the
+existing 053I–053M services. It restores and validates issuer, candidate, and
+ownership persistence without duplicating registry state or creating a second
+authority store. Issuer initialization is mandatory for authority restoration;
+missing issuer state cannot be treated as initialized. Startup requires issuer,
+candidate, and ownership epochs to agree, and requires ownership issuer identity
+to match the loaded issuer. Missing state remains non-authoritative;
+corrupt/degraded state prevents runtime startup and reports sanitized degraded
+status.
+
+The existing HA integration adapter can optionally start/stop this runtime.
+Start/stop are idempotent, shutdown awaits runtime stop, and no authority
+background loop is created.
+Runtime operations delegate explicit ownership establishment, release, fencing,
+token validation, and inspection to the existing control plane/services.
+There is no issuance, self-promotion, automatic promotion, failover, or
+unauthenticated HTTP mutation endpoint.
+
+Default coordinator behavior, placement authority, client outage semantics,
+DHT discovery-only behavior, and replica non-authority remain unchanged. See
+`docs/053N-cross-process-authority-runtime.md`.

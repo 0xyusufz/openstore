@@ -17,6 +17,8 @@ import {
   CoordinatorReplicaImporter,
 } from "./index.js";
 import type { AuthorityControlPlane } from "./authority-control-plane.js";
+import type { CoordinatorAuthorityRuntime } from "./runtime.js";
+import type { CoordinatorAuthorityRuntimeStatus } from "./runtime.js";
 
 export type CoordinatorHaRole = "standalone" | "replica-observer";
 
@@ -59,11 +61,12 @@ export function parseCoordinatorHaConfig(env: NodeJS.ProcessEnv = process.env): 
 export interface CoordinatorHaAdapter {
   readonly config: CoordinatorHaConfig;
   readonly authorityControlPlane?: AuthorityControlPlane;
+  readonly authorityRuntime?: CoordinatorAuthorityRuntime;
   exportState(request?: CoordinatorReplicaBootstrapRequest): Promise<CoordinatorReplicaBootstrapResponse>;
   importState(response: CoordinatorReplicaBootstrapResponse, transportAuthenticated: boolean): Promise<BootstrapResult>;
-  status(): CoordinatorReplicaSyncStatus | CoordinatorReplicaBootstrapStatus;
+  status(): CoordinatorReplicaSyncStatus | CoordinatorReplicaBootstrapStatus | CoordinatorAuthorityRuntimeStatus;
   start(): Promise<void>;
-  stop(): void;
+  stop(): Promise<void>;
   forceSync(): Promise<Awaited<ReturnType<CoordinatorReplicaSyncManager["syncNow"]>>>;
   resetForRebootstrap(): Promise<void>;
 }
@@ -80,6 +83,7 @@ export interface CoordinatorHaAdapterOptions {
   readonly events?: EventStore;
   readonly exportSnapshot?: () => CoordinatorBootstrapSnapshot;
   readonly authorityControlPlane?: AuthorityControlPlane;
+  readonly authorityRuntime?: CoordinatorAuthorityRuntime;
 }
 
 function snapshotFromRegistry(registry: Registry, instance: CoordinatorInstanceIdentity, revision: number, observedAt: number): CoordinatorBootstrapSnapshot {
@@ -127,6 +131,7 @@ export function createCoordinatorHaAdapter(options: CoordinatorHaAdapterOptions)
   return {
     config,
     authorityControlPlane: options.authorityControlPlane,
+    authorityRuntime: options.authorityRuntime,
     async exportState(request = { version: 1 }): Promise<CoordinatorReplicaBootstrapResponse> {
       if (!exporter) throw new Error("coordinator HA export is unavailable");
       return exporter.request(request);
@@ -136,6 +141,7 @@ export function createCoordinatorHaAdapter(options: CoordinatorHaAdapterOptions)
       return importer.import(response, transportAuthenticated);
     },
     status() {
+      if (options.authorityRuntime) return options.authorityRuntime.status();
       if (sync) return sync.status();
       if (importer) return importer.status();
       return {
@@ -146,6 +152,7 @@ export function createCoordinatorHaAdapter(options: CoordinatorHaAdapterOptions)
       };
     },
     async start() {
+      await options.authorityRuntime?.start();
       if (!sync) return;
       await sync.start();
       if (!interval) {
@@ -153,7 +160,8 @@ export function createCoordinatorHaAdapter(options: CoordinatorHaAdapterOptions)
         interval.unref?.();
       }
     },
-    stop() {
+    async stop() {
+      await options.authorityRuntime?.stop();
       if (interval) { clearInterval(interval); interval = undefined; }
       sync?.stop();
     },

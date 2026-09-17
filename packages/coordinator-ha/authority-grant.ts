@@ -1,4 +1,4 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, chmodSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { createCoordinatorInstanceIdentity, type CoordinatorInstanceIdentity } from "./index.js";
@@ -65,6 +65,7 @@ export function createSignedAuthorityGrant(
 
 export function createAuthorityGrantService(options: AuthorityGrantServiceOptions): CoordinatorAuthorityController & {
   inspectState(): AuthorityGrantState;
+  persistenceHealthy(): boolean;
   acceptGrant(grant: SignedAuthorityGrant): Promise<void>;
   revoke(reason: string): Promise<void>;
 } {
@@ -73,6 +74,7 @@ export function createAuthorityGrantService(options: AuthorityGrantServiceOption
   if (!INSTANCE_ID.test(options.instance.instanceId) || trusted.size === 0 || trusted.size > 64) throw new TypeError("authority grant configuration is invalid");
   for (const key of trusted) if (!PUBLIC_KEY.test(key)) throw new TypeError("trusted issuer key is invalid");
   let current: AuthorityGrantState = Object.freeze({ version: 1, instanceId: options.instance.instanceId, state: "non-authoritative", authorityEpoch: 0 });
+  let persistenceHealthy = true;
   if (options.persistencePath) {
     try {
       const parsed = JSON.parse(readFileSync(options.persistencePath, "utf8")) as AuthorityGrantState;
@@ -80,6 +82,7 @@ export function createAuthorityGrantService(options: AuthorityGrantServiceOption
         !Number.isSafeInteger(parsed.authorityEpoch) || parsed.authorityEpoch < 0) throw new Error("invalid persisted authority state");
       current = Object.freeze(parsed);
     } catch {
+      persistenceHealthy = !existsSync(options.persistencePath);
       current = Object.freeze({ version: 1, instanceId: options.instance.instanceId, state: "non-authoritative", authorityEpoch: 0 });
     }
   }
@@ -140,6 +143,7 @@ export function createAuthorityGrantService(options: AuthorityGrantServiceOption
     inspectAuthority,
     demote: revoke,
     inspectState,
+    persistenceHealthy: () => persistenceHealthy,
     acceptGrant,
     revoke,
   };
