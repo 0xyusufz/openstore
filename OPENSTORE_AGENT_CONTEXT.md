@@ -699,3 +699,26 @@ Future revocation remains architecture work: it needs an independently
 authorized signer, an authenticated peer-identity binding, replay/freshness
 rules, bounded verification, and defined coordinator-outage behavior. No
 revocation or new trust service was introduced.
+
+Milestone 053A adds `packages/coordinator-ha`, a small pure foundation for a
+future coordinator HA implementation. It defines a vendor-neutral
+`CoordinatorService` boundary for registration, heartbeat, unregister,
+discovery, persistence status, health, and bounded state snapshots. It does
+not replace the current registry or route runtime traffic through a new
+adapter.
+
+The state model classifies authoritative persistent registry state separately
+from derived/process-local state and client caches. It provides immutable
+versioned metadata with bounded instance identity, monotonic local revision,
+validated observation timestamp, and `known`/`stale`/`unknown` state. Local
+revisions are explicitly not distributed conflict resolution and cannot
+justify last-writer-wins or automatic promotion. Non-authoritative or
+ambiguous snapshots cannot authorize placement.
+
+The 053A architecture document defines complete authenticated bootstrap
+requirements for future replicas, persistence verification, outage semantics,
+and split-brain safety. A reachable standby is not authoritative merely
+because the primary is unavailable. Ambiguity fails closed for new placement
+and repair, while existing-manifest download/delete retain 052B behavior.
+Coordinator instance identity persistence, authority proof, write ordering,
+and client routing remain unresolved 053B design decisions.
