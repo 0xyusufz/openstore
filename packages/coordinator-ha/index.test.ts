@@ -7,6 +7,7 @@ import {
 import { createIdentity } from "../identity/index.js";
 import { createAuthorityProof, CoordinatorBootstrapMachine, createCoordinatorInstanceIdentity, parseCoordinatorInstanceIdentity, serializeCoordinatorInstanceIdentity, verifyAuthorityProof } from "./index.js";
 import { CoordinatorReplicaImporter, createCoordinatorSnapshotExporter } from "./index.js";
+import { compareCoordinatorStateOrdering } from "./index.js";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -71,11 +72,20 @@ describe("coordinator HA foundation model", () => {
     expect(machine.state).toBe("authoritative");
   });
 
+  it("orders source revision and digest tuples deterministically", () => {
+    const base = { instanceId: "coord-a", revision: 2, snapshotDigest: "a".repeat(64) };
+    expect(compareCoordinatorStateOrdering(base, base)).toBe("duplicate");
+    expect(compareCoordinatorStateOrdering(base, { ...base, revision: 1 })).toBe("stale_revision");
+    expect(compareCoordinatorStateOrdering(base, { ...base, snapshotDigest: "b".repeat(64) })).toBe("revision_digest_conflict");
+    expect(compareCoordinatorStateOrdering(base, { ...base, revision: 3 })).toBe("higher_revision");
+    expect(compareCoordinatorStateOrdering(base, { ...base, instanceId: "coord-b" })).toBe("instance_conflict");
+  });
+
   it("rejects tampering, stale/future proofs, wrong authority, and oversized snapshots", () => {
     const identity = createIdentity();
     const instance = createCoordinatorInstanceIdentity(identity.publicKey);
     const now = Date.now();
-    const snapshot = { version: 1 as const, instance, revision: 1, observedAt: now, nodes: [] };
+    const snapshot = { version: 1 as const, instance, revision: 1, observedAt: now - 31_000, nodes: [] };
     const proof = createAuthorityProof(snapshot, identity.privateKey, now);
     expect(verifyAuthorityProof(snapshot, { ...proof, signature: proof.signature.slice(0, -2) + "aa" }, now + 10)).toBe(false);
     expect(verifyAuthorityProof(snapshot, proof, now + 100_000)).toBe(false);
@@ -105,7 +115,7 @@ describe("coordinator HA foundation model", () => {
     expect(replica.status().acceptedRevision).toBe(1);
     expect((await replica.import(response, true)).accepted).toBe(true);
     const reloaded = new CoordinatorReplicaImporter({ trustedInstanceIds: [instance.instanceId], persistencePath });
-    expect(reloaded.status().state).toBe("accepted");
+    expect(reloaded.status().state).toBe("synchronized");
     expect(reloaded.status().authorityClassification).toBe("non-authoritative");
     rmSync(directory, { recursive: true, force: true });
   });
@@ -144,5 +154,47 @@ describe("coordinator HA foundation model", () => {
     expect((await failing.import(response, true)).accepted).toBe(false);
     expect(failing.status().authorityClassification).toBe("non-authoritative");
     rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("classifies deterministic ordering outcomes and never promotes a replica", async () => {
+    const identity = createIdentity();
+    const instance = createCoordinatorInstanceIdentity(identity.publicKey);
+    const now = Date.now();
+    const make = (revision: number, nodeId?: string) => ({
+      version: 1 as const, instance, revision, observedAt: now,
+      nodes: nodeId ? [{ nodeId, publicKey: instance.publicKey, endpoint: "http://node", available: true,
+        lastSeen: now, capacity: { allocatedBytes: 1, usedBytes: 0, availableBytes: 1 }, reliability: {} }] : [],
+    });
+    const first = make(1);
+    const second = make(2);
+    const firstResponse = { version: 1 as const, snapshot: first, proof: createAuthorityProof(first, identity.privateKey, now) };
+    const secondResponse = { version: 1 as const, snapshot: second, proof: createAuthorityProof(second, identity.privateKey, now) };
+    const replica = new CoordinatorReplicaImporter({ trustedInstanceIds: [instance.instanceId] });
+    expect((await replica.import(firstResponse, true)).state).toBe("synchronized");
+    expect((await replica.import(firstResponse, true)).reason).toBeUndefined();
+    expect(replica.status().state).toBe("synchronized");
+    expect((await replica.import(secondResponse, true)).accepted).toBe(true);
+    const conflicting = make(2, "different");
+    const conflictResult = await replica.import({ version: 1, snapshot: conflicting, proof: createAuthorityProof(conflicting, identity.privateKey, now) }, true);
+    expect(conflictResult.reason).toBe("revision_digest_conflict");
+    expect(replica.status().state).toBe("conflicted");
+    expect(replica.status().authorityClassification).toBe("non-authoritative");
+    const otherIdentity = createIdentity();
+    const otherInstance = createCoordinatorInstanceIdentity(otherIdentity.publicKey);
+    const otherSnapshot = { ...make(3), instance: otherInstance };
+    const unknown = await replica.import({ version: 1, snapshot: otherSnapshot, proof: createAuthorityProof(otherSnapshot, otherIdentity.privateKey, now) }, true);
+    expect(unknown.reason).toBe("unknown_instance");
+  });
+
+  it("rejects stale and future proofs without using timestamps for ordering", async () => {
+    const identity = createIdentity();
+    const instance = createCoordinatorInstanceIdentity(identity.publicKey);
+    const now = Date.now();
+    const snapshot = { version: 1 as const, instance, revision: 1, observedAt: now - 31_000, nodes: [] };
+    const replica = new CoordinatorReplicaImporter({ trustedInstanceIds: [instance.instanceId] });
+    const stale = createAuthorityProof(snapshot, identity.privateKey, now - 31_000);
+    expect((await replica.import({ version: 1, snapshot, proof: stale }, true)).reason).toBe("stale_proof");
+    const future = createAuthorityProof(snapshot, identity.privateKey, now + 10_000);
+    expect((await replica.import({ version: 1, snapshot, proof: future }, true)).reason).toBe("future_proof");
   });
 });

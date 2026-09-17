@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { signMessage, verifyMessage } from "../identity/index.js";
 
@@ -105,12 +105,16 @@ export interface CoordinatorAuthorityProof {
   readonly signature: string;
 }
 
-export type BootstrapState = "uninitialized" | "bootstrapping" | "authoritative" | "stale" | "rejected" | "unavailable";
+export type BootstrapState = "uninitialized" | "bootstrapping" | "authoritative" | "synchronized" | "stale" | "conflicted" | "rejected" | "unavailable";
+export type ReplicaConflictReason =
+  | "duplicate" | "stale_revision" | "revision_digest_conflict" | "unknown_instance"
+  | "instance_conflict" | "invalid_proof" | "invalid_snapshot" | "stale_proof"
+  | "future_proof" | "authority_ambiguous" | "persistence_failure";
 
 export interface BootstrapResult {
   readonly accepted: boolean;
   readonly state: BootstrapState;
-  readonly reason?: "invalid" | "stale" | "incomplete" | "identity-mismatch" | "revision-mismatch" | "untrusted" | "unavailable";
+  readonly reason?: ReplicaConflictReason | "invalid" | "stale" | "incomplete" | "identity-mismatch" | "revision-mismatch" | "untrusted" | "unavailable";
   readonly snapshot?: CoordinatorBootstrapSnapshot;
 }
 
@@ -128,7 +132,7 @@ export interface CoordinatorReplicaBootstrapResponse {
   readonly proof: CoordinatorAuthorityProof;
 }
 
-export type ReplicaBootstrapLifecycle = "uninitialized" | "bootstrapping" | "accepted" | "rejected" | "stale" | "unavailable";
+export type ReplicaBootstrapLifecycle = "uninitialized" | "bootstrapping" | "synchronized" | "rejected" | "stale" | "conflicted" | "unavailable";
 
 export interface CoordinatorReplicaBootstrapStatus {
   readonly version: 1;
@@ -138,6 +142,9 @@ export interface CoordinatorReplicaBootstrapStatus {
   readonly acceptedRevision?: number;
   readonly snapshotDigest?: string;
   readonly lastValidatedAt?: number;
+  readonly lastSuccessfulImportAt?: number;
+  readonly lastRejectedImportAt?: number;
+  readonly lastConflictReason?: ReplicaConflictReason;
   readonly persistenceHealthy: boolean;
 }
 
@@ -258,6 +265,25 @@ function canonical(value: unknown): string {
     const serialized = canonical(snapshot);
     if (Buffer.byteLength(serialized, "utf8") > MAX_SNAPSHOT_BYTES) throw new RangeError("coordinator snapshot exceeds maximum size");
     return createHash("sha256").update(serialized).digest("hex");
+  }
+
+  export interface CoordinatorStateOrdering {
+    readonly instanceId: string;
+    readonly revision: number;
+    readonly snapshotDigest: string;
+  }
+
+  export type CoordinatorOrderingResult = "duplicate" | "stale_revision" | "revision_digest_conflict" | "higher_revision" | "instance_conflict";
+
+  export function compareCoordinatorStateOrdering(
+    current: CoordinatorStateOrdering | undefined,
+    candidate: CoordinatorStateOrdering,
+  ): CoordinatorOrderingResult {
+    if (!current) return "higher_revision";
+    if (current.instanceId !== candidate.instanceId) return "instance_conflict";
+    if (candidate.revision < current.revision) return "stale_revision";
+    if (candidate.revision > current.revision) return "higher_revision";
+    return current.snapshotDigest === candidate.snapshotDigest ? "duplicate" : "revision_digest_conflict";
   }
 
   export function createAuthorityProof(
@@ -420,6 +446,9 @@ function canonical(value: unknown): string {
     private acceptedSnapshot?: CoordinatorBootstrapSnapshot;
     private acceptedProof?: CoordinatorAuthorityProof;
     private lastValidatedAt?: number;
+    private lastSuccessfulImportAt?: number;
+    private lastRejectedImportAt?: number;
+    private lastConflictReason?: ReplicaConflictReason;
     private persistenceHealthy = true;
     private readonly trustedInstanceIds: ReadonlySet<string>;
     private readonly persistencePath?: string;
@@ -429,6 +458,7 @@ function canonical(value: unknown): string {
         throw new TypeError("trusted coordinator identities are invalid");
       }
       this.trustedInstanceIds = new Set(options.trustedInstanceIds);
+      if (this.trustedInstanceIds.size !== 1) throw new TypeError("exactly one trusted coordinator identity is required");
       this.persistencePath = options.persistencePath;
       if (this.persistencePath) this.loadPersisted();
     }
@@ -444,23 +474,27 @@ function canonical(value: unknown): string {
         if (signal?.aborted) return this.reject("unavailable");
         if (!transportAuthenticated || !response || response.version !== 1 ||
           !this.trustedInstanceIds.has(response.snapshot.instance.instanceId)) {
-          return this.reject("untrusted");
+          return this.reject("unknown_instance");
         }
         validateBootstrapSnapshot(response.snapshot, now);
         const digest = coordinatorSnapshotDigest(response.snapshot);
-        if (response.proof.snapshotDigest !== digest) return this.reject("invalid");
+        if (response.proof.snapshotDigest !== digest) return this.reject("invalid_proof");
         if (!verifyAuthorityProof(response.snapshot, response.proof, now)) {
-          return this.reject(response.proof.issuedAt < now ? "stale" : "invalid");
+          return this.reject(response.proof.issuedAt > now ? "future_proof" : (now - response.proof.issuedAt > 30_000 ? "stale_proof" : "invalid_proof"));
         }
         const current = this.acceptedSnapshot;
-        if (current) {
-          if (current.instance.instanceId !== response.snapshot.instance.instanceId) return this.reject("identity-mismatch");
-          if (response.snapshot.revision < current.revision) return this.reject("revision-mismatch");
-          if (response.snapshot.revision === current.revision) {
-            if (coordinatorSnapshotDigest(current) !== digest) return this.reject("revision-mismatch");
-            this.lastValidatedAt = now;
-            return Object.freeze({ accepted: true, state: "authoritative", snapshot: current });
-          }
+        const ordering = compareCoordinatorStateOrdering(
+          current && { instanceId: current.instance.instanceId, revision: current.revision, snapshotDigest: coordinatorSnapshotDigest(current) },
+          { instanceId: response.snapshot.instance.instanceId, revision: response.snapshot.revision, snapshotDigest: digest },
+        );
+        if (ordering === "instance_conflict") return this.reject("instance_conflict");
+        if (ordering === "stale_revision") return this.reject("stale_revision");
+        if (ordering === "revision_digest_conflict") return this.reject("revision_digest_conflict");
+        if (ordering === "duplicate") {
+          this.lastValidatedAt = now;
+          this.lastSuccessfulImportAt = now;
+          this.lifecycle = "synchronized";
+          return Object.freeze({ accepted: true, state: "synchronized", snapshot: current });
         }
         const nextSnapshot = freezeSnapshot(response.snapshot);
         const nextProof = Object.freeze({ ...response.proof });
@@ -468,12 +502,15 @@ function canonical(value: unknown): string {
         this.acceptedSnapshot = nextSnapshot;
         this.acceptedProof = nextProof;
         this.lastValidatedAt = now;
-        this.lifecycle = "accepted";
-        return Object.freeze({ accepted: true, state: "authoritative", snapshot: nextSnapshot });
+        this.lifecycle = "synchronized";
+        this.lastSuccessfulImportAt = now;
+        return Object.freeze({ accepted: true, state: "synchronized", snapshot: nextSnapshot });
       } catch (error) {
-        this.persistenceHealthy = false;
-        this.lifecycle = "rejected";
-        return Object.freeze({ accepted: false, state: "rejected", reason: error instanceof RangeError ? "incomplete" : "invalid" });
+        if (error instanceof Error && error.message === "persistence failure") {
+          this.persistenceHealthy = false;
+          return this.reject("persistence_failure");
+        }
+        return this.reject(error instanceof RangeError ? "invalid_snapshot" : "invalid_snapshot");
       }
     }
 
@@ -488,13 +525,22 @@ function canonical(value: unknown): string {
           snapshotDigest: coordinatorSnapshotDigest(this.acceptedSnapshot),
         } : {}),
         ...(this.lastValidatedAt === undefined ? {} : { lastValidatedAt: this.lastValidatedAt }),
+        ...(this.lastSuccessfulImportAt === undefined ? {} : { lastSuccessfulImportAt: this.lastSuccessfulImportAt }),
+        ...(this.lastRejectedImportAt === undefined ? {} : { lastRejectedImportAt: this.lastRejectedImportAt }),
+        ...(this.lastConflictReason === undefined ? {} : { lastConflictReason: this.lastConflictReason }),
         persistenceHealthy: this.persistenceHealthy,
       });
     }
 
     private reject(reason: BootstrapResult["reason"]): BootstrapResult {
-      this.lifecycle = reason === "stale" ? "stale" : "rejected";
-      return Object.freeze({ accepted: false, state: "rejected", reason });
+      this.lastRejectedImportAt = Date.now();
+      if (reason === "revision_digest_conflict" || reason === "instance_conflict" || reason === "authority_ambiguous") {
+        this.lifecycle = "conflicted";
+        this.lastConflictReason = reason;
+      } else {
+        this.lifecycle = reason === "stale_proof" || reason === "stale_revision" ? "stale" : "rejected";
+      }
+      return Object.freeze({ accepted: false, state: this.lifecycle === "conflicted" ? "conflicted" : "rejected", reason });
     }
 
     private persist(value: PersistedReplicaState): void {
@@ -504,14 +550,19 @@ function canonical(value: unknown): string {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       const temp = `${path}.tmp`;
       const payload = canonical(value);
-      writeFileSync(temp, payload, { encoding: "utf8", mode: 0o600 });
-      const fd = openSync(temp, "r");
-      try { fsyncSync(fd); } finally { closeSync(fd); }
-      renameSync(temp, path);
-      try {
-        const directoryFd = openSync(dir, "r");
-        try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
-      } catch { /* directory fsync is not available on every platform */ }
+        try {
+          writeFileSync(temp, payload, { encoding: "utf8", mode: 0o600 });
+          const fd = openSync(temp, "r");
+          try { fsyncSync(fd); } finally { closeSync(fd); }
+          renameSync(temp, path);
+          try {
+            const directoryFd = openSync(dir, "r");
+            try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
+          } catch { /* directory fsync is not available on every platform */ }
+        } catch {
+          try { unlinkSync(temp); } catch { /* best effort cleanup */ }
+          throw new Error("persistence failure");
+        }
     }
 
     private loadPersisted(): void {
@@ -525,7 +576,8 @@ function canonical(value: unknown): string {
           !verifyAuthorityProof(value.snapshot, value.proof)) throw new TypeError("persisted replica state is not trusted");
         this.acceptedSnapshot = freezeSnapshot(value.snapshot);
         this.acceptedProof = Object.freeze({ ...value.proof });
-        this.lifecycle = "accepted";
+        this.lifecycle = "synchronized";
+        this.lastSuccessfulImportAt = Date.now();
       } catch {
         this.persistenceHealthy = false;
         this.lifecycle = "unavailable";

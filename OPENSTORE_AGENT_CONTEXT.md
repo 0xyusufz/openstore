@@ -767,3 +767,25 @@ failure cannot grant authority or partially replace accepted state.
 promotion, fencing, replication ordering, client failover, or DHT authority.
 The current coordinator remains the sole runtime authority; see
 `docs/053C-coordinator-state-transfer.md`.
+
+Milestone 053D adds deterministic coordinator replica ordering and conflict
+safety. Accepted observations are bound to
+`coordinatorInstanceId + revision + snapshotDigest`; duplicates are
+idempotent, lower revisions are stale, same-revision digest changes are hard
+conflicts, and different or unknown instances cannot replace accepted state.
+One explicitly configured trusted source is required and trust never migrates
+automatically.
+
+Replica lifecycle diagnostics now distinguish `synchronized`, `stale`,
+`conflicted`, `rejected`, and `unavailable`. Synchronized means validated
+state was accepted, not that the replica is authoritative. Conflicted state
+retains the previous accepted snapshot, reports a sanitized typed reason, and
+cannot serve as an authority source. Import metadata records last successful
+and rejected observations without treating local observations as global
+ordering.
+
+Persistence recovery validates schema, digest/proof binding, trusted source,
+and freshness; failed writes preserve the previous accepted state. No
+consensus, election, promotion, fencing, LWW resolution, client failover, or
+automatic authority migration was introduced. See
+`docs/053D-coordinator-write-ordering.md`.
