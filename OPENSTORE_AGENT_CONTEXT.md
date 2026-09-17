@@ -931,3 +931,25 @@ revocation metadata.
 No HTTP promotion endpoint, force-promote shortcut, election, quorum, Raft,
 leases, fencing, automatic failover, DHT authority, or client failover was
 added. See `docs/053K-authority-control-plane-integration.md`.
+
+### Milestone 053L: durable authority revocation
+
+053L extends the issuer persistence model with bounded versioned revocation
+records containing grant, candidate, epoch, issuer, timestamp, sanitized
+reason, caller identity, and record ID. Revocation uses restrictive atomic
+fsync/rename persistence and refuses capacity overflow instead of evicting
+evidence. Corrupt existing state is unavailable and cannot be recreated
+implicitly.
+
+Identical repeated revocation is idempotent; conflicting metadata is rejected.
+Candidate acceptance checks signature, identity, issuer, epoch, state,
+freshness, replay, and revocation. Revocation lookup errors, malformed
+results, or ambiguity fail closed. A revoked current grant is demoted only
+through the explicit control-plane operation; no other coordinator is
+promoted and no epoch is created locally.
+
+Issuer restart preserves revocation records and candidate restart preserves
+revoked/non-authoritative state. DHT, reachability, heartbeat, newer revision,
+and coordinator startup cannot bypass revocation. Existing client and
+placement/outage semantics remain unchanged. See
+`docs/053L-authority-revocation-safety.md`.

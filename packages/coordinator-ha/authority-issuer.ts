@@ -35,6 +35,18 @@ export interface IssuedGrantAudit {
   readonly outcome: "issued" | "revoked";
 }
 
+export interface AuthorityRevocationRecord {
+  readonly version: 1;
+  readonly recordId: string;
+  readonly grantId: string;
+  readonly candidateInstanceId: string;
+  readonly authorityEpoch: number;
+  readonly issuerInstanceId: string;
+  readonly revokedAt: number;
+  readonly reason: string;
+  readonly callerIdentity: string;
+}
+
 interface IssuerState {
   readonly version: 1;
   readonly initialized: boolean;
@@ -43,6 +55,7 @@ interface IssuerState {
   readonly authorityEpoch: number;
   readonly audits: readonly IssuedGrantAudit[];
   readonly revokedGrantIds: readonly string[];
+  readonly revocations: readonly AuthorityRevocationRecord[];
 }
 
 export interface AuthorityIssuerOptions {
@@ -56,8 +69,10 @@ export interface AuthorityIssuerOptions {
 export interface AuthorityIssuerService {
   bootstrap(initialEpoch: number): Promise<void>;
   issue(request: AuthorityIssuanceRequest): Promise<SignedAuthorityGrant>;
-  revoke(grantId: string, callerIdentity: string): Promise<void>;
+  revoke(grantId: string, callerIdentity: string, reason?: string): Promise<AuthorityRevocationRecord>;
   isRevoked(grantId: string): boolean;
+  inspectRevocation(grantId: string): AuthorityRevocationRecord | undefined;
+  revocations(): readonly AuthorityRevocationRecord[];
   inspect(): { readonly initialized: boolean; readonly issuerInstanceId: string; readonly authorityEpoch: number; readonly auditCount: number; readonly persistenceHealthy: boolean };
   audits(): readonly IssuedGrantAudit[];
 }
@@ -69,6 +84,16 @@ const GRANT_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_TIME_SKEW_MS = 30_000;
 const MAX_GRANT_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const MAX_EPOCH = Number.MAX_SAFE_INTEGER;
+
+function validRevocation(record: AuthorityRevocationRecord, issuerInstanceId: string): boolean {
+  return record.version === 1 && record.recordId === `revoke-${record.grantId}` &&
+    GRANT_ID.test(record.grantId) && INSTANCE_ID.test(record.candidateInstanceId) &&
+    Number.isSafeInteger(record.authorityEpoch) && record.authorityEpoch >= 0 &&
+    record.issuerInstanceId === issuerInstanceId && INSTANCE_ID.test(record.issuerInstanceId) &&
+    Number.isSafeInteger(record.revokedAt) && record.revokedAt > 0 &&
+    typeof record.reason === "string" && record.reason.length > 0 && record.reason.length <= 512 &&
+    typeof record.callerIdentity === "string" && record.callerIdentity.length > 0 && record.callerIdentity.length <= 256;
+}
 
 function validRequest(request: AuthorityIssuanceRequest): boolean {
   return request.version === 1 && INSTANCE_ID.test(request.candidateInstanceId) &&
@@ -86,15 +111,18 @@ export function createAuthorityIssuer(options: AuthorityIssuerOptions): Authorit
   const issuer = createCoordinatorInstanceIdentity(options.identity.publicKey);
   let current: IssuerState = {
     version: 1, initialized: false, issuerInstanceId: issuer.instanceId,
-    issuerPublicKey: issuer.publicKey, authorityEpoch: 0, audits: [], revokedGrantIds: [],
+    issuerPublicKey: issuer.publicKey, authorityEpoch: 0, audits: [], revokedGrantIds: [], revocations: [],
   };
   let persistenceHealthy = true;
   try {
     const parsed = JSON.parse(readFileSync(options.persistencePath, "utf8")) as IssuerState;
     if (parsed.version !== 1 || parsed.issuerInstanceId !== issuer.instanceId || parsed.issuerPublicKey !== issuer.publicKey ||
       typeof parsed.initialized !== "boolean" || !Number.isSafeInteger(parsed.authorityEpoch) || parsed.authorityEpoch < 0 ||
-      !Array.isArray(parsed.audits) || !Array.isArray(parsed.revokedGrantIds) || parsed.audits.length > maxAuditRecords) throw new Error("invalid issuer state");
-    current = Object.freeze({ ...parsed, audits: Object.freeze([...parsed.audits]), revokedGrantIds: Object.freeze([...parsed.revokedGrantIds]) });
+      !Array.isArray(parsed.audits) || !Array.isArray(parsed.revokedGrantIds) || !Array.isArray(parsed.revocations) ||
+      parsed.audits.length > maxAuditRecords || parsed.revocations.length > maxAuditRecords ||
+      parsed.revocations.some((record) => !validRevocation(record, issuer.instanceId)) ||
+      parsed.revokedGrantIds.some((grantId) => typeof grantId !== "string" || !GRANT_ID.test(grantId))) throw new Error("invalid issuer state");
+    current = Object.freeze({ ...parsed, audits: Object.freeze([...parsed.audits]), revokedGrantIds: Object.freeze([...parsed.revokedGrantIds]), revocations: Object.freeze([...parsed.revocations]) });
   } catch {
     persistenceHealthy = !existsSync(options.persistencePath);
   }
@@ -106,7 +134,7 @@ export function createAuthorityIssuer(options: AuthorityIssuerOptions): Authorit
     try {
       writeFileSync(fd, `${JSON.stringify(next)}\n`, "utf8"); fsyncSync(fd); closeSync(fd); chmodSync(temp, 0o600); renameSync(temp, path);
       const directoryFd = openSync(dirname(path), "r"); try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
-      current = Object.freeze({ ...next, audits: Object.freeze([...next.audits]), revokedGrantIds: Object.freeze([...next.revokedGrantIds]) });
+      current = Object.freeze({ ...next, audits: Object.freeze([...next.audits]), revokedGrantIds: Object.freeze([...next.revokedGrantIds]), revocations: Object.freeze([...next.revocations]) });
       persistenceHealthy = true;
     } catch (error) { try { closeSync(fd); } catch {} try { unlinkSync(temp); } catch {} persistenceHealthy = false; throw error; }
   };
@@ -135,16 +163,29 @@ export function createAuthorityIssuer(options: AuthorityIssuerOptions): Authorit
     persist({ ...current, audits: nextAudits });
     return grant;
   };
-  const revoke = async (grantId: string, callerIdentity: string): Promise<void> => {
-    if (!options.authorizer.authenticate(callerIdentity) || !GRANT_ID.test(grantId) || !current.audits.some((audit) => audit.grantId === grantId) || !options.authorizer.mayIssue(callerIdentity, { version: 1, callerIdentity, candidateInstanceId: current.audits.find((audit) => audit.grantId === grantId)?.candidateInstanceId ?? "", authorityEpoch: current.authorityEpoch, stateRevision: 0, stateDigest: "0".repeat(64), grantId, issuedAt: 1, expiresAt: 1 })) throw new Error("caller cannot revoke authority grant");
-    if (current.revokedGrantIds.includes(grantId)) return;
+  const revoke = async (grantId: string, callerIdentity: string, reason = "operator revocation"): Promise<AuthorityRevocationRecord> => {
+    if (!options.authorizer.authenticate(callerIdentity) || !GRANT_ID.test(grantId) || typeof reason !== "string" || reason.length === 0 || reason.length > 512 || !current.audits.some((audit) => audit.grantId === grantId) || !options.authorizer.mayIssue(callerIdentity, { version: 1, callerIdentity, candidateInstanceId: current.audits.find((audit) => audit.grantId === grantId)?.candidateInstanceId ?? "", authorityEpoch: current.authorityEpoch, stateRevision: 0, stateDigest: "0".repeat(64), grantId, issuedAt: 1, expiresAt: 1 })) throw new Error("caller cannot revoke authority grant");
     const audit = current.audits.find((item) => item.grantId === grantId)!;
+    const existing = current.revocations.find((record) => record.grantId === grantId);
+    if (existing) {
+      if (existing.reason !== reason || existing.callerIdentity !== callerIdentity) throw new Error("conflicting revocation metadata");
+      return existing;
+    }
+    if (current.revocations.length >= maxAuditRecords) throw new Error("issuer revocation capacity is exhausted");
+    const record: AuthorityRevocationRecord = {
+      version: 1, recordId: `revoke-${grantId}`, grantId, candidateInstanceId: audit.candidateInstanceId,
+      authorityEpoch: audit.authorityEpoch, issuerInstanceId: issuer.instanceId, revokedAt: now(),
+      reason, callerIdentity,
+    };
     const revokedAudit: IssuedGrantAudit = { ...audit, outcome: "revoked" };
-    persist({ ...current, audits: [...current.audits.filter((item) => item.grantId !== grantId), revokedAudit], revokedGrantIds: [...current.revokedGrantIds, grantId] });
+    persist({ ...current, audits: [...current.audits.filter((item) => item.grantId !== grantId), revokedAudit], revokedGrantIds: [...current.revokedGrantIds, grantId], revocations: [...current.revocations, record] });
+    return record;
   };
   return {
     bootstrap, issue, revoke,
     isRevoked: (grantId) => current.revokedGrantIds.includes(grantId),
+    inspectRevocation: (grantId) => current.revocations.find((record) => record.grantId === grantId),
+    revocations: () => Object.freeze(current.revocations.map((record) => ({ ...record }))),
     inspect: () => ({ initialized: current.initialized, issuerInstanceId: current.issuerInstanceId, authorityEpoch: current.authorityEpoch, auditCount: current.audits.length, persistenceHealthy }),
     audits: () => Object.freeze(current.audits.map((audit) => ({ ...audit }))),
   };

@@ -102,7 +102,12 @@ export function createAuthorityGrantService(options: AuthorityGrantServiceOption
     if (!validateAuthorityGrant(grant) || !grant.issuerInstanceId || !grant.issuerPublicKey || !grant.signature ||
       !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt < grant.issuedAt) throw new Error("authority grant is invalid");
     if (grant.candidateInstanceId !== options.instance.instanceId) throw new Error("authority grant candidate does not match local instance");
-    if (options.revokedGrantIds?.().includes(grant.grantId) || grant.revoked === true) throw new Error("authority grant is revoked");
+    if (grant.revoked === true) throw new Error("authority grant is revoked");
+    if (options.revokedGrantIds) {
+      const revoked = options.revokedGrantIds();
+      if (!Array.isArray(revoked) || revoked.some((id) => typeof id !== "string")) throw new Error("revocation status is malformed");
+      if (revoked.includes(grant.grantId)) throw new Error("authority grant is revoked");
+    }
     if (!trusted.has(grant.issuerPublicKey)) throw new Error("authority grant issuer is untrusted");
     const issuerKey = Buffer.from(grant.issuerPublicKey, "base64");
     if (createCoordinatorInstanceIdentity(issuerKey).instanceId !== grant.issuerInstanceId) throw new Error("authority grant issuer identity is invalid");

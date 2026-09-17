@@ -17,6 +17,7 @@ export interface AuthorityControlPlaneInspection {
   readonly issuer: ReturnType<AuthorityIssuerService["inspect"]>;
   readonly audits: ReturnType<AuthorityIssuerService["audits"]>;
   readonly revokedGrantIds: readonly string[];
+  readonly revocations: ReturnType<AuthorityIssuerService["revocations"]>;
   readonly lastTransition: "none" | "issued" | "delivered" | "accepted" | "revoked" | "failed";
 };
 
@@ -26,6 +27,7 @@ export interface AuthorityControlPlane {
   deliverGrant(grant: SignedAuthorityGrant): Promise<void>;
   acceptGrant(grantId: string): Promise<void>;
   revokeGrant(grantId: string, callerIdentity: string): Promise<void>;
+  inspectRevocation(grantId: string): ReturnType<AuthorityIssuerService["inspectRevocation"]>;
   inspect(): AuthorityControlPlaneInspection;
 }
 
@@ -93,6 +95,9 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
         throw new Error("authority grant was not delivered");
       }
       try {
+        const issuerStatus = options.issuer.inspect();
+        if (!issuerStatus.persistenceHealthy) throw new Error("revocation status is unavailable");
+        if (options.issuer.inspectRevocation(delivered.grantId)) throw new Error("authority grant is revoked");
         await options.candidate.acceptGrant(delivered);
         lastTransition = "accepted";
       } catch (error) {
@@ -112,6 +117,7 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
         throw error;
       }
     },
+    inspectRevocation: (grantId) => options.issuer.inspectRevocation(grantId),
     inspect() {
       const candidateState = options.candidate.inspectState();
       const revokedGrantIds = options.revokedGrantIds?.() ?? [];
@@ -125,6 +131,7 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
         issuer: options.issuer.inspect(),
         audits: options.issuer.audits(),
         revokedGrantIds: Object.freeze([...revokedGrantIds]),
+        revocations: options.issuer.revocations(),
         lastTransition,
       });
     },
