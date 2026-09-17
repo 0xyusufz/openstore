@@ -722,3 +722,25 @@ because the primary is unavailable. Ambiguity fails closed for new placement
 and repair, while existing-manifest download/delete retain 052B behavior.
 Coordinator instance identity persistence, authority proof, write ordering,
 and client routing remain unresolved 053B design decisions.
+
+Milestone 053B adds the authenticated bootstrap foundation in
+`packages/coordinator-ha`. A coordinator instance identity is deterministic
+from a durable public key and has a canonical persist/reload representation;
+the private signing key is never part of a snapshot or proof. Bounded
+authoritative snapshots include node registrations, identity bindings,
+heartbeat/availability, capacity, transport metadata, and reliability
+counters, while metrics/events/conditions/replay caches remain derived.
+
+Canonical snapshot serialization and SHA-256 digests are signed with an
+injected Ed25519 key by a versioned authority proof. Verification binds the
+instance, revision, digest, authoritative classification, and bounded issued
+timestamp. `CoordinatorBootstrapMachine` accepts only complete, trusted,
+cryptographically valid snapshots and otherwise remains rejected, stale, or
+unavailable. It never promotes a standby because a coordinator is unreachable
+and does not treat a higher untrusted revision as authoritative.
+
+053B does not add a transport endpoint, registry replication, consensus,
+leader election, fencing, automatic failover, revocation, or client changes.
+The proof demonstrates integrity and signer identity, not exclusive
+single-coordinator authority; split-brain prevention and write ordering remain
+future HA work. See `docs/053B-coordinator-replica-bootstrap.md`.

@@ -4,6 +4,8 @@ import {
   createCoordinatorStateSnapshot,
   nextCoordinatorRevision,
 } from "./index.js";
+import { createIdentity } from "../identity/index.js";
+import { createAuthorityProof, CoordinatorBootstrapMachine, createCoordinatorInstanceIdentity, parseCoordinatorInstanceIdentity, serializeCoordinatorInstanceIdentity, verifyAuthorityProof } from "./index.js";
 
 describe("coordinator HA foundation model", () => {
   it("creates immutable authoritative snapshots and monotonic revisions", () => {
@@ -43,5 +45,44 @@ describe("coordinator HA foundation model", () => {
     expect(classifyCoordinatorState(stale, 100, 10)).toBe("stale");
     expect(classifyCoordinatorState(undefined, 100)).toBe("unknown");
     expect(classifyCoordinatorState(ambiguous, 2)).toBe("ambiguous");
+  });
+
+  it("creates and verifies authenticated bounded bootstrap proofs", () => {
+    const identity = createIdentity();
+    const instance = createCoordinatorInstanceIdentity(identity.publicKey);
+    expect(parseCoordinatorInstanceIdentity(serializeCoordinatorInstanceIdentity(instance))).toEqual(instance);
+    const now = Date.now();
+    const snapshot = {
+      version: 1 as const,
+      instance,
+      revision: 2,
+      observedAt: now,
+      nodes: [],
+    };
+    const proof = createAuthorityProof(snapshot, identity.privateKey, now);
+    expect(verifyAuthorityProof(snapshot, proof, now + 10)).toBe(true);
+    expect(verifyAuthorityProof({ ...snapshot, revision: 3 }, proof, now + 10)).toBe(false);
+    const machine = new CoordinatorBootstrapMachine();
+    expect(machine.accept(snapshot, proof, instance.instanceId, now + 10).state).toBe("authoritative");
+    expect(machine.state).toBe("authoritative");
+  });
+
+  it("rejects tampering, stale/future proofs, wrong authority, and oversized snapshots", () => {
+    const identity = createIdentity();
+    const instance = createCoordinatorInstanceIdentity(identity.publicKey);
+    const now = Date.now();
+    const snapshot = { version: 1 as const, instance, revision: 1, observedAt: now, nodes: [] };
+    const proof = createAuthorityProof(snapshot, identity.privateKey, now);
+    expect(verifyAuthorityProof(snapshot, { ...proof, signature: proof.signature.slice(0, -2) + "aa" }, now + 10)).toBe(false);
+    expect(verifyAuthorityProof(snapshot, proof, now + 100_000)).toBe(false);
+    expect(() => createCoordinatorStateSnapshot({
+      instanceId: "a", revision: 1, observedAt: 1, state: "known", authoritative: true,
+    }, 1)).not.toThrow();
+    const machine = new CoordinatorBootstrapMachine();
+    expect(machine.accept(snapshot, proof, "coord-other", now + 10).accepted).toBe(false);
+    expect(() => createAuthorityProof({ ...snapshot, nodes: Array.from({ length: 10_001 }, (_, i) => ({
+      nodeId: `node-${i}`, publicKey: instance.publicKey, endpoint: "http://node", available: true,
+      lastSeen: 100, capacity: { allocatedBytes: 1, usedBytes: 0, availableBytes: 1 }, reliability: {},
+    })) }, identity.privateKey, now)).toThrow();
   });
 });
