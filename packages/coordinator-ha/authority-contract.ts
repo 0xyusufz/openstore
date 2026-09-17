@@ -61,6 +61,10 @@ export interface AuthorityGrant {
   readonly stateDigest: string;
   readonly grantId: string;
   readonly issuedAt: number;
+  readonly issuerInstanceId?: string;
+  readonly issuerPublicKey?: string;
+  readonly expiresAt?: number;
+  readonly signature?: string;
 }
 
 /** Contract only: implementations must be supplied by a future explicit authority mechanism. */

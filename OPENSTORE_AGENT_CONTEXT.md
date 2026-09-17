@@ -866,3 +866,25 @@ instance identity, digest, and timestamps cannot safely serve as an authority
 epoch. Epoch ownership, durable issuance, split-brain exclusion, revocation,
 and the future control-plane model remain unresolved requirements for any
 promotion implementation. See `docs/053H-coordinator-authority-architecture.md`.
+
+### Milestone 053I: explicit authority grant
+
+053I adds `packages/coordinator-ha/authority-grant.ts`, a concrete but
+operator-controlled promotion boundary. A trusted external issuer signs a
+versioned grant binding the local coordinator instance, authority epoch, state
+revision, state digest, grant ID, issuance/expiry, issuer identity, and
+Ed25519 signature. The service validates all bindings and requires fresh local
+state before accepting it.
+
+Authority state is persisted atomically with restrictive permissions and
+survives restart. Corrupt or missing state starts non-authoritative.
+Epochs cannot be generated or incremented locally; lower epochs and consumed
+grant IDs are rejected. Exact reapplication of the accepted grant is
+idempotent, while conflicting grants cannot replace current authority.
+Revoke/demote is explicit and durable.
+
+No automatic promotion, election, failover, lease, quorum, fencing, DHT
+authority, or client failover was added. Existing 052B/052E behavior remains
+unchanged. A future control plane must provide authenticated operator intent,
+trusted grant issuance, replay protection, split-brain exclusion, and durable
+audit evidence.
