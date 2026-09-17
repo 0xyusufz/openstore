@@ -848,3 +848,21 @@ single-coordinator operation.
 053G does not add election, promotion, consensus, quorum, fencing, locks,
 client failover, DHT authority, or automatic trust migration. Existing 052B
 client outage behavior remains unchanged.
+
+### Milestone 053H: coordinator authority and promotion architecture
+
+053H is architecture-only. `packages/coordinator-ha/authority-contract.ts`
+defines vendor-neutral authority states, promotion evidence validation, grant
+validation, and a contract-only `CoordinatorAuthorityController`. It does not
+implement any promotion or authority transition.
+
+The current registry/coordinator remains the only authoritative runtime.
+Replica, stale, conflicted, unavailable, rejected, and unknown states cannot
+authorize placement or repair. Existing known-manifest operations retain the
+052B outage semantics where safe. DHT remains discovery-only.
+
+Identity proof is explicitly distinct from authority proof. Snapshot revision,
+instance identity, digest, and timestamps cannot safely serve as an authority
+epoch. Epoch ownership, durable issuance, split-brain exclusion, revocation,
+and the future control-plane model remain unresolved requirements for any
+promotion implementation. See `docs/053H-coordinator-authority-architecture.md`.
