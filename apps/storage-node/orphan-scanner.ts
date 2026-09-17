@@ -59,6 +59,7 @@ export function createOrphanScanner(options: {
     cancelled = false;
     state = "running";
     snapshot = { ...snapshot, state };
+    try { metrics.set("orphan_scanner_state", state === "running" ? 1 : state === "failed" ? 2 : 0); metrics.set("orphan_scan_backlog", batchSize); } catch {}
     const operation = (async () => {
       emit({ type: "scan.started", timestamp: Date.now() });
       metrics.increment("orphan_scan_runs_total", 1, { result: "success" });
@@ -95,13 +96,14 @@ export function createOrphanScanner(options: {
         metrics.increment("orphan_candidates_total", scanned, { result: "success" });
         metrics.increment("orphan_deleted_total", deleted, { result: "success" });
         metrics.increment("orphan_protected_total", retained, { result: "success" });
+        try { metrics.set("orphan_scanner_state", state === "paused" ? 0 : 1); metrics.set("orphan_scan_backlog", Math.min(batchSize, scanned)); } catch {}
         metrics.observe("orphan_scan_duration_ms", Date.now() - startedAt);
         emit({ type: "scan.completed", timestamp: Date.now(), scanned, deleted, retained });
         return { scanned, deleted, retained };
       } catch (error) {
         state = "failed";
         snapshot = { ...snapshot, state, lastError: error instanceof Error ? error.message.slice(0, 200) : "scan failed" };
-        try { events.append({ version: 1, timestamp: Date.now(), component: "orphan-scanner", type: "orphan.scan-failed", severity: "error", details: { scanned, deleted, retained } }); } catch {}
+        try { metrics.increment("orphan_scan_failures_total", 1, { result: "error" }); metrics.set("orphan_scanner_state", 2); events.append({ version: 1, timestamp: Date.now(), component: "orphan-scanner", type: "orphan.scan-failed", severity: "error", details: { scanned, deleted, retained } }); } catch {}
         emit({ type: "scan.completed", timestamp: Date.now(), scanned, deleted, retained });
         throw error;
       } finally { active = undefined; }

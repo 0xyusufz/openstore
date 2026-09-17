@@ -76,7 +76,13 @@ export interface StorageNodeOptions {
   orphanCleanup?: { enabled?: boolean; gracePeriodMs?: number; intervalMs?: number; batchSize?: number; maxDeletionsPerRun?: number };
 }
 export type StorageNodeLifecycleEvent = { type: "storage-node.started" | "storage-node.closed" | "storage-node.draining" | "storage-node.recovery"; draining?: boolean; error?: string };
-export interface StorageNodeStatusSnapshot { status: "ok" | "degraded" | "draining"; draining: boolean; capacity: NodeCapacity; pieceCount: number; }
+export interface StorageNodeStatusSnapshot {
+  status: "ok" | "degraded" | "draining";
+  draining: boolean;
+  capacity: NodeCapacity;
+  pieceCount: number;
+  diagnostics?: { metrics: ReturnType<MetricsRegistry["snapshot"]>; events: ReturnType<EventStore["recent"]> };
+}
 
 export interface NodeCapacity {
   allocatedBytes?: number;
@@ -225,7 +231,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       metrics.observe("storage_request_duration_ms", Date.now() - started, { operation });
       return originalEnd(...args);
     }) as typeof res.end;
-    void handleRequest(req, res, storageDir, capacityBytes, provenance, { requireAuth, maxClockSkewMs, seenNonces, maxReplayCacheEntries, maxHttpRequestBodyBytes }, () => nodeIdentity, () => draining).catch((error) => {
+    void handleRequest(req, res, storageDir, capacityBytes, provenance, { requireAuth, maxClockSkewMs, seenNonces, maxReplayCacheEntries, maxHttpRequestBodyBytes }, () => nodeIdentity, () => draining, getStatusSnapshot, metrics, events).catch((error) => {
       if (!res.headersSent) {
         sendJson(res, error instanceof RequestBodyTooLargeError ? 413 : 500, {
           error: error instanceof RequestBodyTooLargeError ? "request body too large" : "internal error",
@@ -270,7 +276,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     metrics.set("storage_piece_count", pieceCount);
     metrics.set("storage_available", draining ? 0 : 1);
     metrics.set("storage_draining", draining ? 1 : 0);
-    return { status: draining ? "draining" : "ok", draining, capacity, pieceCount };
+    return { status: draining ? "draining" : "ok", draining, capacity, pieceCount, diagnostics: { metrics: metrics.snapshot(), events: events.recent(100) } };
   }
 
   const node: StorageNode = {
@@ -430,9 +436,19 @@ async function handleRequest(
   auth: AuthState,
   getNodeIdentity: () => Identity | undefined,
   isDraining: () => boolean,
+  getStatusSnapshot: () => Promise<StorageNodeStatusSnapshot>,
+  metrics: MetricsRegistry,
+  events: EventStore,
 ): Promise<void> {
   const method = (req.method ?? "").toUpperCase();
   const rawPath = (req.url ?? "/").split("?")[0] as string;
+
+  if (method === "GET" && (rawPath === "/health" || rawPath === "/status" || rawPath === "/v1/health" || rawPath === "/v1/status")) {
+    if (auth.requireAuth && !checkAuth(req, method, rawPath, undefined, auth, res)) return;
+    const snapshot = await getStatusSnapshot();
+    sendJson(res, 200, snapshot);
+    return;
+  }
 
   if (rawPath.startsWith("/v2/pieces/")) {
     const body = method === "POST" ? await readBody(req, auth.maxHttpRequestBodyBytes) : undefined;

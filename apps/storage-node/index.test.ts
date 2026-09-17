@@ -146,4 +146,20 @@ describe("storage node MVP (OPENSTORE-003)", () => {
     expect(res.status).toBe(400);
     expect((await fetch(`${baseUrl}/pieces/piece-keyed`)).status).toBe(404);
   });
+
+  it("exposes bounded aggregate diagnostics without piece identifiers", async () => {
+    const response = await fetch(`${baseUrl}/status`);
+    expect(response.status).toBe(200);
+    const snapshot = await response.json() as {
+      capacity: { allocatedBytes?: number; usedBytes: number; availableBytes: number };
+      pieceCount: number;
+      diagnostics: { metrics: unknown; events: Array<{ details: Record<string, unknown> }> };
+    };
+    expect(snapshot.capacity.allocatedBytes).toBeGreaterThan(0);
+    expect(snapshot.capacity.usedBytes).toBeGreaterThanOrEqual(0);
+    expect(snapshot.capacity.availableBytes).toBeGreaterThanOrEqual(0);
+    expect(snapshot.pieceCount).toBeGreaterThan(0);
+    expect(snapshot.diagnostics.events.length).toBeLessThanOrEqual(100);
+    expect(JSON.stringify(snapshot)).not.toMatch(/piece-alpha|storageDir|privateKey|plaintext|ciphertext/i);
+  });
 });

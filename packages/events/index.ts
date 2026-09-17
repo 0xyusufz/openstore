@@ -4,7 +4,7 @@ export type OperationalEventType =
   | "node.started" | "node.closed" | "node.draining" | "node.recovery"
   | "node.registration-failed" | "node.heartbeat-failed" | "node.reconnect-failed"
   | "storage.request-rejected" | "storage.request-error"
-  | "repair.confirmed-loss" | "repair.attempt" | "repair.completed" | "repair.failed"
+  | "repair.confirmed-loss" | "repair.attempt" | "repair.completed" | "repair.failed" | "repair.cancelled" | "repair.paused"
   | "orphan.scan-started" | "orphan.scan-completed" | "orphan.scan-failed"
   | "client.upload-failed" | "client.download-failed" | "client.delete-failed";
 
@@ -26,7 +26,7 @@ const TYPES = new Set<OperationalEventType>([
   "node.started", "node.closed", "node.draining", "node.recovery",
   "node.registration-failed", "node.heartbeat-failed", "node.reconnect-failed",
   "storage.request-rejected", "storage.request-error",
-  "repair.confirmed-loss", "repair.attempt", "repair.completed", "repair.failed",
+  "repair.confirmed-loss", "repair.attempt", "repair.completed", "repair.failed", "repair.cancelled", "repair.paused",
   "orphan.scan-started", "orphan.scan-completed", "orphan.scan-failed",
   "client.upload-failed", "client.download-failed", "client.delete-failed",
 ]);

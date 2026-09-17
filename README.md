@@ -136,3 +136,17 @@ rejected. The coordinator exposes the bounded authenticated snapshot at
 The buffer defaults to 1,000 events, evicts the oldest entries
 deterministically, and resets on process restart. There is no durable event
 log, alerting, dashboard, or external exporter in this milestone.
+
+## Operational diagnostics
+
+Coordinator and storage-node status surfaces expose aggregate-only diagnostics:
+capacity usage, available capacity, piece counts, draining/health state,
+bounded request metrics, scheduler state, and recent sanitized operational
+events. Repair and orphan-cleanup activity is represented by bounded counters,
+gauges, timings, and lifecycle events; no per-piece or per-node history is
+returned.
+
+Diagnostics are process-local and reset on restart. Recent events and metrics
+are bounded, immutable snapshots with no durable history, alerting, dashboard,
+database, or external monitoring exporter. Sensitive identifiers, paths,
+credentials, keys, plaintext, ciphertext, and raw errors are never exposed.

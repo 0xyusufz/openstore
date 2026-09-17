@@ -173,9 +173,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, registry: Regis
   }
   if (req.method === "GET" && (path === "/metrics" || path === "/v1/metrics")) return respond(200, metrics.snapshot());
   if (token && req.headers.authorization !== "Bearer " + token) { emit({ type: "coordinator.request", operation: "auth", outcome: "error" }); return respond(401, { error: "unauthorized" }); }
-  if (req.method === "GET" && (path === "/health" || path === "/v1/health")) { const persistence = registry.persistenceStatus(); const aggregate = registry.healthSnapshot(); return respond(200, { status: persistence.degraded ? "degraded" : "ok", protocol: REGISTRY_PROTOCOL_VERSION, persistence, aggregate, health: aggregate, coordinator: coordinatorStatus() }); }
+  if (req.method === "GET" && (path === "/health" || path === "/v1/health")) { const persistence = registry.persistenceStatus(); const aggregate = registry.healthSnapshot(); return respond(200, { status: persistence.degraded ? "degraded" : "ok", protocol: REGISTRY_PROTOCOL_VERSION, persistence, aggregate, health: aggregate, coordinator: coordinatorStatus(), events: events.recent(100) }); }
   if (req.method === "GET" && (path === "/events" || path === "/v1/events")) return respond(200, events.snapshot());
-  if (req.method === "GET" && (path === "/status" || path === "/v1/status")) { const persistence = registry.persistenceStatus(); const aggregate = registry.healthSnapshot(); return respond(200, { protocol: REGISTRY_PROTOCOL_VERSION, status: persistence.degraded ? "degraded" : "ok", persistence, aggregate, health: aggregate, coordinator: coordinatorStatus() }); }
+  if (req.method === "GET" && (path === "/status" || path === "/v1/status")) { const persistence = registry.persistenceStatus(); const aggregate = registry.healthSnapshot(); return respond(200, { protocol: REGISTRY_PROTOCOL_VERSION, status: persistence.degraded ? "degraded" : "ok", persistence, aggregate, health: aggregate, coordinator: coordinatorStatus(), events: events.recent(100) }); }
   if (req.method === "GET" && (path === "/nodes" || path === "/v1/nodes")) return respond(200, { protocol: REGISTRY_PROTOCOL_VERSION, nodes: registry.list() });
   if (req.method !== "POST") return respond(405, { error: "method not allowed" });
   try {
