@@ -16,6 +16,7 @@ import {
   createCoordinatorSnapshotExporter,
   CoordinatorReplicaImporter,
 } from "./index.js";
+import type { AuthorityControlPlane } from "./authority-control-plane.js";
 
 export type CoordinatorHaRole = "standalone" | "replica-observer";
 
@@ -57,6 +58,7 @@ export function parseCoordinatorHaConfig(env: NodeJS.ProcessEnv = process.env): 
 
 export interface CoordinatorHaAdapter {
   readonly config: CoordinatorHaConfig;
+  readonly authorityControlPlane?: AuthorityControlPlane;
   exportState(request?: CoordinatorReplicaBootstrapRequest): Promise<CoordinatorReplicaBootstrapResponse>;
   importState(response: CoordinatorReplicaBootstrapResponse, transportAuthenticated: boolean): Promise<BootstrapResult>;
   status(): CoordinatorReplicaSyncStatus | CoordinatorReplicaBootstrapStatus;
@@ -77,6 +79,7 @@ export interface CoordinatorHaAdapterOptions {
   readonly metrics?: MetricsRegistry;
   readonly events?: EventStore;
   readonly exportSnapshot?: () => CoordinatorBootstrapSnapshot;
+  readonly authorityControlPlane?: AuthorityControlPlane;
 }
 
 function snapshotFromRegistry(registry: Registry, instance: CoordinatorInstanceIdentity, revision: number, observedAt: number): CoordinatorBootstrapSnapshot {
@@ -123,6 +126,7 @@ export function createCoordinatorHaAdapter(options: CoordinatorHaAdapterOptions)
   let interval: ReturnType<typeof setInterval> | undefined;
   return {
     config,
+    authorityControlPlane: options.authorityControlPlane,
     async exportState(request = { version: 1 }): Promise<CoordinatorReplicaBootstrapResponse> {
       if (!exporter) throw new Error("coordinator HA export is unavailable");
       return exporter.request(request);

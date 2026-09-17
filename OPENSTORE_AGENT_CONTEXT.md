@@ -909,3 +909,25 @@ bounded candidate-side revocation lookup; ambiguous revocation must reject.
 
 053J adds no HTTP control plane, automatic promotion, election, quorum,
 leases, fencing, DHT authority, coordinator failover, or client failover.
+
+### Milestone 053K: authority control-plane integration boundary
+
+053K adds `packages/coordinator-ha/authority-control-plane.ts`, a narrow
+vendor-neutral in-process boundary joining the 053J issuer and 053I candidate
+grant service. Its operations are deliberately separate: request/issue,
+deliver, explicit accept, inspect, and revoke.
+
+The only authority transition is authenticated caller -> authorized issuer ->
+signed explicit grant -> identity-bound delivery -> complete candidate
+validation -> explicit `acceptGrant()`. No operation runs automatically at
+startup, and the existing coordinator remains authoritative by default.
+
+The control plane delegates signing, epochs, persistence, audits, revocation,
+and candidate validation to 053I/053J. Revocation lookup is injected into the
+candidate service; unavailable or ambiguous lookup fails closed. Inspection
+contains only sanitized state, grant, epoch, audit, issuer, timestamp, and
+revocation metadata.
+
+No HTTP promotion endpoint, force-promote shortcut, election, quorum, Raft,
+leases, fencing, automatic failover, DHT authority, or client failover was
+added. See `docs/053K-authority-control-plane-integration.md`.
