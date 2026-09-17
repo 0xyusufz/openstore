@@ -808,3 +808,24 @@ bounded and low-cardinality.
 053E does not add consensus, election, promotion, fencing, quorum, client
 failover, DHT authority, or changes to 052B behavior. See
 `docs/053E-coordinator-replica-sync.md`.
+
+Milestone 053F adds bounded coordinator replica diagnostics and operator
+controls. `inspectStatus()` exposes synchronization state, accepted
+source/revision/digest, timestamps, retry/failure metadata, persistence health,
+conflict reason, bootstrap status, and `non-authoritative` classification.
+`forceSync()` uses the normal authenticated proof/import path. Explicit
+`resetForRebootstrap()` and `clearConflict()` never select a winner or grant
+authority.
+
+The synchronization manager can emit sanitized bounded EventStore events for
+bootstrap/sync/retry/stale/conflict/rebootstrap/operator transitions and
+low-cardinality MetricsRegistry counters, gauges, and timing observations.
+Replica-specific conditions cover synchronized, stale/retrying, conflicted,
+bootstrap failure, and persistence degradation without expanding the default
+condition set unnecessarily.
+
+Operator adapters must authenticate, authorize, bound, and replay-protect
+mutating controls; no HTTP control endpoint was added in this milestone.
+Valid persisted state remains synchronized/non-authoritative after restart;
+corrupt state remains rejected/unavailable until explicit rebootstrap. See
+`docs/053F-coordinator-replica-operations.md`.

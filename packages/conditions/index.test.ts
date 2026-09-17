@@ -30,4 +30,12 @@ describe("condition evaluator", () => {
     expect(conditions.find((condition) => condition.id === "coordinator-discovery-fresh")?.active).toBe(false);
     expect(JSON.stringify(conditions)).not.toMatch(/https?:|piece|filename|path|token/i);
   });
+
+  it("exposes bounded replica synchronization conditions only when replica diagnostics are supplied", () => {
+    const evaluator = new ConditionEvaluator();
+    const conditions = evaluator.evaluate({ replica: { state: "conflicted", persistenceHealthy: false } }, 1);
+    expect(conditions.find((condition) => condition.id === "replica-conflicted")?.active).toBe(true);
+    expect(conditions.find((condition) => condition.id === "replica-persistence-degraded")?.active).toBe(true);
+    expect(conditions.length).toBeLessThanOrEqual(24);
+  });
 });

@@ -18,6 +18,7 @@ export interface ConditionInput {
   repair?: { failed?: number; queued?: number; active?: number; capacity?: number };
   orphan?: { failed?: boolean; backlog?: number; batchSize?: number };
   lifecycle?: { reconnecting?: boolean; unavailable?: boolean };
+  replica?: { state?: string; persistenceHealthy?: boolean; conflictReason?: string };
 }
 export interface ConditionThresholds {
   capacityWarningRatio: number;
@@ -76,6 +77,13 @@ export class ConditionEvaluator {
       { id: "orphan-scanner-failed", severity: "critical", active: input.orphan?.failed === true, timestamp, message: message(input.orphan?.failed === true, "Orphan scanner failed; inspect storage-node logs and cleanup state.", "Orphan scanner is not failed.") },
       { id: "orphan-cleanup-backlog", severity: "warning", active: orphanPressure, observed: orphanBacklog, threshold: orphanBatch === undefined ? undefined : orphanBatch * t.orphanBacklogWarningRatio, timestamp, message: message(orphanPressure, "Orphan cleanup backlog is approaching the bounded scan batch.", "Orphan cleanup backlog is below the warning threshold.") },
       { id: "lifecycle-unavailable", severity: "warning", active: input.lifecycle?.reconnecting === true || input.lifecycle?.unavailable === true, timestamp, message: message(input.lifecycle?.reconnecting === true || input.lifecycle?.unavailable === true, "A service is reconnecting or unavailable; verify coordinator and node connectivity.", "Service lifecycle connectivity is healthy.") },
+      ...(input.replica ? [
+        { id: "replica-synchronized", severity: "info" as const, active: input.replica.state === "synchronized", timestamp, message: message(input.replica.state === "synchronized", "Coordinator replica synchronization is current.", "Coordinator replica is not synchronized.") },
+        { id: "replica-stale", severity: "warning" as const, active: input.replica.state === "stale" || input.replica.state === "retry_wait", timestamp, message: message(input.replica.state === "stale" || input.replica.state === "retry_wait", "Coordinator replica synchronization is stale or retrying.", "Coordinator replica is not stale.") },
+        { id: "replica-conflicted", severity: "critical" as const, active: input.replica.state === "conflicted", timestamp, message: message(input.replica.state === "conflicted", "Coordinator replica state is conflicted; operator rebootstrap is required.", "Coordinator replica is not conflicted.") },
+        { id: "replica-bootstrap-failed", severity: "critical" as const, active: input.replica.state === "rejected" || input.replica.state === "unavailable", timestamp, message: message(input.replica.state === "rejected" || input.replica.state === "unavailable", "Coordinator replica bootstrap or synchronization failed.", "Coordinator replica bootstrap is not failed.") },
+        { id: "replica-persistence-degraded", severity: "critical" as const, active: input.replica.persistenceHealthy === false, timestamp, message: message(input.replica.persistenceHealthy === false, "Coordinator replica persistence is degraded.", "Coordinator replica persistence is healthy.") },
+      ] : []),
     ];
     this.current = conditions.map((condition) => Object.freeze({ ...condition }));
     return this.snapshot();

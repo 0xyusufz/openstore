@@ -8,7 +8,12 @@ export type OperationalEventType =
   | "storage.request-rejected" | "storage.request-error"
   | "repair.confirmed-loss" | "repair.attempt" | "repair.completed" | "repair.failed" | "repair.cancelled" | "repair.paused"
   | "orphan.scan-started" | "orphan.scan-completed" | "orphan.scan-failed"
-  | "client.upload-failed" | "client.download-failed" | "client.delete-failed";
+  | "client.upload-failed" | "client.download-failed" | "client.delete-failed"
+  | "replica.bootstrap.started" | "replica.bootstrap.succeeded" | "replica.bootstrap.failed"
+  | "replica.sync.started" | "replica.sync.succeeded" | "replica.sync.failed"
+  | "replica.sync.retry" | "replica.stale" | "replica.conflict.detected"
+  | "replica.rebootstrap.requested" | "replica.rebootstrap.succeeded" | "replica.rebootstrap.failed"
+  | "replica.operator.action";
 
 export type EventDetailValue = string | number | boolean;
 export type EventDetails = Readonly<Record<string, EventDetailValue>>;
@@ -33,12 +38,17 @@ const TYPES = new Set<OperationalEventType>([
   "repair.confirmed-loss", "repair.attempt", "repair.completed", "repair.failed", "repair.cancelled", "repair.paused",
   "orphan.scan-started", "orphan.scan-completed", "orphan.scan-failed",
   "client.upload-failed", "client.download-failed", "client.delete-failed",
+  "replica.bootstrap.started", "replica.bootstrap.succeeded", "replica.bootstrap.failed",
+  "replica.sync.started", "replica.sync.succeeded", "replica.sync.failed",
+  "replica.sync.retry", "replica.stale", "replica.conflict.detected",
+  "replica.rebootstrap.requested", "replica.rebootstrap.succeeded", "replica.rebootstrap.failed",
+  "replica.operator.action",
 ]);
 const COMPONENTS = new Set<OperationalEvent["component"]>(["coordinator", "storage-node", "client", "repair", "orphan-scanner"]);
 const DETAIL_KEYS = new Set([
   "operation", "route", "result", "reason", "statusClass", "transport", "state",
   "classification", "attempt", "retryCount", "queueDepth", "activeCount",
-  "scanned", "deleted", "retained", "durationMs", "count",
+  "scanned", "deleted", "retained", "durationMs", "count", "action",
 ]);
 const DETAIL_STRING = /^[a-z][a-z0-9_.-]{0,31}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;

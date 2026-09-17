@@ -11,6 +11,8 @@ import { compareCoordinatorStateOrdering } from "./index.js";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventStore } from "../events/index.js";
+import { MetricsRegistry } from "../metrics/index.js";
 
 describe("coordinator HA foundation model", () => {
   it("creates immutable authoritative snapshots and monotonic revisions", () => {
@@ -264,5 +266,34 @@ describe("coordinator HA foundation model", () => {
     manager.stop();
     await manager.resetForRebootstrap();
     expect(manager.status().state).toBe("stopped");
+  });
+
+  it("exposes safe operator diagnostics, events, and bounded metrics", async () => {
+    const identity = createIdentity();
+    const instance = createCoordinatorInstanceIdentity(identity.publicKey);
+    const now = Date.now();
+    const snapshot = { version: 1 as const, instance, revision: 1, observedAt: now, nodes: [] };
+    const exporter = createCoordinatorSnapshotExporter(() => snapshot, identity.privateKey, () => now);
+    const response = await exporter.request({ version: 1 });
+    const events = new EventStore(20);
+    const metrics = new MetricsRegistry(32);
+    const replica = new CoordinatorReplicaImporter({ trustedInstanceIds: [instance.instanceId] });
+    const manager = createCoordinatorReplicaSyncManager(
+      { request: async () => response }, replica,
+      { events, metrics, freshnessMs: 100 },
+    );
+    await manager.start();
+    const status = manager.inspectStatus();
+    expect(status.state).toBe("synchronized");
+    expect(status.authorityClassification).toBe("non-authoritative");
+    expect(status.persistenceHealthy).toBe(true);
+    await manager.forceSync();
+    expect(events.recent(20).some((event) => event.type === "replica.sync.succeeded")).toBe(true);
+    expect(metrics.snapshot().counters.some((metric) => metric.name === "coordinator_replica_sync_success_total")).toBe(true);
+    await manager.clearConflict();
+    expect(manager.status().authorityClassification).toBe("non-authoritative");
+    const serialized = JSON.stringify(status);
+    expect(serialized).not.toMatch(/private|password|token|secret|snapshot contents/i);
+    manager.stop();
   });
 });
