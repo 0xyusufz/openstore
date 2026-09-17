@@ -16,16 +16,6 @@ import {
 } from "./index.js";
 import { HttpStorageTransport, MixedStorageTransport } from "./http-transport.js";
 import type { P2PNodeAddress, P2PTransport } from "../../packages/p2p/index.js";
-import {
-  createOperationRecord,
-  createOperationRecordStore,
-  createPieceClaim,
-  createClaimOnNode,
-  markClaimReferencedOnNode,
-  storeClaimedPieceOnNode,
-  type OperationRecordStore,
-} from "./provenance.js";
-import type { PieceClaim } from "../../packages/provenance/index.js";
 
 export type RepairClassification =
   | "coordinator-unavailable"
@@ -72,7 +62,6 @@ export interface RepairOptions {
   signal?: AbortSignal;
   transport?: P2PTransport;
   identity?: { publicKey: Buffer; privateKey: Buffer };
-  operationStore?: OperationRecordStore;
 }
 
 export interface RepairedChunk {
@@ -235,19 +224,12 @@ async function repairChunk(
 
   const transport = options.transport ?? new MixedStorageTransport(new HttpStorageTransport(options.identity));
   let target: StorageNodeEndpoint | undefined;
-  let placement: { endpoint: StorageNodeEndpoint; claim: PieceClaim; operationId: string } | undefined;
-  const operationStore = options.identity
-    ? (options.operationStore ?? createOperationRecordStore(`${options.manifestStore.dir}/.provenance-operations`))
-    : undefined;
   const maxTargets = Math.min(options.maxTargetAttempts ?? targets.length, MAX_TARGET_ATTEMPTS);
   for (const candidate of targets.slice(0, maxTargets)) {
     checkCancelled(options.signal, fileId, chunk.index);
     try {
-      const candidatePlacement = await ensureTargetPiece(
-        candidate, chunk.pieceId, bytes, transport, options, fileId, chunk.index, operationStore, revision,
-      );
+      await ensureTargetPiece(candidate, chunk.pieceId, bytes, transport, options, fileId, chunk.index);
       target = candidate;
-      placement = candidatePlacement;
       break;
     } catch (error) {
       if (error instanceof RepairError && error.classification === "failed") throw error;
@@ -276,10 +258,6 @@ async function repairChunk(
     });
     try {
       const saved = await options.manifestStore.saveIfRevision(fileId, latest.revision, nextManifest);
-      if (placement && options.identity && operationStore) {
-        await markClaimReferencedOnNode(placement.endpoint, placement.claim.pieceId, placement.claim.claimId, options.identity, { timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
-        await operationStore.update(placement.operationId, "committed");
-      }
       const savedSnapshot = await options.manifestStore.loadWithRevision(fileId);
       if (!savedSnapshot) throw new Error("manifest disappeared after CAS");
       return {
@@ -301,10 +279,6 @@ async function repairChunk(
       const currentChunk = refreshed.manifest.chunks[chunk.index];
       if (!currentChunk) throw new RepairError("manifest-conflict", fileId, "repaired chunk disappeared", chunk.index);
       if (currentChunk.nodeIds.includes(target.id) && !currentChunk.nodeIds.includes(options.lostNodeId)) {
-        if (placement && options.identity && operationStore) {
-          await markClaimReferencedOnNode(placement.endpoint, placement.claim.pieceId, placement.claim.claimId, options.identity, { timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
-          await operationStore.update(placement.operationId, "committed");
-        }
         return {
           repaired: { chunkIndex: chunk.index, pieceId: chunk.pieceId, removedNodeId: options.lostNodeId, addedNodeId: target.id, sourceNodeId: source.id },
           snapshot: refreshed,
@@ -343,31 +317,15 @@ async function ensureTargetPiece(
   options: RepairOptions,
   fileId: string,
   chunkIndex: number,
-  operationStore?: OperationRecordStore,
-  expectedManifestRevision = 0,
-): Promise<{ endpoint: StorageNodeEndpoint; claim: PieceClaim; operationId: string } | undefined> {
+): Promise<void> {
   const address = toAddress(target);
-  let claim: PieceClaim | undefined;
-  let operationId: string | undefined;
-  if (options.identity && operationStore) {
-    claim = createPieceClaim(pieceId, "repair", options.identity);
-    const operation = createOperationRecord(pieceId, claim, target.id, "repair", expectedManifestRevision);
-    operationId = operation.operationId;
-    await createClaimOnNode(target, claim, options.identity, { timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
-    await operationStore.create(operation);
-  }
   try {
     const existing = await transport.getPiece(address, pieceId, { timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
     if (existing.status === 200 && existing.bytes) {
       if (hashPieceId(existing.bytes) !== pieceId) {
         throw new RepairError("failed", fileId, `target "${target.id}" contains bytes inconsistent with ${pieceId}`, chunkIndex);
       }
-      if (claim && operationId) {
-        await operationStore!.update(operationId, "stored");
-        await operationStore!.update(operationId, "verified");
-        return { endpoint: target, claim, operationId };
-      }
-      return undefined;
+      return;
     }
     if (existing.status !== 404 && existing.status >= 400 && !isTransientStatus(existing.status)) {
       throw new Error(`target returned status ${existing.status}`);
@@ -376,11 +334,7 @@ async function ensureTargetPiece(
     if (error instanceof RepairError) throw error;
     if (!isTransientError(safeError(error)) && !/404|not found/i.test(safeError(error))) throw error;
   }
-  if (claim && operationId && options.identity) {
-    await storeClaimedPieceOnNode(target, pieceId, claim.claimId, bytes, options.identity, { timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
-    await operationStore!.update(operationId, "stored");
-  }
-  const report = claim ? { succeeded: [target] } : await storePieceOnNodes(pieceId, bytes, [target], {
+  const report = await storePieceOnNodes(pieceId, bytes, [target], {
     timeoutMs: options.timeoutMs,
     retryAttempts: options.retryAttempts,
     retryBackoffMs: options.retryBackoffMs,
@@ -393,11 +347,6 @@ async function ensureTargetPiece(
   if (readBack.status !== 200 || !readBack.bytes || hashPieceId(readBack.bytes) !== pieceId || !readBack.bytes.equals(bytes)) {
     throw new Error(`target "${target.id}" failed piece read-back verification`);
   }
-  if (claim && operationId) {
-    await operationStore!.update(operationId, "verified");
-    return { endpoint: target, claim, operationId };
-  }
-  return undefined;
 }
 
 function toAddress(endpoint: StorageNodeEndpoint): P2PNodeAddress {

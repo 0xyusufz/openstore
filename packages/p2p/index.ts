@@ -237,13 +237,3 @@ function rejectSensitiveKeys(value: unknown): void {
   }
 }
 import { peerIdFromOpenStorePublicKey } from "./identity-binding.js";
-import type { DeleteIfUnclaimedResult, PieceClaim } from "../provenance/index.js";
-
-export interface P2PProvenanceTransport {
-  createClaim(node: P2PNodeAddress, claim: PieceClaim, options: P2PTransportRequestOptions): Promise<PieceClaim>;
-  storeClaimedPiece(node: P2PNodeAddress, pieceId: string, claimId: string, data: Buffer, options: P2PTransportRequestOptions): Promise<void>;
-  markClaimReferenced(node: P2PNodeAddress, pieceId: string, claimId: string, options: P2PTransportRequestOptions): Promise<PieceClaim>;
-  releaseClaim(node: P2PNodeAddress, pieceId: string, claimId: string, clientNamespace: string, options: P2PTransportRequestOptions): Promise<PieceClaim>;
-  reconcileClaim(node: P2PNodeAddress, pieceId: string, claimId: string, options: P2PTransportRequestOptions): Promise<PieceClaim | undefined>;
-  deletePieceIfUnclaimed(node: P2PNodeAddress, pieceId: string, options: P2PTransportRequestOptions): Promise<DeleteIfUnclaimedResult>;
-}

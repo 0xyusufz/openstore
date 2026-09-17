@@ -14,7 +14,6 @@ import { createLibp2pStorageNode, type Libp2pStorageNode } from "../../packages/
 import { isValidPieceId } from "./index.js";
 import { createRegistryClient, type RegistryClientOptions } from "../../packages/registry/coordinator.js";
 import type { RegistryClient } from "../../packages/registry/coordinator.js";
-import { createPieceProvenanceStore } from "./provenance-store.js";
 
 export interface Libp2pStorageNodeRuntimeConfig {
   storageDir: string;
@@ -105,7 +104,6 @@ export async function createLibp2pStorageNodeRuntime(
   await mkdir(storageDir, { recursive: true });
   const capacity = input.capacityBytes ?? 1 * 1024 * 1024 * 1024;
   const store = createPieceStore(storageDir, capacity, input.maxPieceBytes);
-  const provenance = createPieceProvenanceStore(join(storageDir, ".provenance"));
   const discovery = new DhtPeerDiscovery(input.bootstrapPeers ?? []);
   const node = await createLibp2pStorageNode({
     applicationIdentity: { publicKey: identity.publicKey.toString("base64") },
@@ -119,7 +117,6 @@ export async function createLibp2pStorageNodeRuntime(
     storePiece: store.store,
     getPiece: store.get,
     deletePiece: store.remove,
-    provenance,
   });
   const coordinator: RegistryClient | undefined = input.coordinatorUrl
     ? createRegistryClient({ baseUrl: input.coordinatorUrl, token: input.coordinatorToken } satisfies RegistryClientOptions)
