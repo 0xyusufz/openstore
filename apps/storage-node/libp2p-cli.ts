@@ -24,7 +24,7 @@ function errorMessage(error: unknown): string {
 }
 
 function usage(): string {
-  return "Usage: openstore-storage-node --storage-dir <dir> --identity <keystore> --password-env <ENV> [--listen <multiaddr>] [--bootstrap <descriptor.json>] [--capacity-bytes <n>] [--max-piece-bytes <n>] [--refresh-interval-ms <n>] [--coordinator-url <url>] [--coordinator-token-env <ENV>] [--coordinator-token <token>] [--heartbeat-interval-ms <n>] [--coordinator-retry-attempts <n>] [--coordinator-retry-backoff-ms <n>] [--coordinator-retry-max-backoff-ms <n>]";
+  return "Usage: openstore-storage-node --storage-dir <dir> --identity <keystore> --password-env <ENV> [--listen <multiaddr>] [--advertise <multiaddr>] [--bootstrap <descriptor.json>] [--capacity-bytes <n>] [--max-piece-bytes <n>] [--refresh-interval-ms <n>] [--coordinator-url <url>] [--coordinator-token-env <ENV>] [--coordinator-token <token>] [--heartbeat-interval-ms <n>] [--coordinator-retry-attempts <n>] [--coordinator-retry-backoff-ms <n>] [--coordinator-retry-max-backoff-ms <n>]";
 }
 
 export async function runStorageNodeCli(argv: string[], options: StorageNodeCliOptions = {}): Promise<number> {
@@ -37,7 +37,7 @@ export async function runStorageNodeCli(argv: string[], options: StorageNodeCliO
       const arg = argv[i];
       if (arg === "--help" || arg === "-h") { out(usage()); return 0; }
       const key = arg?.replace(/^--/, "");
-      if (!key || !["storage-dir", "identity", "identity-path", "keystore", "password-env", "listen", "bootstrap", "config", "capacity-bytes", "max-piece-bytes", "refresh-interval-ms", "coordinator-url", "coordinator-token-env", "coordinator-token", "heartbeat-interval-ms", "coordinator-retry-attempts", "coordinator-retry-backoff-ms", "coordinator-retry-max-backoff-ms"].includes(key)) throw new Error(`unknown option: ${arg}`);
+      if (!key || !["storage-dir", "identity", "identity-path", "keystore", "password-env", "listen", "advertise", "bootstrap", "config", "capacity-bytes", "max-piece-bytes", "refresh-interval-ms", "coordinator-url", "coordinator-token-env", "coordinator-token", "heartbeat-interval-ms", "coordinator-retry-attempts", "coordinator-retry-backoff-ms", "coordinator-retry-max-backoff-ms"].includes(key)) throw new Error(`unknown option: ${arg}`);
       const value = argv[++i];
       if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
       if (key === "listen") listens.push(value); else parsed[key] = value;
@@ -52,6 +52,7 @@ export async function runStorageNodeCli(argv: string[], options: StorageNodeCliO
       config.identityPassword = password;
     }
     if (listens.length) config.listenAddrs = listens;
+    if (parsed.advertise) config.advertisedMultiaddr = parsed.advertise;
     if (parsed["capacity-bytes"]) config.capacityBytes = Number(parsed["capacity-bytes"]);
     if (parsed["max-piece-bytes"]) config.maxPieceBytes = Number(parsed["max-piece-bytes"]);
     if (parsed["refresh-interval-ms"]) config.discoveryRefreshIntervalMs = Number(parsed["refresh-interval-ms"]);

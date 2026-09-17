@@ -43,4 +43,26 @@ describe("orphan scanner", () => {
     scanner.cancel();
     expect((await scanner.runOnce()).deleted).toBe(0);
   });
+
+  it("continues scheduled scans after an initial empty run", async () => {
+    const root = await mkdtemp(join(tmpdir(), "openstore-scanner-"));
+    const provenance = createPieceProvenanceStore(join(root, ".provenance"), 0);
+    const pieceId = "scheduled-piece-0001";
+    const deleted: string[] = [];
+    const scanner = createOrphanScanner({
+      pieceDir: root,
+      provenance,
+      intervalMs: 10,
+      deletePiece: async (id) => { deleted.push(id); return "deleted"; },
+    });
+    scanner.start();
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    await writeFile(join(root, pieceId), "opaque");
+    const value = claim(pieceId, "pending");
+    await provenance.createClaim(value);
+    await provenance.releaseClaim(pieceId, value.claimId, value.clientNamespace);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await scanner.stop();
+    expect(deleted).toContain(pieceId);
+  });
 });

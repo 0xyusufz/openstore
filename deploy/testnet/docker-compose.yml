@@ -9,9 +9,10 @@ services:
       OPENSTORE_COORDINATOR_TOKEN: "${OPENSTORE_COORDINATOR_TOKEN:?required}"
       OPENSTORE_COORDINATOR_PERSISTENCE: /var/lib/openstore/coordinator/registry.json
       OPENSTORE_COORDINATOR_PORT: "4190"
+      OPENSTORE_COORDINATOR_HOST: "0.0.0.0"
       OPENSTORE_COORDINATOR_HEARTBEAT_TIMEOUT_MS: "3000"
     ports:
-      - "127.0.0.1:4190:4190"
+      - "127.0.0.1:${OPENSTORE_COORDINATOR_HOST_PORT:-4190}:4190"
     volumes:
       - coordinator-registry:/var/lib/openstore/coordinator
     networks: [openstore-net]
@@ -27,9 +28,11 @@ services:
       OPENSTORE_NODE_IDENTITY: /var/lib/openstore/identity/identity.json
       OPENSTORE_NODE_STORAGE: /var/lib/openstore/pieces
       OPENSTORE_NODE_LISTEN_ADDR: /dns4/node-1/tcp/4101
+      OPENSTORE_NODE_INTERNAL_PORT: "4101"
+      OPENSTORE_NODE_ADVERTISED_ADDR: /dns4/node-1/tcp/4101
       OPENSTORE_COORDINATOR_URL: http://coordinator:4190
     ports:
-      - "127.0.0.1:4101:4101"
+      - "127.0.0.1:${OPENSTORE_NODE_1_HOST_PORT:-4101}:4101"
     volumes:
       - node-1-identity:/var/lib/openstore/identity
       - node-1-pieces:/var/lib/openstore/pieces
@@ -47,9 +50,11 @@ services:
       OPENSTORE_NODE_IDENTITY: /var/lib/openstore/identity/identity.json
       OPENSTORE_NODE_STORAGE: /var/lib/openstore/pieces
       OPENSTORE_NODE_LISTEN_ADDR: /dns4/node-2/tcp/4102
+      OPENSTORE_NODE_INTERNAL_PORT: "4102"
+      OPENSTORE_NODE_ADVERTISED_ADDR: /dns4/node-2/tcp/4102
       OPENSTORE_COORDINATOR_URL: http://coordinator:4190
     ports:
-      - "127.0.0.1:4102:4102"
+      - "127.0.0.1:${OPENSTORE_NODE_2_HOST_PORT:-4102}:4102"
     volumes:
       - node-2-identity:/var/lib/openstore/identity
       - node-2-pieces:/var/lib/openstore/pieces
@@ -67,9 +72,11 @@ services:
       OPENSTORE_NODE_IDENTITY: /var/lib/openstore/identity/identity.json
       OPENSTORE_NODE_STORAGE: /var/lib/openstore/pieces
       OPENSTORE_NODE_LISTEN_ADDR: /dns4/node-3/tcp/4103
+      OPENSTORE_NODE_INTERNAL_PORT: "4103"
+      OPENSTORE_NODE_ADVERTISED_ADDR: /dns4/node-3/tcp/4103
       OPENSTORE_COORDINATOR_URL: http://coordinator:4190
     ports:
-      - "127.0.0.1:4103:4103"
+      - "127.0.0.1:${OPENSTORE_NODE_3_HOST_PORT:-4103}:4103"
     volumes:
       - node-3-identity:/var/lib/openstore/identity
       - node-3-pieces:/var/lib/openstore/pieces

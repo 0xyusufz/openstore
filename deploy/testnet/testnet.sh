@@ -4,6 +4,10 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 ENV_FILE=${OPENSTORE_TESTNET_ENV_FILE:-"$SCRIPT_DIR/.env.testnet"}
+PROJECT_ARGS=
+if [ -n "${OPENSTORE_TESTNET_PROJECT:-}" ]; then
+  PROJECT_ARGS="--project-name"
+fi
 
 if [ ! -f "$ENV_FILE" ]; then
   printf '%s\n' "Missing $ENV_FILE; copy .env.example to .env.testnet and fill local values." >&2
@@ -11,7 +15,11 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 compose() {
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+  if [ -n "$PROJECT_ARGS" ]; then
+    docker compose --project-name "$OPENSTORE_TESTNET_PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+  else
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+  fi
 }
 
 usage() {

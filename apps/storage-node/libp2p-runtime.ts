@@ -22,6 +22,7 @@ export interface Libp2pStorageNodeRuntimeConfig {
   identityPath: string;
   identityPassword: string;
   listenAddrs?: string[];
+  advertisedMultiaddr?: string;
   bootstrapPeers?: P2PPeerDescriptor[];
   capacityBytes?: number;
   maxPieceBytes?: number;
@@ -86,6 +87,9 @@ export function validateLibp2pStorageNodeRuntimeConfig(
   }
   if (value.listenAddrs !== undefined && (!Array.isArray(value.listenAddrs) || value.listenAddrs.length === 0 || value.listenAddrs.some((x) => typeof x !== "string" || x.length === 0))) {
     throw new TypeError("listenAddrs must be a non-empty string array");
+  }
+  if (value.advertisedMultiaddr !== undefined && (typeof value.advertisedMultiaddr !== "string" || value.advertisedMultiaddr.length === 0)) {
+    throw new TypeError("advertisedMultiaddr must be a non-empty string");
   }
   if (value.bootstrapPeers !== undefined && (!Array.isArray(value.bootstrapPeers))) throw new TypeError("bootstrapPeers must be an array");
   if (value.coordinatorUrl !== undefined) {
@@ -156,7 +160,7 @@ export async function createLibp2pStorageNodeRuntime(
   const descriptor = async (snapshot: { allocatedBytes: number; availableBytes: number }) => ({
     nodeId: node.peerId,
     baseUrl: `libp2p://${node.peerId}`,
-    multiaddr: node.listenAddrs[0],
+    multiaddr: input.advertisedMultiaddr ? `${input.advertisedMultiaddr}/p2p/${node.peerId}` : node.listenAddrs[0],
     identity: node.applicationIdentity,
     identityBinding: node.peerId,
     capabilities: { ...node.capabilities, ...snapshot },

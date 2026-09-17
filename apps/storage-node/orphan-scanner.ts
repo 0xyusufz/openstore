@@ -38,7 +38,10 @@ export function createOrphanScanner(options: {
   let cancelled = false;
   let snapshot: { state: OrphanScannerState; scanned: number; deleted: number; retained: number; lastError?: string } = { state, scanned: 0, deleted: 0, retained: 0 };
   const emit = (event: OrphanScannerEvent) => { try { options.onEvent?.(event); } catch {} };
-  const schedule = () => { if (state === "running") timer = setTimeout(() => { void runOnce().finally(schedule); }, intervalMs); };
+  const schedule = () => {
+    if (state === "stopped" || state === "cancelling") return;
+    timer = setTimeout(() => { void runOnce().finally(schedule); }, intervalMs);
+  };
   async function runOnce() {
     if (active) return active;
     cancelled = false;

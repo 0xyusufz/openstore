@@ -82,7 +82,15 @@ deploy/testnet/testnet.sh start
 The reset command does not restart the testnet implicitly. This prevents an
 accidental destructive command from immediately creating new state.
 
-050C will add the complete three-node client and failure smoke test.
+The Docker integration test is opt-in because it builds images, starts
+containers, and removes its own temporary project resources:
+
+```sh
+OPENSTORE_RUN_DOCKER_TESTNET=1 npx vitest run tests/integration/milestone-050c.test.ts
+```
+
+It uses a unique Compose project and temporary credentials/ports, then
+removes only that project in its cleanup path.
 
 ## Troubleshooting
 

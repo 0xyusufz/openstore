@@ -22,11 +22,32 @@ if [ ! -e "$OPENSTORE_NODE_IDENTITY" ]; then
   '
 fi
 
+CONFIG_ARGS=
+if [ -n "${OPENSTORE_NODE_CONFIG:-}" ]; then
+  CONFIG_ARGS="--config"
+fi
+
+if [ -n "$CONFIG_ARGS" ]; then
+  exec node /app/dist/apps/storage-node/libp2p-cli.js \
+  "$CONFIG_ARGS" "$OPENSTORE_NODE_CONFIG" \
+  --storage-dir "$OPENSTORE_NODE_STORAGE" \
+  --identity "$OPENSTORE_NODE_IDENTITY" \
+  --password-env OPENSTORE_NODE_PASSWORD \
+  --listen "/ip4/0.0.0.0/tcp/${OPENSTORE_NODE_INTERNAL_PORT:-4101}" \
+  --advertise "$OPENSTORE_NODE_ADVERTISED_ADDR" \
+  --capacity-bytes "${OPENSTORE_NODE_CAPACITY_BYTES:-1073741824}" \
+  --max-piece-bytes "${OPENSTORE_NODE_MAX_PIECE_BYTES:-4194304}" \
+  --coordinator-url "${OPENSTORE_COORDINATOR_URL:-http://coordinator:4190}" \
+  --coordinator-token-env OPENSTORE_COORDINATOR_TOKEN \
+  --heartbeat-interval-ms "${OPENSTORE_NODE_HEARTBEAT_INTERVAL_MS:-500}"
+fi
+
 exec node /app/dist/apps/storage-node/libp2p-cli.js \
   --storage-dir "$OPENSTORE_NODE_STORAGE" \
   --identity "$OPENSTORE_NODE_IDENTITY" \
   --password-env OPENSTORE_NODE_PASSWORD \
-  --listen "$OPENSTORE_NODE_LISTEN_ADDR" \
+  --listen "/ip4/0.0.0.0/tcp/${OPENSTORE_NODE_INTERNAL_PORT:-4101}" \
+  --advertise "$OPENSTORE_NODE_ADVERTISED_ADDR" \
   --capacity-bytes "${OPENSTORE_NODE_CAPACITY_BYTES:-1073741824}" \
   --max-piece-bytes "${OPENSTORE_NODE_MAX_PIECE_BYTES:-4194304}" \
   --coordinator-url "${OPENSTORE_COORDINATOR_URL:-http://coordinator:4190}" \

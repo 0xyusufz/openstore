@@ -15,7 +15,7 @@ describe("Milestone 050A Docker packaging", () => {
       expect(compose).toContain(`${node}-identity:/var/lib/openstore/identity`);
       expect(compose).toContain(`${node}-pieces:/var/lib/openstore/pieces`);
     }
-    expect(compose.match(/127\.0\.0\.1:410[1-3]:410[1-3]/g)).toHaveLength(3);
+    expect(compose.match(/127\.0\.0\.1:\$\{OPENSTORE_NODE_[1-3]_HOST_PORT:-410[1-3]\}:410[1-3]/g)).toHaveLength(3);
     expect(compose).toContain("openstore-net:");
     expect(compose).toContain("coordinator-registry:/var/lib/openstore/coordinator");
     expect(compose).toMatch(/OPENSTORE_COORDINATOR_TOKEN: "\$\{OPENSTORE_COORDINATOR_TOKEN:\?required\}"/);

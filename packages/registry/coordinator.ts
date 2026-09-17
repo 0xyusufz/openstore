@@ -70,7 +70,7 @@ export function createRegistryCoordinator(options: RegistryCoordinatorOptions): 
   return {
     server, get address() { return `http://${host}:${port ?? 0}`; },
     async listen(requestedPort = DEFAULT_REGISTRY_COORDINATOR_PORT, requestedHost = host) {
-      if (requestedHost !== "127.0.0.1" && requestedHost !== "localhost" && requestedHost !== "::1") throw new Error("registry coordinator must bind to loopback");
+      if (requestedHost !== "127.0.0.1" && requestedHost !== "localhost" && requestedHost !== "::1" && requestedHost !== "0.0.0.0") throw new Error("registry coordinator must bind to loopback or explicitly configured container address");
       host = requestedHost;
       await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(requestedPort, host, () => { server.off("error", reject); resolve(); }); });
       const addr = server.address(); if (!addr || typeof addr === "string") throw new Error("failed to determine coordinator port");
