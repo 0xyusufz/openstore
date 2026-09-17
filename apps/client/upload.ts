@@ -37,6 +37,15 @@ import type { ManifestStore } from "../../packages/manifest/store.js";
 import type { CoordinatorEndpointProvider } from "./index.js";
 import { resolveEndpoints } from "./coordinator.js";
 import type { P2PTransport } from "../../packages/p2p/index.js";
+import { join } from "path";
+import {
+  createOperationRecordStore,
+  markProvenanceCommitted,
+  releaseProvenancePlacements,
+  storePieceWithProvenance,
+  type OperationRecordStore,
+  type ProvenanceStoreReport,
+} from "./provenance.js";
 
 /**
  * Options for {@link uploadBuffer}.
@@ -59,6 +68,7 @@ export interface UploadOptions {
   coordinator?: CoordinatorEndpointProvider;
   transport?: P2PTransport;
   identity?: { publicKey: Buffer; privateKey: Buffer };
+  operationStore?: OperationRecordStore;
 }
 
 /**
@@ -97,6 +107,9 @@ export async function uploadBuffer(
   // Placement must never proceed from a stale coordinator snapshot.
   endpoints = await resolveEndpoints(endpoints, options.coordinator, { requireFresh: options.coordinator !== undefined });
 
+  const operationStore = options.identity
+    ? (options.operationStore ?? (options.manifestStore ? createOperationRecordStore(join(options.manifestStore.dir, ".provenance-operations")) : undefined))
+    : undefined;
   const fileId = generateFileId();
   const encryptionKey = generateEncryptionKey();
   const fileChunks = chunkData(data, chunkSize);
@@ -106,6 +119,7 @@ export async function uploadBuffer(
   // fresh random per-file DEK, so they cannot collide with another
   // file's pieces — deleting them never touches other files.
   const attemptedPieces: { pieceId: string; endpoints: StorageNodeEndpoint[] }[] = [];
+  const provenancePlacements: ProvenanceStoreReport["claims"] = [];
   const chunkPromises: Promise<ManifestChunk>[] = fileChunks.map(async (fileChunk) => {
     const encrypted = encryptChunk(fileChunk.data, encryptionKey);
     const pieceBytes = encodeEncryptedPiece(encrypted);
@@ -155,7 +169,15 @@ export async function uploadBuffer(
     // Record ownership BEFORE storing: even if the store hangs or
     // the response is lost, this attempt's cleanup may delete it.
     attemptedPieces.push({ pieceId, endpoints: selectedEndpoints });
-    const report = await storePieceOnNodes(pieceId, pieceBytes, selectedEndpoints, {
+    const report = options.identity && operationStore
+      ? await storePieceWithProvenance(pieceId, pieceBytes, selectedEndpoints, options.identity, operationStore, {
+        timeoutMs: options.timeoutMs ?? 5000,
+        transport: undefined,
+        storageTransport: options.transport,
+        expectedManifestRevision: 0,
+        kind: "upload",
+      })
+      : await storePieceOnNodes(pieceId, pieceBytes, selectedEndpoints, {
       timeoutMs: options.timeoutMs,
       replicationFactor,
       retryAttempts: options.retryAttempts,
@@ -163,11 +185,12 @@ export async function uploadBuffer(
       transport: options.transport,
       identity: options.identity,
     });
+    if (options.identity && operationStore && "claims" in report) provenancePlacements.push(...report.claims);
     if (report.succeeded.length === 0) {
       const reasons = report.failed
         .map(
           (failure) =>
-            `${failure.endpoint.id}: ${failure.status !== undefined ? `status ${failure.status}` : failure.error}`,
+            `${failure.endpoint.id}: ${"status" in failure && failure.status !== undefined ? `status ${failure.status}` : failure.error}`,
         )
         .join("; ");
       throw new Error(
@@ -176,7 +199,7 @@ export async function uploadBuffer(
     }
     const required = options.replicationFactor ?? (options.registry ? (replicationFactor ?? 3) : report.succeeded.length);
     if (report.succeeded.length < required) {
-      const reasons = report.failed.map((f) => `${f.endpoint.id}: ${f.status ?? f.error}`).join("; ");
+      const reasons = report.failed.map((f) => `${f.endpoint.id}: ${"status" in f ? (f.status ?? f.error) : f.error}`).join("; ");
       throw new Error(
         `partial replication failure for piece ${fileChunk.index} ("${pieceId}"): ` +
         `stored ${report.succeeded.length}/${required}; ${reasons}`,
@@ -201,12 +224,12 @@ export async function uploadBuffer(
       // attempt may have stored — otherwise a store completing after
       // cleanup would leave an orphan.
       await Promise.allSettled(chunkPromises);
-      const { deletePieceFromNodes } = await import("./index.js");
-      await Promise.all(
-        attemptedPieces.map(({ pieceId, endpoints: eps }) =>
-          deletePieceFromNodes(pieceId, eps, { timeoutMs: options.timeoutMs }),
-        ),
-      );
+      if (options.identity && operationStore) {
+        await releaseProvenancePlacements(provenancePlacements, options.identity, { timeoutMs: options.timeoutMs ?? 5000 }, operationStore);
+      } else {
+        const { deletePieceFromNodes } = await import("./index.js");
+        await Promise.all(attemptedPieces.map(({ pieceId, endpoints: eps }) => deletePieceFromNodes(pieceId, eps, { timeoutMs: options.timeoutMs })));
+      }
       throw err;
     }
 
@@ -222,17 +245,20 @@ export async function uploadBuffer(
       // Persist manifest metadata only; the key stays with the caller.
       // A persistence failure surfaces explicitly instead of silently losing the manifest.
       try {
-        const persistedManifest = await options.manifestStore.save(manifest);
+        const persistedManifest = await options.manifestStore.saveIfRevision(manifest.fileId, 0, manifest);
+        if (options.identity && operationStore) {
+          await markProvenanceCommitted(provenancePlacements, options.identity, { timeoutMs: options.timeoutMs ?? 5000 }, operationStore);
+        }
         return { manifest: persistedManifest, encryptionKey };
       } catch (err) {
         // Manifest save failed after pieces were stored — remove this
         // attempt's pieces so no orphaned ciphertext remains.
-        const { deletePieceFromNodes } = await import("./index.js");
-        await Promise.all(
-          attemptedPieces.map(({ pieceId, endpoints: eps }) =>
-            deletePieceFromNodes(pieceId, eps, { timeoutMs: options.timeoutMs }),
-          ),
-        );
+        if (options.identity && operationStore) {
+          await releaseProvenancePlacements(provenancePlacements, options.identity, { timeoutMs: options.timeoutMs ?? 5000 }, operationStore);
+        } else {
+          const { deletePieceFromNodes } = await import("./index.js");
+          await Promise.all(attemptedPieces.map(({ pieceId, endpoints: eps }) => deletePieceFromNodes(pieceId, eps, { timeoutMs: options.timeoutMs })));
+        }
         throw err;
       }
     }

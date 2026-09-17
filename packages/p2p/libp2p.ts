@@ -5,13 +5,16 @@ import { noise } from "@chainsafe/libp2p-noise";
 import { privateKeyFromRaw } from "@libp2p/crypto/keys";
 import { multiaddr } from "@multiformats/multiaddr";
 import type { Libp2p } from "@libp2p/interface";
-import type { P2PNodeCapabilities, P2PNodeIdentity, P2PTransport, P2PTransportRequestOptions, P2PNodeAddress, P2PGetResult, P2PHealthResult, PeerDiscovery, P2PPeerDescriptor } from "./index.js";
+import type { P2PNodeCapabilities, P2PNodeIdentity, P2PTransport, P2PTransportRequestOptions, P2PNodeAddress, P2PGetResult, P2PHealthResult, PeerDiscovery, P2PPeerDescriptor, P2PProvenanceTransport } from "./index.js";
+import type { DeleteIfUnclaimedResult, PieceClaim } from "../provenance/index.js";
 import { validateP2PPeerDescriptor } from "./index.js";
 import { createDhtServices, DhtPeerDiscovery } from "./dht-discovery.js";
 import { peerIdFromOpenStorePrivateKey, peerIdFromOpenStorePublicKey } from "./identity-binding.js";
 import type { Registry } from "../registry/index.js";
+import { hashPieceId } from "../manifest/index.js";
 
 export const OPENSTORE_PIECE_PROTOCOL = "/openstore/piece/1.0.0";
+export const OPENSTORE_PROVENANCE_PROTOCOL = "/openstore/provenance/1.0.0";
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 
 interface PieceRequest {
@@ -24,6 +27,15 @@ interface PieceResponse {
   status: number;
   data?: string;
   error?: string;
+}
+
+interface ProvenanceRequest {
+  op: "claim-create" | "claim-store" | "claim-reference" | "claim-release" | "claim-reconcile" | "delete-if-unclaimed";
+  pieceId?: string;
+  claim?: PieceClaim;
+  claimId?: string;
+  clientNamespace?: string;
+  data?: string;
 }
 
 export interface Libp2pStorageNodeOptions {
@@ -44,6 +56,14 @@ export interface Libp2pStorageNodeOptions {
   reconnectBaseDelayMs?: number;
   reconnectMaxDelayMs?: number;
   maxReconnectAttempts?: number;
+  provenance?: {
+    createClaim(claim: PieceClaim): Promise<PieceClaim>;
+    associatePiece(pieceId: string, claimId: string, writePiece: () => Promise<void>): Promise<void>;
+    markReferenced(pieceId: string, claimId: string): Promise<PieceClaim>;
+    releaseClaim(pieceId: string, claimId: string, clientNamespace: string): Promise<PieceClaim>;
+    reconcile(pieceId: string, claimId: string): Promise<PieceClaim | undefined>;
+    deleteIfUnclaimed(pieceId: string, deletePiece: () => Promise<"deleted" | "not-found">): Promise<DeleteIfUnclaimedResult>;
+  };
 }
 
 export interface Libp2pConnectionEvent {
@@ -180,6 +200,19 @@ export async function createLibp2pStorageNode(
       await stream.close();
     }
   });
+  if (options.provenance) {
+    await node.handle(OPENSTORE_PROVENANCE_PROTOCOL, async (stream) => {
+      try {
+        const request = await readMessage<ProvenanceRequest>(stream as AsyncIterable<unknown>);
+        const response = await handleProvenanceRequest(request, options);
+        stream.send(Buffer.from(JSON.stringify(response)));
+      } catch (error) {
+        stream.send(Buffer.from(JSON.stringify({ status: 409, error: error instanceof Error ? error.message : "provenance request failed" })));
+      } finally {
+        void stream.close();
+      }
+    });
+  }
   const wrapper: Libp2pStorageNode = {
     peerId: node.peerId.toString(),
     applicationIdentity: { ...options.applicationIdentity },
@@ -339,6 +372,76 @@ export class Libp2pPieceTransport implements P2PTransport {
   }
 }
 
+export class Libp2pProvenanceTransport implements P2PProvenanceTransport {
+  async createClaim(node: P2PNodeAddress, claim: PieceClaim, options: P2PTransportRequestOptions): Promise<PieceClaim> {
+    return (await this.request(node, { op: "claim-create", claim }, options)).claim as PieceClaim;
+  }
+  async storeClaimedPiece(node: P2PNodeAddress, pieceId: string, claimId: string, data: Buffer, options: P2PTransportRequestOptions): Promise<void> {
+    await this.request(node, { op: "claim-store", pieceId, claimId, data: data.toString("base64") }, options);
+  }
+  async markClaimReferenced(node: P2PNodeAddress, pieceId: string, claimId: string, options: P2PTransportRequestOptions): Promise<PieceClaim> {
+    return (await this.request(node, { op: "claim-reference", pieceId, claimId }, options)).claim as PieceClaim;
+  }
+  async releaseClaim(node: P2PNodeAddress, pieceId: string, claimId: string, clientNamespace: string, options: P2PTransportRequestOptions): Promise<PieceClaim> {
+    return (await this.request(node, { op: "claim-release", pieceId, claimId, clientNamespace }, options)).claim as PieceClaim;
+  }
+  async reconcileClaim(node: P2PNodeAddress, pieceId: string, claimId: string, options: P2PTransportRequestOptions): Promise<PieceClaim | undefined> {
+    return (await this.request(node, { op: "claim-reconcile", pieceId, claimId }, options)).claim as PieceClaim | undefined;
+  }
+  async deletePieceIfUnclaimed(node: P2PNodeAddress, pieceId: string, options: P2PTransportRequestOptions): Promise<DeleteIfUnclaimedResult> {
+    return (await this.request(node, { op: "delete-if-unclaimed", pieceId }, options)).result as DeleteIfUnclaimedResult;
+  }
+  private async request(node: P2PNodeAddress, request: ProvenanceRequest, options: P2PTransportRequestOptions): Promise<{ claim?: PieceClaim; result?: DeleteIfUnclaimedResult; status?: number }> {
+    validatePieceNode(node);
+    const local = await createLibp2p({ transports: [tcp()], streamMuxers: [mplex()], connectionEncrypters: [noise()], addresses: { listen: [] } });
+    try {
+      await local.start();
+      const stream = await local.dialProtocol(multiaddr((node as P2PNodeAddress & { multiaddr?: string }).multiaddr as string), OPENSTORE_PROVENANCE_PROTOCOL, { signal: AbortSignal.timeout(options.timeoutMs) });
+      stream.send(Buffer.from(JSON.stringify(request)));
+      void stream.close();
+      const response = await readMessage<{ claim?: PieceClaim; result?: DeleteIfUnclaimedResult; status?: number; error?: string }>(stream as AsyncIterable<unknown>);
+      if (response.status !== undefined && response.status >= 400) throw new Error(response.error ?? `provenance request returned ${response.status}`);
+      return response;
+    } finally {
+      await local.stop();
+    }
+  }
+}
+
+async function handleProvenanceRequest(request: ProvenanceRequest, options: Libp2pStorageNodeOptions): Promise<Record<string, unknown>> {
+  if (!options.provenance) throw new Error("provenance unavailable");
+  if (request.op === "claim-create" && request.claim) return { status: 200, claim: await options.provenance.createClaim(request.claim) };
+  if (!request.pieceId) throw new Error("malformed provenance request");
+  if (request.op !== "delete-if-unclaimed" && !request.claimId) throw new Error("malformed provenance request");
+  const pieceId = request.pieceId;
+  const claimId = request.claimId;
+  if (request.op === "claim-store") {
+    if (!request.data) throw new Error("missing claim data");
+    await options.provenance.associatePiece(pieceId, claimId!, async () => {
+      const bytes = Buffer.from(request.data!, "base64");
+      if (hashPieceId(bytes) !== pieceId) throw new Error("piece bytes do not match piece id");
+      const status = await options.storePiece(pieceId, bytes);
+      if (status >= 400) throw new Error(`store returned ${status}`);
+    });
+    return { status: 200 };
+  }
+  if (request.op === "claim-reference") return { status: 200, claim: await options.provenance.markReferenced(pieceId, claimId!) };
+  if (request.op === "claim-release") return { status: 200, claim: await options.provenance.releaseClaim(pieceId, claimId!, request.clientNamespace ?? "") };
+  if (request.op === "claim-reconcile") {
+    const claim = await options.provenance.reconcile(pieceId, claimId!);
+    return { status: 200, ...(claim === undefined ? {} : { claim }) };
+  }
+  const result = await options.provenance.deleteIfUnclaimed(pieceId, async () => {
+    const status = await options.deletePiece(pieceId);
+    return status === 404 ? "not-found" : status >= 400 ? "not-found" : "deleted";
+  });
+  return { status: 200, result };
+}
+
+function validatePieceNode(node: P2PNodeAddress): void {
+  if (!node.baseUrl.startsWith("libp2p:") || typeof (node as P2PNodeAddress & { multiaddr?: string }).multiaddr !== "string") throw new TypeError("libp2p provenance requires a multiaddr");
+}
+
 async function handleRequest(request: PieceRequest, options: Libp2pStorageNodeOptions): Promise<PieceResponse> {
   validatePieceRequest(request);
   if (request.op === "store") {
@@ -346,6 +449,7 @@ async function handleRequest(request: PieceRequest, options: Libp2pStorageNodeOp
     if (options.maxPieceBytes !== undefined && data.length > options.maxPieceBytes) return { status: 413, error: "piece too large" };
     return { status: await options.storePiece(request.pieceId, data) };
   }
+
   if (request.op === "get") {
     const data = await options.getPiece(request.pieceId);
     return data === null ? { status: 404 } : { status: 200, data: data.toString("base64") };

@@ -481,3 +481,16 @@ function assertValidRetryOptions(attempts: number | undefined, backoffMs: number
 }
 
 export { createCoordinatorAdapter, coordinatorNodesToEndpoints, resolveEndpoints } from "./coordinator.js";
+export {
+  clientNamespace,
+  createPieceClaim,
+  createClaimOnNode,
+  storeClaimedPieceOnNode,
+  markClaimReferencedOnNode,
+  releaseClaimOnNode,
+  deletePieceIfUnclaimedOnNode,
+  createOperationRecord,
+  createOperationRecordStore,
+  reconcileCommittedOperation,
+  storePieceWithProvenance,
+} from "./provenance.js";

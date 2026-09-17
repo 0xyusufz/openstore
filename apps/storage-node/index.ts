@@ -29,6 +29,9 @@ import { join, resolve } from "path";
 import { DEFAULT_MAX_CLOCK_SKEW_MS, PUBKEY_HEADER, verifyAuthHeaders } from "../../packages/auth/index.js";
 import type { Identity } from "../../packages/identity/index.js";
 import type { Registry } from "../../packages/registry/index.js";
+import { createPieceProvenanceStore, type PieceProvenanceStore } from "./provenance-store.js";
+import type { PieceClaim } from "../../packages/provenance/index.js";
+import { hashPieceId } from "../../packages/manifest/index.js";
 
 export const STORAGE_NODE_VERSION = 1;
 
@@ -134,6 +137,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     throw new TypeError("storageDir must be a non-empty string");
   }
   const storageDir = resolve(options.storageDir);
+  const provenance = createPieceProvenanceStore(join(storageDir, ".provenance"));
   const requireAuth = options.requireAuth ?? false;
   const maxClockSkewMs = options.maxClockSkewMs ?? DEFAULT_MAX_CLOCK_SKEW_MS;
   const seenNonces = new Map<string, number>();
@@ -155,7 +159,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   const hasKeystore = typeof options.identityPath === "string" && options.identityPath !== "";
 
   const server = createServer((req, res) => {
-    void handleRequest(req, res, storageDir, capacityBytes, { requireAuth, maxClockSkewMs, seenNonces }, () => nodeIdentity, () => draining).catch(() => {
+    void handleRequest(req, res, storageDir, capacityBytes, provenance, { requireAuth, maxClockSkewMs, seenNonces }, () => nodeIdentity, () => draining).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal error" });
       } else {
@@ -342,12 +346,20 @@ async function handleRequest(
   res: ServerResponse,
   storageDir: string,
   capacityBytes: number,
+  provenance: PieceProvenanceStore,
   auth: AuthState,
   getNodeIdentity: () => Identity | undefined,
   isDraining: () => boolean,
 ): Promise<void> {
   const method = (req.method ?? "").toUpperCase();
   const rawPath = (req.url ?? "/").split("?")[0] as string;
+
+  if (rawPath.startsWith("/v2/pieces/")) {
+    const body = method === "POST" ? await readBody(req) : undefined;
+    if (!checkAuth(req, method, rawPath, body, auth, res)) return;
+    await handleProvenanceRequest(req, res, rawPath, body, storageDir, capacityBytes, provenance);
+    return;
+  }
 
   if (method === "POST" && rawPath === "/pieces") {
     if (isDraining()) {
@@ -416,6 +428,114 @@ async function handleRequest(
   }
 
   sendJson(res, 404, { error: "not found" });
+}
+
+async function handleProvenanceRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  rawPath: string,
+  rawBody: Buffer | undefined,
+  storageDir: string,
+  capacityBytes: number,
+  provenance: PieceProvenanceStore,
+): Promise<void> {
+  const segments = rawPath.split("/");
+  const body = parseJsonObject(rawBody);
+  const claimClientKey = String((req.headers as Record<string, string | undefined>)["x-openstore-pubkey"] ?? "");
+  const claimClient = claimClientKey.length > 0 ? createHash("sha256").update(Buffer.from(claimClientKey, "base64")).digest("hex") : "";
+  try {
+    if (req.method === "POST" && rawPath === "/v2/pieces/claims") {
+      const claim = body as unknown as PieceClaim;
+      if (claim.clientNamespace !== claimClient) throw new Error("claim client namespace does not match authenticated identity");
+      const created = await provenance.createClaim(claim);
+      sendJson(res, 200, { status: "ok", claim: created });
+      return;
+    }
+    if (segments.length === 5 && segments[1] === "v2" && segments[2] === "pieces") {
+      const pieceId = decodeSegment(segments[3] as string);
+      const operation = segments[4];
+      if (!pieceId || !isValidPieceId(pieceId)) {
+        sendJson(res, 400, { error: "invalid piece id" });
+        return;
+      }
+      if (req.method === "POST" && operation === "store") {
+        if (typeof body.claimId !== "string" || typeof body.data !== "string" || !isBase64(body.data)) throw new Error("invalid store claim body");
+        await provenance.associatePiece(pieceId, body.claimId, async () => {
+          const bytes = Buffer.from(body.data as string, "base64");
+          if (hashPieceId(bytes) !== pieceId) throw new Error("piece bytes do not match piece id");
+          await storePieceBytes(storageDir, capacityBytes, pieceId, bytes);
+        });
+        sendJson(res, 200, { status: "stored", pieceId });
+        return;
+      }
+      if (req.method === "POST" && operation === "reference") {
+        const claim = await provenance.markReferenced(pieceId, String(body.claimId ?? ""));
+        sendJson(res, 200, { status: "referenced", claim });
+        return;
+      }
+      if (req.method === "POST" && operation === "release") {
+        const claim = await provenance.releaseClaim(pieceId, String(body.claimId ?? ""), claimClient);
+        sendJson(res, 200, { status: "released", claim });
+        return;
+      }
+      if (req.method === "POST" && operation === "reconcile") {
+        const claim = await provenance.reconcile(pieceId, String(body.claimId ?? ""));
+        sendJson(res, 200, { status: claim ? "known" : "unknown", ...(claim ? { claim } : {}) });
+        return;
+      }
+    }
+    if (req.method === "DELETE" && segments.length === 4 && segments[1] === "v2" && segments[2] === "pieces") {
+      const pieceId = decodeSegment(segments[3] as string);
+      if (!pieceId || !isValidPieceId(pieceId)) {
+        sendJson(res, 400, { error: "invalid piece id" });
+        return;
+      }
+      const result = await provenance.deleteIfUnclaimed(pieceId, async () => {
+        try {
+          await unlink(join(storageDir, pieceId));
+          return "deleted";
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return "not-found";
+          throw error;
+        }
+      });
+      sendJson(res, result.status === "deleted" ? 204 : result.status === "still-claimed" ? 409 : result.status === "not-found" ? 404 : 503, result.status === "still-claimed" ? { status: result.status, claims: result.claims.map(safeClaim) } : { status: result.status });
+      return;
+    }
+    sendJson(res, 404, { error: "not found" });
+  } catch (error) {
+    sendJson(res, 409, { error: safeProvenanceError(error) });
+  }
+}
+
+function parseJsonObject(rawBody: Buffer | undefined): Record<string, unknown> {
+  if (!rawBody) return {};
+  let parsed: unknown;
+  try { parsed = JSON.parse(rawBody.toString("utf8")); } catch { throw new Error("invalid JSON body"); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("body must be an object");
+  return parsed as Record<string, unknown>;
+}
+
+async function storePieceBytes(storageDir: string, capacityBytes: number, id: string, bytes: Buffer): Promise<void> {
+  const piecePath = join(storageDir, id);
+  let previous = 0;
+  try { previous = (await stat(piecePath)).size; } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const used = await getUsedBytesForDir(storageDir);
+  if (used - previous + bytes.length > capacityBytes) throw new Error("insufficient storage");
+  await mkdir(storageDir, { recursive: true });
+  await writeFile(piecePath, bytes, { mode: 0o600 });
+}
+
+function safeClaim(claim: PieceClaim): Omit<PieceClaim, "clientNamespace"> & { clientNamespace: string } {
+  return { ...claim, clientNamespace: "[opaque]" };
+}
+
+function safeProvenanceError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/(password|token|secret|private key|recovery phrase|seed|dek)(?:\s*[:=]\s*)?[^\s:;,)]*/gi, "$1 [redacted]")
+    .slice(0, 300);
 }
 
 function hasAuthHeaders(headers: Record<string, string | undefined>): boolean {
