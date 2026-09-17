@@ -167,6 +167,12 @@ piece transport. It must not be coupled to client encryption/storage logic.
   execute/verify flows, with degraded-state diagnostics, restart-safe drill
   persistence, explicit 053Q enforcement, and cross-process safety checks
   guarding against two-candidate reuse of a single authorization.
+- **055:** Added the authenticated coordinator HTTP adapter for the live
+  authority recovery flow. The actual routes are `GET /v1/recovery/inspect`,
+  `POST /v1/recovery/diagnose`, `POST /v1/recovery/prepare`,
+  `POST /v1/recovery/execute`, and `POST /v1/recovery/verify`. The HTTP layer
+  enforces bearer-token auth, normalizes sanitized responses, and delegates to
+  the 053Q/054 production enforcement logic without bypassing it.
 
 ## 7. State after Milestone 043
 
