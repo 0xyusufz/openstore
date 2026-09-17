@@ -351,7 +351,7 @@ async function ensureTargetPiece(
   let operationId: string | undefined;
   if (options.identity && operationStore) {
     claim = createPieceClaim(pieceId, "repair", options.identity);
-    const operation = createOperationRecord(pieceId, claim, target.id, "repair", expectedManifestRevision);
+    const operation = createOperationRecord(pieceId, claim, target.id, "repair", expectedManifestRevision, fileId);
     operationId = operation.operationId;
     await createClaimOnNode(target, claim, options.identity, { timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
     await operationStore.create(operation);

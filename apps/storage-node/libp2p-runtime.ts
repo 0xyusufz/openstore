@@ -15,6 +15,7 @@ import { isValidPieceId } from "./index.js";
 import { createRegistryClient, type RegistryClientOptions } from "../../packages/registry/coordinator.js";
 import type { RegistryClient } from "../../packages/registry/coordinator.js";
 import { createPieceProvenanceStore } from "./provenance-store.js";
+import { createOrphanScanner, type OrphanScanner } from "./orphan-scanner.js";
 
 export interface Libp2pStorageNodeRuntimeConfig {
   storageDir: string;
@@ -34,6 +35,7 @@ export interface Libp2pStorageNodeRuntimeConfig {
   coordinatorRetryMaxBackoffMs?: number;
   lifecycleEventCallback?: (event: Libp2pStorageNodeLifecycleEvent) => void;
   onLifecycleEvent?: (event: Libp2pStorageNodeLifecycleEvent) => void;
+  orphanCleanup?: { enabled?: boolean; gracePeriodMs?: number; intervalMs?: number; batchSize?: number; maxDeletionsPerRun?: number };
 }
 
 export type Libp2pStorageNodeLifecycleState =
@@ -105,7 +107,18 @@ export async function createLibp2pStorageNodeRuntime(
   await mkdir(storageDir, { recursive: true });
   const capacity = input.capacityBytes ?? 1 * 1024 * 1024 * 1024;
   const store = createPieceStore(storageDir, capacity, input.maxPieceBytes);
-  const provenance = createPieceProvenanceStore(join(storageDir, ".provenance"));
+  const provenance = createPieceProvenanceStore(join(storageDir, ".provenance"), input.orphanCleanup?.gracePeriodMs);
+  let orphanScanner: OrphanScanner | undefined;
+  if (input.orphanCleanup?.enabled) {
+    orphanScanner = createOrphanScanner({
+      pieceDir: storageDir,
+      provenance,
+      intervalMs: input.orphanCleanup.intervalMs,
+      batchSize: input.orphanCleanup.batchSize,
+      maxDeletionsPerRun: input.orphanCleanup.maxDeletionsPerRun,
+      deletePiece: async (pieceId) => (await store.remove(pieceId)) === 404 ? "not-found" : "deleted",
+    });
+  }
   const discovery = new DhtPeerDiscovery(input.bootstrapPeers ?? []);
   const node = await createLibp2pStorageNode({
     applicationIdentity: { publicKey: identity.publicKey.toString("base64") },
@@ -266,6 +279,7 @@ export async function createLibp2pStorageNodeRuntime(
     stopping = false;
     emit("starting");
     await node.start();
+    orphanScanner?.start();
     if (coordinator) {
       await register();
     } else emit("registered");
@@ -282,6 +296,7 @@ export async function createLibp2pStorageNodeRuntime(
       try { await coordinator.unregisterWithIdentity(identity, node.peerId); } catch { /* coordinator may already be unavailable */ }
       registered = false;
     }
+    await orphanScanner?.stop();
     await node.stop();
     registrationStatus = "unregistered";
     emit("stopped", undefined, "shutdown.completed");

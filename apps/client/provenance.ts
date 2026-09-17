@@ -19,6 +19,7 @@ export interface OperationRecordStore {
   update(operationId: string, state: OperationState): Promise<OperationRecord>;
   load(operationId: string): Promise<OperationRecord | undefined>;
   list(): Promise<OperationRecord[]>;
+  updateDeletion(operationId: string, state: NonNullable<OperationRecord["deletionState"]>): Promise<OperationRecord>;
 }
 
 export function createOperationRecordStore(directory: string): OperationRecordStore {
@@ -76,6 +77,20 @@ export function createOperationRecordStore(directory: string): OperationRecordSt
       await write(next);
       return next;
     }),
+    updateDeletion: (operationId, state) => withLock(operationId, async () => {
+      const current = await read(operationId);
+      if (!current) throw new Error("operation record not found");
+      const allowed = current.deletionState === undefined
+        ? state === "pending"
+        : current.deletionState === state ||
+          (current.deletionState === "pending" && state === "deleted") ||
+          (current.deletionState === "deleted" && state === "release-requested") ||
+          (current.deletionState === "release-requested" && state === "released");
+      if (!allowed) throw new Error(`invalid deletion transition: ${current.deletionState ?? "none"} -> ${state}`);
+      const next = { ...current, deletionState: state, updatedAt: Date.now() };
+      await write(next);
+      return next;
+    }),
     load: read,
     async list() {
       let entries: string[];
@@ -100,9 +115,10 @@ export function createOperationRecord(
   targetNodeId: string,
   kind: PieceClaimKind,
   expectedManifestRevision: number,
+  fileId?: string,
 ): OperationRecord {
   const now = Date.now();
-  return { operationId: claim.operationId, pieceId, claimId: claim.claimId, targetNodeId, kind, expectedManifestRevision, state: "prepared", createdAt: now, updatedAt: now };
+  return { operationId: claim.operationId, pieceId, claimId: claim.claimId, targetNodeId, kind, expectedManifestRevision, ...(fileId ? { fileId } : {}), state: "prepared", createdAt: now, updatedAt: now };
 }
 
 export interface ProvenanceStoreReport {
@@ -117,7 +133,7 @@ export async function storePieceWithProvenance(
   endpoints: StorageNodeEndpoint[],
   identity: ProvenanceIdentity,
   operationStore: OperationRecordStore,
-  options: { timeoutMs: number; transport?: P2PProvenanceTransport; storageTransport?: P2PTransport; expectedManifestRevision: number; kind: PieceClaimKind },
+  options: { timeoutMs: number; transport?: P2PProvenanceTransport; storageTransport?: P2PTransport; expectedManifestRevision: number; kind: PieceClaimKind; fileId?: string },
 ): Promise<ProvenanceStoreReport> {
   if (hashPieceId(bytes) !== pieceId) throw new Error("piece bytes do not match piece ID");
   const succeeded: StorageNodeEndpoint[] = [];
@@ -125,7 +141,7 @@ export async function storePieceWithProvenance(
   const claims: ProvenanceStoreReport["claims"] = [];
   for (const endpoint of endpoints) {
     const claim = createPieceClaim(pieceId, options.kind, identity);
-    const operation = createOperationRecord(pieceId, claim, endpoint.id, options.kind, options.expectedManifestRevision);
+    const operation = createOperationRecord(pieceId, claim, endpoint.id, options.kind, options.expectedManifestRevision, options.fileId);
     try {
       await createClaimOnNode(endpoint, claim, identity, options);
       await operationStore.create(operation);
@@ -185,7 +201,34 @@ export async function releaseProvenancePlacements(
     } catch {
       // Keep the claim and operation for restart reconciliation when uncertain.
     }
+
   }
+}
+
+/** Retry claim release after a confirmed ordinary DELETE. */
+export async function reconcileDeletedProvenanceOperations(
+  fileId: string,
+  endpoints: StorageNodeEndpoint[],
+  identity: ProvenanceIdentity,
+  operationStore: OperationRecordStore,
+  options: { timeoutMs: number; transport?: P2PProvenanceTransport },
+): Promise<{ released: number; failed: number }> {
+  let released = 0;
+  let failed = 0;
+  for (const record of await operationStore.list()) {
+    if (record.fileId !== fileId || !record.deletionState || !["deleted", "release-requested"].includes(record.deletionState)) continue;
+    const endpoint = endpoints.find((candidate) => candidate.id === record.targetNodeId);
+    if (!endpoint) { failed++; continue; }
+    try {
+      if (record.deletionState === "deleted") await operationStore.updateDeletion(record.operationId, "release-requested");
+      await releaseClaimOnNode(endpoint, record.pieceId, record.claimId, identity, options);
+      await operationStore.updateDeletion(record.operationId, "released");
+      released++;
+    } catch {
+      failed++;
+    }
+  }
+  return { released, failed };
 }
 
 export async function reconcileCommittedOperation(

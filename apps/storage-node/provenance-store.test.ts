@@ -13,7 +13,7 @@ function makeClaim(pieceId = "piece-1", namespace = "a".repeat(64)): PieceClaim 
 describe("piece provenance store", () => {
   it("persists claims, enforces ownership, and conditionally deletes", async () => {
     const dir = await mkdtemp(join(tmpdir(), "openstore-provenance-"));
-    const store = createPieceProvenanceStore(dir);
+    const store = createPieceProvenanceStore(dir, 0);
     const claim = makeClaim();
     await store.createClaim(claim);
     await expect(store.releaseClaim(claim.pieceId, claim.claimId, "b".repeat(64))).rejects.toThrow("owner");

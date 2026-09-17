@@ -30,6 +30,7 @@ import { DEFAULT_MAX_CLOCK_SKEW_MS, PUBKEY_HEADER, verifyAuthHeaders } from "../
 import type { Identity } from "../../packages/identity/index.js";
 import type { Registry } from "../../packages/registry/index.js";
 import { createPieceProvenanceStore, type PieceProvenanceStore } from "./provenance-store.js";
+import { createOrphanScanner, type OrphanScanner } from "./orphan-scanner.js";
 import type { PieceClaim } from "../../packages/provenance/index.js";
 import { hashPieceId } from "../../packages/manifest/index.js";
 
@@ -61,6 +62,7 @@ export interface StorageNodeOptions {
   /** Total allocated bytes for this node (capacity). Defaults to 1 GiB */
   capacityBytes?: number;
   onLifecycleEvent?: (event: StorageNodeLifecycleEvent) => void;
+  orphanCleanup?: { enabled?: boolean; gracePeriodMs?: number; intervalMs?: number; batchSize?: number; maxDeletionsPerRun?: number };
 }
 export type StorageNodeLifecycleEvent = { type: "storage-node.started" | "storage-node.closed" | "storage-node.draining" | "storage-node.recovery"; draining?: boolean; error?: string };
 export interface StorageNodeStatusSnapshot { status: "ok" | "degraded" | "draining"; draining: boolean; capacity: NodeCapacity; pieceCount: number; }
@@ -137,7 +139,21 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
     throw new TypeError("storageDir must be a non-empty string");
   }
   const storageDir = resolve(options.storageDir);
-  const provenance = createPieceProvenanceStore(join(storageDir, ".provenance"));
+  const provenance = createPieceProvenanceStore(join(storageDir, ".provenance"), options.orphanCleanup?.gracePeriodMs);
+  let orphanScanner: OrphanScanner | undefined;
+  if (options.orphanCleanup?.enabled) {
+    orphanScanner = createOrphanScanner({
+      pieceDir: storageDir,
+      provenance,
+      intervalMs: options.orphanCleanup.intervalMs,
+      batchSize: options.orphanCleanup.batchSize,
+      maxDeletionsPerRun: options.orphanCleanup.maxDeletionsPerRun,
+      deletePiece: async (pieceId) => {
+        try { await unlink(join(storageDir, pieceId)); return "deleted"; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return "not-found"; throw error; }
+      },
+    });
+  }
   const requireAuth = options.requireAuth ?? false;
   const maxClockSkewMs = options.maxClockSkewMs ?? DEFAULT_MAX_CLOCK_SKEW_MS;
   const seenNonces = new Map<string, number>();
@@ -265,6 +281,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
         throw new Error("failed to determine listening port");
       }
       emit({ type: "storage-node.started" });
+      orphanScanner?.start();
 
       // Register with registry if configured
       if (options.registry && nodeIdentity) {
@@ -304,6 +321,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       return actualPort;
     },
     async close(): Promise<void> {
+      await orphanScanner?.stop();
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = undefined;

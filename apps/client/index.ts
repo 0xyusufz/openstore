@@ -493,4 +493,5 @@ export {
   createOperationRecordStore,
   reconcileCommittedOperation,
   storePieceWithProvenance,
+  reconcileDeletedProvenanceOperations,
 } from "./provenance.js";

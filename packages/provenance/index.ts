@@ -19,6 +19,14 @@ export interface PieceClaim {
   updatedAt: number;
 }
 
+export interface PieceProvenanceEnvelope {
+  version: 2;
+  pieceId: string;
+  managedAt: number;
+  cleanupEligibleAfter: number;
+  claims: PieceClaim[];
+}
+
 export interface OperationRecord {
   operationId: string;
   pieceId: string;
@@ -26,6 +34,9 @@ export interface OperationRecord {
   targetNodeId: string;
   kind: PieceClaimKind;
   expectedManifestRevision: number;
+  /** Opaque local association used to reconcile intentional file deletion. */
+  fileId?: string;
+  deletionState?: "pending" | "deleted" | "release-requested" | "released";
   state: OperationState;
   createdAt: number;
   updatedAt: number;
@@ -72,6 +83,8 @@ export function validateOperationRecord(record: OperationRecord): void {
   if (!PIECE_PATTERN.test(record.pieceId)) throw new TypeError("operation pieceId is invalid");
   if (record.kind !== "upload" && record.kind !== "repair") throw new TypeError("operation kind is invalid");
   if (!Number.isSafeInteger(record.expectedManifestRevision) || record.expectedManifestRevision < 0) throw new TypeError("operation revision is invalid");
+  if (record.fileId !== undefined && !PIECE_PATTERN.test(record.fileId)) throw new TypeError("operation fileId is invalid");
+  if (record.deletionState !== undefined && !["pending", "deleted", "release-requested", "released"].includes(record.deletionState)) throw new TypeError("operation deletion state is invalid");
   if (!["prepared", "stored", "verified", "committed", "release-requested", "released"].includes(record.state)) throw new TypeError("operation state is invalid");
   if (!Number.isSafeInteger(record.createdAt) || record.createdAt <= 0 || !Number.isSafeInteger(record.updatedAt) || record.updatedAt < record.createdAt) throw new TypeError("operation timestamps are invalid");
 }

@@ -28,6 +28,8 @@ import type { CoordinatorEndpointProvider } from "./index.js";
 import { resolveEndpoints, resolveManifestReplicaEndpoints } from "./coordinator.js";
 import type { P2PTransport } from "../../packages/p2p/index.js";
 import { MixedStorageTransport, HttpStorageTransport } from "./http-transport.js";
+import { createOperationRecordStore, type OperationRecordStore, releaseClaimOnNode } from "./provenance.js";
+import type { P2PProvenanceTransport } from "../../packages/p2p/index.js";
 
 export const DELETE_VERSION = 1;
 
@@ -46,6 +48,9 @@ export interface DeleteFileOptions {
   /** Discover endpoints from a coordinator when endpoints is empty. */
   coordinator?: CoordinatorEndpointProvider;
   transport?: P2PTransport;
+  /** Durable provenance operation records for identity-enabled upload/repair. */
+  operationStore?: OperationRecordStore;
+  provenanceTransport?: P2PProvenanceTransport;
 }
 
 /**
@@ -80,6 +85,8 @@ export interface DeleteFileReport {
   alreadyAbsent: DeletedPiece[];
   /** Deletions that could not be completed. Empty on full success. */
   failed: DeleteFailure[];
+  /** Claims that remain protected because release needs retry/reconciliation. */
+  provenanceReleaseFailures?: { endpoint: StorageNodeEndpoint; pieceId: string; operationId: string; error: string }[];
   /** True when the local manifest was removed via `manifestStore`. */
   manifestRemoved: boolean;
 }
@@ -137,15 +144,28 @@ export async function deleteFile(
   const alreadyAbsent: DeletedPiece[] = [];
   const failed: DeleteFailure[] = [];
   const transport = options.transport ?? new MixedStorageTransport(new HttpStorageTransport(options.identity));
+  const operationStore = options.identity
+    ? (options.operationStore ?? (options.manifestStore ? createOperationRecordStore(`${options.manifestStore.dir}/.provenance-operations`) : undefined))
+    : undefined;
+  const records = operationStore && options.identity
+    ? (await operationStore.list()).filter((record) => record.fileId === checked.fileId && record.deletionState !== "released")
+    : [];
+  const provenanceReleaseFailures: DeleteFileReport["provenanceReleaseFailures"] = [];
+  for (const record of records) {
+    await operationStore!.updateDeletion(record.operationId, "pending");
+  }
 
   await Promise.all(
     checked.chunks.flatMap((chunk) =>
       endpoints.map(async (endpoint) => {
         const outcome = await deletePieceOnNode(endpoint, chunk.pieceId, timeoutMs, options.identity, transport);
+        const matching = records.filter((record) => record.pieceId === chunk.pieceId && record.targetNodeId === endpoint.id);
         if (outcome === "deleted") {
           deleted.push({ endpoint, pieceId: chunk.pieceId });
+          await finalizeProvenanceDeletion(matching, endpoint, chunk.pieceId);
         } else if (outcome === "absent") {
           alreadyAbsent.push({ endpoint, pieceId: chunk.pieceId });
+          await finalizeProvenanceDeletion(matching, endpoint, chunk.pieceId);
         } else {
           failed.push({ endpoint, pieceId: chunk.pieceId, ...outcome });
         }
@@ -160,6 +180,7 @@ export async function deleteFile(
     deleted,
     alreadyAbsent,
     failed,
+    provenanceReleaseFailures,
     manifestRemoved: false,
   };
 
@@ -173,6 +194,27 @@ export async function deleteFile(
     report.manifestRemoved = true;
   }
   return report;
+
+  async function finalizeProvenanceDeletion(
+    matching: typeof records,
+    endpoint: StorageNodeEndpoint,
+    pieceId: string,
+  ): Promise<void> {
+    if (!operationStore || !options.identity) return;
+    for (const record of matching) {
+      try {
+        await operationStore.updateDeletion(record.operationId, "deleted");
+        await operationStore.updateDeletion(record.operationId, "release-requested");
+        await releaseClaimOnNode(endpoint, pieceId, record.claimId, options.identity, { timeoutMs, transport: options.provenanceTransport });
+        await operationStore.updateDeletion(record.operationId, "released");
+      } catch (error) {
+        provenanceReleaseFailures?.push({
+          endpoint, pieceId, operationId: record.operationId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
 }
 
 type DeleteOutcome = "deleted" | "absent" | { status?: number; error: string };

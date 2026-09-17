@@ -484,4 +484,56 @@ referenced-state persistence, cross-client release protection, and refusal to
 conditionally delete referenced data. Validation passed with **61 test files
 and 398 tests**, plus `npm run build`, `npm run typecheck`, and
 `git diff --check`. Automatic orphan cleanup remains deferred to 049C.
+## 22. Milestone 049C safe orphan cleanup
+
+Milestone 049C adds opt-in, node-local orphan scanning. Version 2 provenance
+envelopes record the opaque piece ID, managed timestamp, monotonic cleanup
+deadline, and durable claims. Missing, corrupt, partial, unsupported, or
+legacy metadata is fail-closed and permanently retained. A piece is eligible
+only when every claim is released and the configured grace period has elapsed
+(24 hours by default; shorter periods are test-only configuration).
+
+`apps/storage-node/orphan-scanner.ts` performs bounded, cancellable,
+non-overlapping scans with a 15-minute default interval, batch size 100,
+maximum 10 deletions per run, and sanitized lifecycle events. Cleanup uses
+the provenance store's same per-piece lock through the conditional delete,
+deletes only exact regular files directly inside managed storage, and removes
+metadata only after confirmed deletion. Ordinary DELETE, manifests,
+coordinator ownership, repair, encryption, and piece protocols are unchanged.
+HTTP and standalone libp2p runtimes start and stop the scanner only when
+`orphanCleanup.enabled` is explicitly set.
+
+Coverage includes provenance envelope validation, grace and claim retention,
+scanner bounds/cancellation, legacy protection, and child-process persistence
+in `apps/storage-node/orphan-scanner.test.ts` and
+`tests/integration/milestone-049c.test.ts`. Automatic repair and broader
+provenance reconciliation remain outside 049C; future 049D work must not
+interpret missing metadata as orphan evidence.
+
 Changes remain uncommitted and unpushed.
+
+## 23. File deletion and provenance release follow-up
+
+Intentional client file deletion now associates identity-enabled upload and
+repair operation records with the opaque manifest file ID. `deleteFile`
+creates a durable deletion intent before issuing ordinary authenticated
+piece DELETE requests. Only after a node confirms deletion or absence does
+the client mark the exact operation deleted, request release, and release
+that operation's exact claim using the existing authenticated owner check.
+Claims are never selected by piece alone, and claims belonging to other
+clients or other files remain untouched.
+
+Release failures do not trigger another destructive delete and are surfaced
+in `provenanceReleaseFailures`; the operation remains in
+`release-requested`. `reconcileDeletedProvenanceOperations` safely retries
+only those post-delete releases after restart. A crash before deletion
+leaves a pending intent and protected claim; a crash after deletion leaves
+the claim protected until the operation is retried or reconciled. Legacy
+deletions without provenance operation records retain their historical
+behavior. No FileManifest fields, ordinary DELETE semantics, coordinator
+ownership, or 049C scanner rules were changed.
+
+Focused coverage is in `apps/client/delete-provenance.test.ts`; the full
+suite passed with **64 test files and 403 tests**, alongside successful
+build, typecheck, and `git diff --check`. Changes remain uncommitted and
+unpushed.

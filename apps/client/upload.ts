@@ -176,6 +176,7 @@ export async function uploadBuffer(
         storageTransport: options.transport,
         expectedManifestRevision: 0,
         kind: "upload",
+        fileId,
       })
       : await storePieceOnNodes(pieceId, pieceBytes, selectedEndpoints, {
       timeoutMs: options.timeoutMs,
