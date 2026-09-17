@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, rm, readFile, writeFile, stat } from "fs/promises";
+import { mkdtemp, mkdir, rm, readFile, writeFile, stat, readdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createIdentity } from "../identity/index.js";
@@ -221,6 +221,55 @@ describe("persistent node registry (OPENSTORE-014)", () => {
     expect(registry.persistenceStatus()).toMatchObject({ enabled: true, degraded: true, healthy: false, lastWriteOutcome: "error" });
     expect(events).toContain("error");
     expect(events.join("|")).not.toContain(blockedPath);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("11. fsyncs the temp file and parent directory before reporting success", async () => {
+    const file = await tempFile();
+    const calls: string[] = [];
+    const registry = createRegistry({
+      persistencePath: file,
+      persistenceIo: {
+        fsyncSync: () => { calls.push("fsync"); },
+      },
+    });
+    registry.register("http://127.0.0.1:4013", createIdentity());
+    expect(calls).toHaveLength(2);
+    expect((await readdir(file.slice(0, file.lastIndexOf("/")))).filter((entry) => entry.includes(".tmp.")).length).toBe(0);
+    await rm(file.slice(0, file.lastIndexOf("/")), { recursive: true, force: true });
+  });
+
+  it("12. fsync failure preserves the previous target and cleans the temp file", async () => {
+    const file = await tempFile();
+    const dir = file.slice(0, file.lastIndexOf("/"));
+    const first = createRegistry({ persistencePath: file });
+    first.register("http://127.0.0.1:4014", createIdentity());
+    const before = await readFile(file, "utf8");
+    const failing = createRegistry({
+      persistencePath: file,
+      persistenceIo: { fsyncSync: () => { throw new Error("fsync failed"); } },
+    });
+    failing.register("http://127.0.0.1:4015", createIdentity());
+    expect(failing.persistenceStatus()).toMatchObject({ healthy: false, lastWriteOutcome: "error" });
+    expect(await readFile(file, "utf8")).toBe(before);
+    expect((await readdir(dir)).filter((entry) => entry.includes(".tmp.")).length).toBe(0);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("13. rename failure preserves a readable target and removes the temp file", async () => {
+    const file = await tempFile();
+    const dir = file.slice(0, file.lastIndexOf("/"));
+    const first = createRegistry({ persistencePath: file });
+    first.register("http://127.0.0.1:4016", createIdentity());
+    const before = await readFile(file, "utf8");
+    const failing = createRegistry({
+      persistencePath: file,
+      persistenceIo: { renameSync: () => { throw new Error("rename failed"); } },
+    });
+    failing.register("http://127.0.0.1:4017", createIdentity());
+    expect(await readFile(file, "utf8")).toBe(before);
+    expect(JSON.parse(await readFile(file, "utf8")).nodes).toHaveLength(1);
+    expect((await readdir(dir)).filter((entry) => entry.includes(".tmp.")).length).toBe(0);
     await rm(dir, { recursive: true, force: true });
   });
 });

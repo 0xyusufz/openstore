@@ -136,6 +136,16 @@ function requestJson(urlString: string, method: "GET" | "POST", body: unknown, t
 
 async function handle(req: IncomingMessage, res: ServerResponse, registry: Registry, token: string | undefined, maxBody: number, emit: (event: CoordinatorEvent) => void, coordinatorStatus: () => unknown): Promise<void> {
   const path = (req.url ?? "/").split("?")[0];
+  const isReadiness = req.method === "GET" && (path === "/ready" || path === "/v1/ready");
+  if (isReadiness) {
+    const persistence = registry.persistenceStatus();
+    const ready = persistence.healthy;
+    return send(res, ready ? 200 : 503, {
+      status: ready ? "ready" : "not-ready",
+      protocol: REGISTRY_PROTOCOL_VERSION,
+      persistence: { enabled: persistence.enabled, healthy: persistence.healthy, degraded: persistence.degraded },
+    });
+  }
   if (token && req.headers.authorization !== "Bearer " + token) { emit({ type: "coordinator.request", operation: "auth", outcome: "error" }); return send(res, 401, { error: "unauthorized" }); }
   if (req.method === "GET" && (path === "/health" || path === "/v1/health")) { const persistence = registry.persistenceStatus(); const aggregate = registry.healthSnapshot(); return send(res, 200, { status: persistence.degraded ? "degraded" : "ok", protocol: REGISTRY_PROTOCOL_VERSION, persistence, aggregate, health: aggregate, coordinator: coordinatorStatus() }); }
   if (req.method === "GET" && (path === "/status" || path === "/v1/status")) { const persistence = registry.persistenceStatus(); const aggregate = registry.healthSnapshot(); return send(res, 200, { protocol: REGISTRY_PROTOCOL_VERSION, status: persistence.degraded ? "degraded" : "ok", persistence, aggregate, health: aggregate, coordinator: coordinatorStatus() }); }

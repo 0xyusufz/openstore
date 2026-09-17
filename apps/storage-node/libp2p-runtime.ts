@@ -35,6 +35,7 @@ export interface Libp2pStorageNodeRuntimeConfig {
   coordinatorRetryAttempts?: number;
   coordinatorRetryBackoffMs?: number;
   coordinatorRetryMaxBackoffMs?: number;
+  readinessFile?: string;
   lifecycleEventCallback?: (event: Libp2pStorageNodeLifecycleEvent) => void;
   onLifecycleEvent?: (event: Libp2pStorageNodeLifecycleEvent) => void;
   orphanCleanup?: { enabled?: boolean; gracePeriodMs?: number; intervalMs?: number; batchSize?: number; maxDeletionsPerRun?: number };
@@ -97,6 +98,7 @@ export function validateLibp2pStorageNodeRuntimeConfig(
     if (typeof value.coordinatorUrl !== "string" || !/^https?:\/\//.test(value.coordinatorUrl)) throw new TypeError("coordinatorUrl must be an HTTP URL");
   }
   if (value.coordinatorToken !== undefined && (typeof value.coordinatorToken !== "string" || value.coordinatorToken.length === 0)) throw new TypeError("coordinatorToken must be a non-empty string");
+  if (value.readinessFile !== undefined && (typeof value.readinessFile !== "string" || value.readinessFile.length === 0)) throw new TypeError("readinessFile must be a non-empty string");
   for (const field of ["capacityBytes", "maxPieceBytes", "discoveryRefreshIntervalMs", "heartbeatIntervalMs", "coordinatorHeartbeatIntervalMs", "coordinatorRetryAttempts", "coordinatorRetryBackoffMs", "coordinatorRetryMaxBackoffMs"]) {
     const n = value[field];
     if (n !== undefined && (!Number.isSafeInteger(n) || (n as number) <= 0)) throw new TypeError(`${field} must be a positive safe integer`);
@@ -285,6 +287,9 @@ export async function createLibp2pStorageNodeRuntime(
     emit("starting");
     await node.start();
     orphanScanner?.start();
+    if (input.readinessFile) {
+      await writeFile(input.readinessFile, `${process.pid}\n`, { mode: 0o600 });
+    }
     if (coordinator) {
       await register();
     } else emit("registered");
@@ -303,6 +308,11 @@ export async function createLibp2pStorageNodeRuntime(
     }
     await orphanScanner?.stop();
     await node.stop();
+    if (input.readinessFile) {
+      try { await unlink(input.readinessFile); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
     registrationStatus = "unregistered";
     emit("stopped", undefined, "shutdown.completed");
   };

@@ -88,6 +88,16 @@ curl -fsS \
   http://127.0.0.1:4190/v1/nodes
 ```
 
+`deploy/testnet/testnet.sh status` (or `docker compose ps`) reports Docker
+health states. `healthy` means the coordinator readiness contract or the
+storage-node local initialization check passed; `starting` and `unhealthy`
+indicate that the process is not currently ready. Coordinator readiness does
+not require storage nodes to be registered. Nodes become locally ready after
+identity, piece storage, provenance storage, and libp2p initialization succeed,
+and continue reconnecting if the coordinator is temporarily unavailable.
+The unauthenticated `/v1/ready` endpoint exposes only this non-secret
+coordinator readiness result for the container healthcheck.
+
 `testnet.sh stop` and `docker compose down` without `-v` preserve named
 volumes. `testnet.sh reset --yes` is explicitly destructive and removes all
 testnet persistence:
@@ -96,6 +106,12 @@ testnet persistence:
 deploy/testnet/testnet.sh reset --yes
 deploy/testnet/testnet.sh start
 ```
+
+Coordinator registry writes flush the temporary file before atomically
+replacing the registry and flush the containing directory where supported.
+This protects a completed write from ordinary process or coordinator
+container crashes; it does not protect against device/filesystem destruction,
+so the registry volume should be backed up for recovery.
 
 The reset command does not restart the testnet implicitly. This prevents an
 accidental destructive command from immediately creating new state.

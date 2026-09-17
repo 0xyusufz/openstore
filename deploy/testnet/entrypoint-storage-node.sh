@@ -40,6 +40,7 @@ if [ -n "$CONFIG_ARGS" ]; then
   --max-piece-bytes "${OPENSTORE_NODE_MAX_PIECE_BYTES:-4194304}" \
   --coordinator-url "${OPENSTORE_COORDINATOR_URL:-http://coordinator:4190}" \
   --coordinator-token-env OPENSTORE_COORDINATOR_TOKEN \
+  --readiness-file "${OPENSTORE_NODE_READINESS_FILE:-/tmp/openstore-node-ready}" \
   --heartbeat-interval-ms "${OPENSTORE_NODE_HEARTBEAT_INTERVAL_MS:-500}"
 fi
 
@@ -53,4 +54,5 @@ exec gosu openstore node /app/dist/apps/storage-node/libp2p-cli.js \
   --max-piece-bytes "${OPENSTORE_NODE_MAX_PIECE_BYTES:-4194304}" \
   --coordinator-url "${OPENSTORE_COORDINATOR_URL:-http://coordinator:4190}" \
   --coordinator-token-env OPENSTORE_COORDINATOR_TOKEN \
+  --readiness-file "${OPENSTORE_NODE_READINESS_FILE:-/tmp/openstore-node-ready}" \
   --heartbeat-interval-ms "${OPENSTORE_NODE_HEARTBEAT_INTERVAL_MS:-500}"

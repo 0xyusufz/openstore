@@ -37,7 +37,7 @@ export async function runStorageNodeCli(argv: string[], options: StorageNodeCliO
       const arg = argv[i];
       if (arg === "--help" || arg === "-h") { out(usage()); return 0; }
       const key = arg?.replace(/^--/, "");
-      if (!key || !["storage-dir", "identity", "identity-path", "keystore", "password-env", "listen", "advertise", "bootstrap", "config", "capacity-bytes", "max-piece-bytes", "refresh-interval-ms", "coordinator-url", "coordinator-token-env", "coordinator-token", "heartbeat-interval-ms", "coordinator-retry-attempts", "coordinator-retry-backoff-ms", "coordinator-retry-max-backoff-ms"].includes(key)) throw new Error(`unknown option: ${arg}`);
+      if (!key || !["storage-dir", "identity", "identity-path", "keystore", "password-env", "listen", "advertise", "bootstrap", "config", "capacity-bytes", "max-piece-bytes", "refresh-interval-ms", "coordinator-url", "coordinator-token-env", "coordinator-token", "heartbeat-interval-ms", "coordinator-retry-attempts", "coordinator-retry-backoff-ms", "coordinator-retry-max-backoff-ms", "readiness-file"].includes(key)) throw new Error(`unknown option: ${arg}`);
       const value = argv[++i];
       if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
       if (key === "listen") listens.push(value); else parsed[key] = value;
@@ -70,6 +70,7 @@ export async function runStorageNodeCli(argv: string[], options: StorageNodeCliO
     if (parsed["coordinator-retry-attempts"]) config.coordinatorRetryAttempts = Number(parsed["coordinator-retry-attempts"]);
     if (parsed["coordinator-retry-backoff-ms"]) config.coordinatorRetryBackoffMs = Number(parsed["coordinator-retry-backoff-ms"]);
     if (parsed["coordinator-retry-max-backoff-ms"]) config.coordinatorRetryMaxBackoffMs = Number(parsed["coordinator-retry-max-backoff-ms"]);
+    if (parsed["readiness-file"]) config.readinessFile = parsed["readiness-file"];
     if (parsed.bootstrap) {
       config.bootstrapPeers = JSON.parse(await readFile(parsed.bootstrap, "utf8")) as P2PPeerDescriptor[];
     }

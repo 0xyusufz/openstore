@@ -31,6 +31,15 @@ describe("cross-process registry coordinator", () => {
     await expect(unavailable.nodes()).rejects.toMatchObject({ operation: "nodes", classification: "transient" });
   });
 
+  it("exposes readiness without credentials and reports registry durability state", async () => {
+    const coordinator = createRegistryCoordinator({ registry: createRegistry(), token: "secret" });
+    const port = await coordinator.listen(0);
+    const response = await fetch(`http://127.0.0.1:${port}/v1/ready`);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "ready", persistence: { healthy: true } });
+    await coordinator.close();
+  });
+
   it("exposes safe persistence status and contextual client errors", async () => {
     const events: string[] = [];
     const coordinator = createRegistryCoordinator({

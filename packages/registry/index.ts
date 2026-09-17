@@ -9,7 +9,10 @@
 import { randomBytes } from "crypto";
 import {
   chmodSync,
+  closeSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -206,12 +209,25 @@ export interface RegistryOptions {
   maxClockSkewMs?: number;
   /** Maximum remembered signed-request nonces. */
   maxReplayCacheEntries?: number;
+  /** Optional filesystem hooks for deterministic persistence failure tests. */
+  persistenceIo?: Partial<RegistryPersistenceIo>;
   /** Optional file path for persistent storage. If omitted, registry is in-memory only. */
   persistencePath?: string;
   /** Optional safe observer for registry lifecycle and persistence events. */
   logger?: RegistryLogger;
   onEvent?: (event: RegistryEvent) => void;
   onLifecycleEvent?: (event: RegistryEvent) => void;
+}
+
+export interface RegistryPersistenceIo {
+  chmodSync(path: string, mode: number): void;
+  closeSync(fd: number): void;
+  fsyncSync(fd: number): void;
+  mkdirSync(path: string, options: { recursive: true }): void;
+  openSync(path: string, flags: string): number;
+  renameSync(from: string, to: string): void;
+  unlinkSync(path: string): void;
+  writeFileSync(path: string, data: string, options: { mode: number }): void;
 }
 
 export interface RegistryLogger {
@@ -342,6 +358,17 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     throw new TypeError("maxReplayCacheEntries must be a positive safe integer");
   }
   const persistencePath = options.persistencePath;
+  const io: RegistryPersistenceIo = {
+    chmodSync,
+    closeSync,
+    fsyncSync,
+    mkdirSync,
+    openSync,
+    renameSync,
+    unlinkSync,
+    writeFileSync,
+    ...options.persistenceIo,
+  };
   const nodes = new Map<string, NodeRecord>();
   const seenNonces = new Map<string, number>();
   /** Idempotency keys `${auditId}:${nodeId}` for recorded storage audits. */
@@ -486,20 +513,41 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     );
     try {
       const dir = dirname(persistencePath);
-      mkdirSync(dir, { recursive: true });
+      io.mkdirSync(dir, { recursive: true });
     } catch {}
     const tmpPath = `${persistencePath}.tmp.${randomBytes(4).toString("hex")}`;
     try {
-      writeFileSync(tmpPath, payload, { mode: 0o600 });
+      io.writeFileSync(tmpPath, payload, { mode: 0o600 });
       // Ensure restrictive perms even if file existed
-      try { chmodSync(tmpPath, 0o600); } catch {}
-      renameSync(tmpPath, persistencePath);
+      io.chmodSync(tmpPath, 0o600);
+      // The durability boundary is a flushed temp file, atomic rename, and a
+      // flushed parent directory where the platform supports directory fsync.
+      const tempFd = io.openSync(tmpPath, "r");
+      try {
+        io.fsyncSync(tempFd);
+      } finally {
+        io.closeSync(tempFd);
+      }
+      io.renameSync(tmpPath, persistencePath);
+      try {
+        const directoryFd = io.openSync(dirname(persistencePath), "r");
+        try {
+          io.fsyncSync(directoryFd);
+        } finally {
+          io.closeSync(directoryFd);
+        }
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error
+          ? (error as { code?: string }).code
+          : undefined;
+        if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EBADF") throw error;
+      }
       lastWriteOutcome = "success";
       markDegraded(false, "write");
       emit({ type: "persistence.write", outcome: "success", records: nodes.size });
     } catch {
       // Clean up tmp on failure, previous file remains intact
-      try { unlinkSync(tmpPath); } catch {}
+      try { io.unlinkSync(tmpPath); } catch {}
       lastWriteOutcome = "error";
       markDegraded(true, "write");
       emit({ type: "persistence.write", outcome: "error", records: nodes.size });

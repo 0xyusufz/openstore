@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile } from "fs/promises";
+import { access, mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawn, type ChildProcess } from "child_process";
@@ -25,10 +25,13 @@ describe("libp2p storage-node runtime", () => {
     const runtime = await createLibp2pStorageNodeRuntime({
       storageDir: join(dir, "pieces"), identityPath: keystore, identityPassword: "test-password",
       listenAddrs: ["/ip4/127.0.0.1/tcp/0"],
+      readinessFile: join(dir, "ready"),
     });
     await runtime.start();
     expect(runtime.node.peerId).toBeTruthy();
+    await expect(access(join(dir, "ready"))).resolves.toBeUndefined();
     await runtime.stop();
+    await expect(access(join(dir, "ready"))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(createLibp2pStorageNodeRuntime({
       storageDir: join(dir, "pieces"), identityPath: keystore, identityPassword: "wrong",
     })).rejects.toThrow(/decrypt|password|keystore/i);

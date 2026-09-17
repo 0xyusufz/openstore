@@ -17,6 +17,12 @@ services:
       context: ../..
       dockerfile: deploy/testnet/Dockerfile
     entrypoint: ["/usr/local/bin/entrypoint-coordinator.sh"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "const http=require('http'); const r=http.get('http://localhost:4190/v1/ready',x=>process.exit(x.statusCode===200?0:1)); r.on('error',()=>process.exit(1));"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     environment:
       OPENSTORE_COORDINATOR_TOKEN: "${OPENSTORE_COORDINATOR_TOKEN:?required}"
       OPENSTORE_COORDINATOR_PERSISTENCE: /var/lib/openstore/coordinator/registry.json
@@ -55,13 +61,22 @@ services:
       OPENSTORE_NODE_INTERNAL_PORT: "4101"
       OPENSTORE_NODE_ADVERTISED_ADDR: /dns4/node-1/tcp/4101
       OPENSTORE_COORDINATOR_URL: http://coordinator:4190
+      OPENSTORE_NODE_READINESS_FILE: /tmp/openstore-node-ready
     ports:
       - "127.0.0.1:${OPENSTORE_NODE_1_HOST_PORT:-4101}:4101"
     volumes:
       - node-1-identity:/var/lib/openstore/identity
       - node-1-pieces:/var/lib/openstore/pieces
     networks: [openstore-net]
-    depends_on: [coordinator]
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "const fs=require('fs'); try { const pid=Number(fs.readFileSync('/tmp/openstore-node-ready','utf8')); process.exit(pid===1 && fs.existsSync('/proc/1/cmdline') ? 0 : 1); } catch { process.exit(1); }"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 10s
 
   node-2:
     restart: unless-stopped
@@ -89,13 +104,22 @@ services:
       OPENSTORE_NODE_INTERNAL_PORT: "4102"
       OPENSTORE_NODE_ADVERTISED_ADDR: /dns4/node-2/tcp/4102
       OPENSTORE_COORDINATOR_URL: http://coordinator:4190
+      OPENSTORE_NODE_READINESS_FILE: /tmp/openstore-node-ready
     ports:
       - "127.0.0.1:${OPENSTORE_NODE_2_HOST_PORT:-4102}:4102"
     volumes:
       - node-2-identity:/var/lib/openstore/identity
       - node-2-pieces:/var/lib/openstore/pieces
     networks: [openstore-net]
-    depends_on: [coordinator]
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "const fs=require('fs'); try { const pid=Number(fs.readFileSync('/tmp/openstore-node-ready','utf8')); process.exit(pid===1 && fs.existsSync('/proc/1/cmdline') ? 0 : 1); } catch { process.exit(1); }"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 10s
 
   node-3:
     restart: unless-stopped
@@ -123,13 +147,22 @@ services:
       OPENSTORE_NODE_INTERNAL_PORT: "4103"
       OPENSTORE_NODE_ADVERTISED_ADDR: /dns4/node-3/tcp/4103
       OPENSTORE_COORDINATOR_URL: http://coordinator:4190
+      OPENSTORE_NODE_READINESS_FILE: /tmp/openstore-node-ready
     ports:
       - "127.0.0.1:${OPENSTORE_NODE_3_HOST_PORT:-4103}:4103"
     volumes:
       - node-3-identity:/var/lib/openstore/identity
       - node-3-pieces:/var/lib/openstore/pieces
     networks: [openstore-net]
-    depends_on: [coordinator]
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "const fs=require('fs'); try { const pid=Number(fs.readFileSync('/tmp/openstore-node-ready','utf8')); process.exit(pid===1 && fs.existsSync('/proc/1/cmdline') ? 0 : 1); } catch { process.exit(1); }"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 10s
 
 volumes:
   coordinator-registry:
