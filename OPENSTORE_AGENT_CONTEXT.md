@@ -357,5 +357,52 @@ download, outage deletion failure, and same-identity restart/re-registration.
 Reconnect attempts are bounded by the configurable
 `maxReconnectAttempts` (default 5) and emit sanitized `reconnect.exhausted`
 events. No commit or push has been made.
+
+## 19. Milestone 048B status
+
+Milestone 048B adds explicit client-side replica repair in
+`apps/client/repair.ts`. Repair is never triggered implicitly by upload,
+download, delete, or audit operations. A caller supplies the manifest file ID
+and confirmed-lost node ID together with the local `ManifestStore` and
+coordinator adapter.
+
+Repair uses bounded fresh coordinator observations. One request failure,
+heartbeat miss, audit failure, or failed download is not sufficient. The lost
+node must remain absent from consecutive fresh available snapshots through the
+configured bounded observation/grace window. If it reappears, repair aborts
+conservatively. The current coordinator model does not expose authoritative
+draining state, so repair does not invent draining semantics or treat
+ambiguous lifecycle state as permanent loss.
+
+Source resolution is restricted to surviving node IDs already recorded in the
+manifest. The client copies exact opaque encrypted piece bytes, verifies their
+SHA-256 piece ID, and never decrypts, re-encrypts, accesses the DEK, or sends
+plaintext to a node. Replacement targets come only from a successful fresh
+coordinator refresh and must be distinct, available, piece-store capable,
+capacity-valid, transport-valid, and identity-valid. Existing exact target
+bytes are idempotent success; mismatched bytes fail closed.
+
+Manifest changes use only the Milestone 048A revision/CAS API. A successful
+repair changes an affected replica set atomically, such as `A+B` to `A+C`;
+the manifest never persists an intermediate reduced-replica state. Bounded
+CAS reconciliation handles concurrent updates without blind last-write-wins.
+Same-file/piece repair requests coalesce in process. Repair is stateless across
+client restarts; no persistent journal or automatic garbage collector was
+added. A verified target write may remain unreferenced if a later CAS fails,
+which is safe but requires future explicit orphan cleanup.
+
+Focused repair coverage is in `apps/client/repair.test.ts`. Real
+cross-process coverage is in `tests/integration/milestone-048b.test.ts` and
+starts an authenticated coordinator plus three independent libp2p nodes,
+terminates one replica, waits for expiry/observation, repairs to the third
+node, verifies identical opaque bytes, checks the atomic manifest result, and
+downloads the original plaintext.
+
+Milestone 048B validation: **55 test files, 384 tests passed**;
+`npm run build`, `npm run typecheck`, and `git diff --check` passed. No
+commit or push has been made. The next recommended milestone is explicit
+orphan-piece cleanup/repair scheduling only after its ownership and safety
+semantics are designed; blockchain, economics, consensus, public networking,
+and encryption changes remain out of scope.
 `npm run build`, `npm run typecheck`, and `git diff --check` also pass. Changes
 remain uncommitted and the pre-existing `.manual-043/` artifacts are preserved.
