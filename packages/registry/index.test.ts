@@ -85,6 +85,27 @@ describe("node registry & discovery (OPENSTORE-010)", () => {
     expect(() => registry.unregister(id.publicKey.toString("base64"), id2)).toThrow();
   });
 
+  it("bounds signed-request replay state with deterministic eviction", () => {
+    const registry = createRegistry({ maxReplayCacheEntries: 2 });
+    const identities = [createIdentity(), createIdentity(), createIdentity()];
+    const registrations = identities.map((identity, index) => createSignedRegistration(
+      identity,
+      `http://127.0.0.1:${4010 + index}`,
+      { nonce: `${index + 1}`.repeat(32) },
+    ));
+
+    expect(() => registry.registerSigned(registrations[0]!)).not.toThrow();
+    expect(() => registry.registerSigned(registrations[1]!)).not.toThrow();
+    expect(() => registry.registerSigned(registrations[2]!)).not.toThrow();
+    expect(() => registry.registerSigned(registrations[1]!)).toThrow(/replayed nonce/i);
+    expect(() => registry.registerSigned(registrations[0]!)).not.toThrow();
+  });
+
+  it("rejects invalid replay-cache limits", () => {
+    expect(() => createRegistry({ maxReplayCacheEntries: 0 })).toThrow(/positive safe integer/);
+    expect(() => createRegistry({ maxReplayCacheEntries: Number.POSITIVE_INFINITY })).toThrow(/positive safe integer/);
+  });
+
   it("7. malformed records rejected", () => {
     const registry = createRegistry();
     const id = createIdentity();

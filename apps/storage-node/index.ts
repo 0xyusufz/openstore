@@ -26,7 +26,7 @@ import { createServer } from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from "fs/promises";
 import { join, resolve } from "path";
-import { DEFAULT_MAX_CLOCK_SKEW_MS, PUBKEY_HEADER, verifyAuthHeaders } from "../../packages/auth/index.js";
+import { DEFAULT_MAX_CLOCK_SKEW_MS, DEFAULT_MAX_REPLAY_CACHE_ENTRIES, PUBKEY_HEADER, verifyAuthHeaders } from "../../packages/auth/index.js";
 import type { Identity } from "../../packages/identity/index.js";
 import type { Registry } from "../../packages/registry/index.js";
 import { createPieceProvenanceStore, type PieceProvenanceStore } from "./provenance-store.js";
@@ -39,6 +39,8 @@ export const STORAGE_NODE_VERSION = 1;
 const MAX_PIECE_ID_LENGTH = 128;
 const PIECE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const DEFAULT_CAPACITY_BYTES = 1 * 1024 * 1024 * 1024;
+/** JSON/base64 framing needs more room than a raw piece; this is independent of quota. */
+export const DEFAULT_MAX_HTTP_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 
 /**
  * Options for {@link createStorageNode}.
@@ -55,6 +57,10 @@ export interface StorageNodeOptions {
   requireAuth?: boolean;
   /** Max clock skew for timestamp validation (ms) */
   maxClockSkewMs?: number;
+  /** Maximum buffered bytes for any storage-node HTTP request body. */
+  maxHttpRequestBodyBytes?: number;
+  /** Maximum remembered authenticated request nonces. */
+  maxReplayCacheEntries?: number;
   /** Optional in-memory registry for node discovery */
   registry?: Registry;
   /** Heartbeat interval for registry (ms). Defaults to 10s or 1/3 of registry timeout */
@@ -156,6 +162,14 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   }
   const requireAuth = options.requireAuth ?? false;
   const maxClockSkewMs = options.maxClockSkewMs ?? DEFAULT_MAX_CLOCK_SKEW_MS;
+  const maxHttpRequestBodyBytes = options.maxHttpRequestBodyBytes ?? DEFAULT_MAX_HTTP_REQUEST_BODY_BYTES;
+  const maxReplayCacheEntries = options.maxReplayCacheEntries ?? DEFAULT_MAX_REPLAY_CACHE_ENTRIES;
+  if (!Number.isSafeInteger(maxHttpRequestBodyBytes) || maxHttpRequestBodyBytes <= 0) {
+    throw new TypeError("maxHttpRequestBodyBytes must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(maxReplayCacheEntries) || maxReplayCacheEntries <= 0) {
+    throw new TypeError("maxReplayCacheEntries must be a positive safe integer");
+  }
   const seenNonces = new Map<string, number>();
   let capacityBytes = options.capacityBytes ?? DEFAULT_CAPACITY_BYTES;
   if (!Number.isInteger(capacityBytes) || capacityBytes <= 0) {
@@ -175,9 +189,11 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   const hasKeystore = typeof options.identityPath === "string" && options.identityPath !== "";
 
   const server = createServer((req, res) => {
-    void handleRequest(req, res, storageDir, capacityBytes, provenance, { requireAuth, maxClockSkewMs, seenNonces }, () => nodeIdentity, () => draining).catch(() => {
+    void handleRequest(req, res, storageDir, capacityBytes, provenance, { requireAuth, maxClockSkewMs, seenNonces, maxReplayCacheEntries, maxHttpRequestBodyBytes }, () => nodeIdentity, () => draining).catch((error) => {
       if (!res.headersSent) {
-        sendJson(res, 500, { error: "internal error" });
+        sendJson(res, error instanceof RequestBodyTooLargeError ? 413 : 500, {
+          error: error instanceof RequestBodyTooLargeError ? "request body too large" : "internal error",
+        });
       } else {
         res.end();
       }
@@ -357,6 +373,8 @@ interface AuthState {
   requireAuth: boolean;
   maxClockSkewMs: number;
   seenNonces: Map<string, number>;
+  maxReplayCacheEntries: number;
+  maxHttpRequestBodyBytes: number;
 }
 
 async function handleRequest(
@@ -373,7 +391,7 @@ async function handleRequest(
   const rawPath = (req.url ?? "/").split("?")[0] as string;
 
   if (rawPath.startsWith("/v2/pieces/")) {
-    const body = method === "POST" ? await readBody(req) : undefined;
+    const body = method === "POST" ? await readBody(req, auth.maxHttpRequestBodyBytes) : undefined;
     if (!checkAuth(req, method, rawPath, body, auth, res)) return;
     await handleProvenanceRequest(req, res, rawPath, body, storageDir, capacityBytes, provenance);
     return;
@@ -387,7 +405,7 @@ async function handleRequest(
       sendJson(res, 503, { error: "node is draining: not accepting new pieces" });
       return;
     }
-    const rawBody = await readBody(req);
+    const rawBody = await readBody(req, auth.maxHttpRequestBodyBytes);
     if (!checkAuth(req, method, rawPath, rawBody, auth, res)) return;
     await handlePostPieceWithBody(rawBody, res, storageDir, capacityBytes);
     return;
@@ -582,7 +600,7 @@ function checkAuth(
     }
     return true;
   }
-  const result = verifyAuthHeaders(headers, method, path, body, auth.maxClockSkewMs, auth.seenNonces);
+  const result = verifyAuthHeaders(headers, method, path, body, auth.maxClockSkewMs, auth.seenNonces, auth.maxReplayCacheEntries);
   if (!result.valid) {
     // Map replay/expired/malformed to 401, with error message
     const msg = result.error ?? "invalid signature";
@@ -608,7 +626,7 @@ async function handlePostPiece(
   storageDir: string,
   capacityBytes: number = DEFAULT_CAPACITY_BYTES,
 ): Promise<void> {
-  const raw = await readBody(req);
+  const raw = await readBody(req, DEFAULT_MAX_HTTP_REQUEST_BODY_BYTES);
   await handlePostPieceWithBody(raw, res, storageDir, capacityBytes);
 }
 
@@ -805,16 +823,49 @@ async function getUsedBytesForDir(dir: string): Promise<number> {
   }
 }
 
-function readBody(req: IncomingMessage): Promise<Buffer> {
+class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super("request body too large");
+    this.name = "RequestBodyTooLargeError";
+  }
+}
+
+function readBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
   return new Promise<Buffer>((resolveBody, rejectBody) => {
+    const declaredLength = req.headers["content-length"];
+    if (declaredLength !== undefined) {
+      const length = Number(declaredLength);
+      if (Number.isSafeInteger(length) && length > maxBytes) {
+        req.resume();
+        rejectBody(new RequestBodyTooLargeError());
+        return;
+      }
+    }
     const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
     req.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      size += chunk.length;
+      if (size > maxBytes) {
+        settled = true;
+        chunks.length = 0;
+        req.resume();
+        rejectBody(new RequestBodyTooLargeError());
+        return;
+      }
       chunks.push(chunk);
     });
     req.on("end", () => {
+      if (settled) return;
+      settled = true;
       resolveBody(Buffer.concat(chunks));
     });
-    req.on("error", rejectBody);
+    req.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      rejectBody(error);
+    });
   });
 }
 

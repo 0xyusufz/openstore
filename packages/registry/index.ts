@@ -22,6 +22,7 @@ import type { StorageNodeEndpoint } from "../../apps/client/index.js";
 import type { P2PPeerDescriptor } from "../p2p/index.js";
 import { validateP2PPeerDescriptor } from "../p2p/index.js";
 import { peerIdFromOpenStorePublicKey } from "../p2p/identity-binding.js";
+import { DEFAULT_MAX_REPLAY_CACHE_ENTRIES } from "../auth/index.js";
 
 export const REGISTRY_VERSION = 1;
 export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
@@ -203,6 +204,8 @@ function validateReliability(rel: unknown): NodeReliability {
 export interface RegistryOptions {
   heartbeatTimeoutMs?: number;
   maxClockSkewMs?: number;
+  /** Maximum remembered signed-request nonces. */
+  maxReplayCacheEntries?: number;
   /** Optional file path for persistent storage. If omitted, registry is in-memory only. */
   persistencePath?: string;
   /** Optional safe observer for registry lifecycle and persistence events. */
@@ -334,6 +337,10 @@ export interface SignedUnregister {
 export function createRegistry(options: RegistryOptions = {}): Registry {
   const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
   const maxClockSkewMs = options.maxClockSkewMs ?? DEFAULT_MAX_CLOCK_SKEW_MS;
+  const maxReplayCacheEntries = options.maxReplayCacheEntries ?? DEFAULT_MAX_REPLAY_CACHE_ENTRIES;
+  if (!Number.isSafeInteger(maxReplayCacheEntries) || maxReplayCacheEntries <= 0) {
+    throw new TypeError("maxReplayCacheEntries must be a positive safe integer");
+  }
   const persistencePath = options.persistencePath;
   const nodes = new Map<string, NodeRecord>();
   const seenNonces = new Map<string, number>();
@@ -520,6 +527,11 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     if (!/^[0-9a-f]{32}$/.test(nonce)) throw new Error("invalid nonce");
     purgeNonces(now);
     if (seenNonces.has(nonce)) throw new Error("replayed nonce");
+    while (seenNonces.size >= maxReplayCacheEntries) {
+      const oldest = seenNonces.keys().next().value;
+      if (oldest === undefined) break;
+      seenNonces.delete(oldest);
+    }
     seenNonces.set(nonce, ts + maxClockSkewMs);
   }
 

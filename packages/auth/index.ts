@@ -20,6 +20,7 @@ export const NONCE_HEADER = "x-openstore-nonce";
 export const SIGNATURE_HEADER = "x-openstore-signature";
 
 export const DEFAULT_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+export const DEFAULT_MAX_REPLAY_CACHE_ENTRIES = 10_000;
 export const NONCE_BYTES = 16;
 
 export interface AuthHeaders extends Record<string, string> {
@@ -106,7 +107,11 @@ export function verifyAuthHeaders(
   body: Buffer | undefined,
   maxClockSkewMs: number,
   seenNonces: Map<string, number>,
+  maxReplayCacheEntries: number = DEFAULT_MAX_REPLAY_CACHE_ENTRIES,
 ): VerifyResult {
+  if (!Number.isSafeInteger(maxReplayCacheEntries) || maxReplayCacheEntries <= 0) {
+    throw new TypeError("maxReplayCacheEntries must be a positive safe integer");
+  }
   const pubkeyB64 = headers[PUBKEY_HEADER];
   const timestampStr = headers[TIMESTAMP_HEADER];
   const nonce = headers[NONCE_HEADER];
@@ -166,6 +171,12 @@ export function verifyAuthHeaders(
     return { valid: false, error: "invalid signature" };
   }
 
+  // Expiry cleanup happens above; evict oldest live entries deterministically.
+  while (seenNonces.size >= maxReplayCacheEntries) {
+    const oldest = seenNonces.keys().next().value;
+    if (oldest === undefined) break;
+    seenNonces.delete(oldest);
+  }
   // Record nonce with expiry = timestamp + skew (so replay window)
   seenNonces.set(nonce, timestamp + maxClockSkewMs);
   return { valid: true };
