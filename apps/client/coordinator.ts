@@ -366,9 +366,21 @@ function safeInteger(value: unknown, name: string): number {
 function validateCapacity(value: unknown, index: number): NonNullable<StorageNodeEndpoint["capacity"]> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`node[${index}].capacity is invalid`);
   const c = value as Record<string, unknown>;
-  const result: NonNullable<StorageNodeEndpoint["capacity"]> = { usedBytes: safeInteger(c.usedBytes, `node[${index}].capacity.usedBytes`), availableBytes: safeInteger(c.availableBytes, `node[${index}].capacity.availableBytes`) };
+  const usedBytes = safeInteger(c.usedBytes, `node[${index}].capacity.usedBytes`);
+  const availableBytes = safeInteger(c.availableBytes, `node[${index}].capacity.availableBytes`);
+  const result: NonNullable<StorageNodeEndpoint["capacity"]> = { usedBytes, availableBytes };
   if (c.allocatedBytes !== undefined) result.allocatedBytes = safeInteger(c.allocatedBytes, `node[${index}].capacity.allocatedBytes`);
   if (c.totalBytes !== undefined) result.totalBytes = safeInteger(c.totalBytes, `node[${index}].capacity.totalBytes`);
+  if (c.physicalBytes !== undefined) result.physicalBytes = safeInteger(c.physicalBytes, `node[${index}].capacity.physicalBytes`);
+  if (c.usableBytes !== undefined) result.usableBytes = safeInteger(c.usableBytes, `node[${index}].capacity.usableBytes`);
+  const allocated = result.allocatedBytes ?? result.totalBytes;
+  if (allocated === undefined || allocated <= 0 || usedBytes > allocated || availableBytes > allocated || usedBytes > Number.MAX_SAFE_INTEGER - availableBytes || usedBytes + availableBytes > allocated) {
+    throw new TypeError(`node[${index}].capacity is inconsistent`);
+  }
+  if (result.physicalBytes !== undefined && result.usableBytes !== undefined &&
+      (result.usableBytes > result.physicalBytes || allocated > result.usableBytes)) {
+    throw new TypeError(`node[${index}].capacity filesystem values are inconsistent`);
+  }
   return result;
 }
 function validateReliability(value: unknown, index: number): { score: number; storageScore: number } {

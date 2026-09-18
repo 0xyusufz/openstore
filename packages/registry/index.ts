@@ -77,6 +77,8 @@ export interface NodeCapacity {
   allocatedBytes?: number;
   usedBytes: number;
   availableBytes: number;
+  physicalBytes?: number;
+  usableBytes?: number;
   /** @deprecated use allocatedBytes */
   totalBytes?: number;
 }
@@ -637,23 +639,36 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     const c = cap as Record<string, unknown>;
     // Accept allocatedBytes or totalBytes
     const totalRaw = c["allocatedBytes"] ?? c["totalBytes"];
-    if (typeof totalRaw !== "number" || !Number.isInteger(totalRaw as number) || (totalRaw as number) < 0) {
+    if (typeof totalRaw !== "number" || !Number.isSafeInteger(totalRaw as number) || (totalRaw as number) <= 0) {
       throw new Error("malformed node record: invalid capacity allocatedBytes");
     }
     for (const f of ["usedBytes", "availableBytes"] as const) {
-      if (typeof c[f] !== "number" || !Number.isInteger(c[f] as number) || (c[f] as number) < 0) {
+      if (typeof c[f] !== "number" || !Number.isSafeInteger(c[f] as number) || (c[f] as number) < 0) {
         throw new Error(`malformed node record: invalid capacity ${f}`);
       }
     }
     const total = totalRaw as number;
     const used = c["usedBytes"] as number;
     const available = c["availableBytes"] as number;
-    if (used + available !== total && total !== 0) {
+    if (used > Number.MAX_SAFE_INTEGER - available || used + available !== total) {
       if (used > total || available !== total - used) {
         throw new Error("malformed node record: capacity inconsistent");
       }
     }
-    return { allocatedBytes: total, totalBytes: total, usedBytes: used, availableBytes: available };
+    const physical = c["physicalBytes"];
+    const usable = c["usableBytes"];
+    if (physical !== undefined && (!Number.isSafeInteger(physical) || (physical as number) <= 0) ||
+        usable !== undefined && (!Number.isSafeInteger(usable) || (usable as number) <= 0)) {
+      throw new Error("malformed node record: invalid filesystem capacity");
+    }
+    if (physical !== undefined && usable !== undefined && ((usable as number) > (physical as number) || total > (usable as number))) {
+      throw new Error("malformed node record: filesystem capacity inconsistent");
+    }
+    return {
+      allocatedBytes: total, totalBytes: total, usedBytes: used, availableBytes: available,
+      ...(physical === undefined ? {} : { physicalBytes: physical as number }),
+      ...(usable === undefined ? {} : { usableBytes: usable as number }),
+    };
   }
 
   function prune(): ExpiredNodeInfo[] {

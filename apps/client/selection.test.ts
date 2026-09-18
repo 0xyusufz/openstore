@@ -131,6 +131,7 @@ describe("intelligent node selection (OPENSTORE-013)", () => {
         capacityBytes: 2000,
         registryHeartbeatIntervalMs: 30,
       });
+
       await n.listen(0, "127.0.0.1");
       realNodes.push(n);
     }
@@ -155,5 +156,14 @@ describe("intelligent node selection (OPENSTORE-013)", () => {
 
     for (const n of realNodes) await n.close();
     for (const d of realDirs) await rm(d, { recursive: true, force: true });
+  });
+
+  it("rejects invalid or overflowing capacity instead of treating it as available", () => {
+    const valid = makeRecord("valid", true, 100, 100);
+    expect(selectNodes([valid], 100, 1)).toHaveLength(1);
+    expect(() => selectNodes([makeRecord("insufficient", true, 99)], 100, 1)).toThrow(/insufficient/i);
+    expect(() => selectNodes([{ ...valid, capacity: { allocatedBytes: 100, usedBytes: 80, availableBytes: 30 } }], 1, 1)).toThrow(/insufficient/i);
+    expect(() => selectNodes([{ ...valid, capacity: { allocatedBytes: Number.MAX_SAFE_INTEGER, usedBytes: Number.MAX_SAFE_INTEGER, availableBytes: 1 } }], 1, 1)).toThrow(/insufficient/i);
+    expect(() => selectNodes([{ ...valid, available: false }], 1, 1)).toThrow(/insufficient/i);
   });
 });

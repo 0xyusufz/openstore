@@ -49,6 +49,8 @@ export interface StorageNodeEndpoint {
     totalBytes?: number;
     usedBytes: number;
     availableBytes: number;
+    physicalBytes?: number;
+    usableBytes?: number;
   };
   /** Capability metadata advertised by the coordinator. */
   capabilities?: {

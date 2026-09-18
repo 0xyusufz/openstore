@@ -61,7 +61,7 @@ export function selectAvailableNodes(
 
   const suitable = candidates
     .filter((n) => n.available)
-    .filter((n) => n.capacity.availableBytes >= pieceSize)
+    .filter((n) => hasTrustedCapacity(n.capacity, pieceSize))
     .sort((a, b) => {
       const capDiff = b.capacity.availableBytes - a.capacity.availableBytes;
       if (capDiff !== 0) return capDiff;
@@ -80,9 +80,20 @@ export function selectAvailableNodes(
       seen.add(n.nodeId);
       unique.push(n);
     }
+
   }
 
   return unique;
+}
+
+function hasTrustedCapacity(capacity: NodeRecord["capacity"], pieceSize: number): boolean {
+  const allocated = capacity.allocatedBytes ?? capacity.totalBytes;
+  const values = [allocated, capacity.usedBytes, capacity.availableBytes];
+  if (allocated === undefined || allocated <= 0 || values.some((value) => value === undefined || !Number.isSafeInteger(value) || value < 0)) return false;
+  if (capacity.usedBytes > allocated || capacity.availableBytes > allocated) return false;
+  if (capacity.usedBytes > Number.MAX_SAFE_INTEGER - capacity.availableBytes) return false;
+  if (capacity.usedBytes + capacity.availableBytes > allocated) return false;
+  return pieceSize <= capacity.availableBytes && pieceSize <= Number.MAX_SAFE_INTEGER - capacity.usedBytes;
 }
 
 /**
