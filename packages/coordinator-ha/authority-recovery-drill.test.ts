@@ -157,6 +157,6 @@ describe("054 authority recovery drill", () => {
     await policy.rejectAuthorization(active.authorizationId, "revoked");
     expect(() => policy.approveRecovery(evidence, active)).toThrow(/revoked|invalid/i);
     const drill = createAuthorityRecoveryDrill({ policy, persistencePath: join(tmp, "drill.json") });
-    expect(drill.verify(evidence, active).state).toBe("verification-failed");
+    expect(drill.verify(evidence, active).state).toBe("rejected");
   });
 });

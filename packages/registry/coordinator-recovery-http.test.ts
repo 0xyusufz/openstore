@@ -309,7 +309,7 @@ describe("coordinator recovery HTTP routes", () => {
         headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" },
         body: JSON.stringify({ evidence: server.evidence, authorization: server.authorization }),
       });
-      expect(verify.status).toBe(400);
+      expect(verify.status).toBe(422);
       expect(verify.body.state).toBe("rejected");
     } finally {
       await server.coordinator.close();

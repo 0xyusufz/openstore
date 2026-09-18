@@ -10,6 +10,7 @@ import type { CoordinatorAuthorityRuntime } from "./runtime.js";
 export type RecoveryDrillState =
   | "idle"
   | "degraded"
+  | "conflicted"
   | "diagnosed"
   | "authorization-required"
   | "authorized"
@@ -113,6 +114,7 @@ export interface AuthorityRecoveryDrillOptions {
 const VALID_DRILL_STATES: readonly RecoveryDrillState[] = [
   "idle",
   "degraded",
+  "conflicted",
   "diagnosed",
   "authorization-required",
   "authorized",
@@ -125,18 +127,20 @@ const VALID_DRILL_STATES: readonly RecoveryDrillState[] = [
 ];
 
 function legalTransition(from: RecoveryDrillState, to: RecoveryDrillState): boolean {
+  if (from === to) return true;
   const transitions: Record<RecoveryDrillState, readonly RecoveryDrillState[]> = {
-    idle: ["degraded", "diagnosed", "authorization-required", "rejected"],
-    degraded: ["diagnosed", "authorization-required", "rejected"],
-    diagnosed: ["authorization-required", "authorized", "rejected", "degraded"],
-    "authorization-required": ["authorized", "rejected", "interrupted", "degraded", "aborted"],
-    authorized: ["executing", "rejected", "interrupted", "degraded", "aborted"],
-    executing: ["recovered", "verification-failed", "interrupted", "rejected", "aborted", "degraded"],
-    recovered: ["verification-failed", "rejected", "degraded"],
-    "verification-failed": ["rejected", "degraded", "diagnosed"],
-    interrupted: ["diagnosed", "authorization-required", "rejected", "degraded", "aborted"],
-    aborted: ["rejected", "degraded", "diagnosed"],
-    rejected: ["diagnosed", "authorization-required", "interrupted", "degraded"],
+    idle: ["degraded", "conflicted", "diagnosed", "authorization-required", "authorized", "rejected"],
+    degraded: ["diagnosed", "authorization-required", "authorized", "rejected", "interrupted", "aborted", "conflicted"],
+    conflicted: ["diagnosed", "authorization-required", "authorized", "rejected", "interrupted", "aborted", "degraded"],
+    diagnosed: ["authorization-required", "authorized", "rejected", "degraded", "conflicted"],
+    "authorization-required": ["authorized", "rejected", "interrupted", "degraded", "conflicted", "aborted"],
+    authorized: ["executing", "rejected", "interrupted", "degraded", "conflicted", "aborted"],
+    executing: ["recovered", "rejected", "interrupted", "aborted", "degraded", "conflicted"],
+    recovered: ["verification-failed", "rejected", "degraded", "conflicted", "interrupted", "aborted"],
+    "verification-failed": ["diagnosed", "authorization-required", "rejected", "degraded", "conflicted"],
+    interrupted: ["diagnosed", "authorization-required", "authorized", "rejected", "degraded", "conflicted", "aborted"],
+    aborted: ["diagnosed", "authorization-required", "authorized", "rejected", "degraded", "conflicted", "interrupted"],
+    rejected: ["diagnosed", "authorization-required", "authorized", "rejected", "degraded", "conflicted", "interrupted", "aborted"],
   };
   return transitions[from]?.includes(to) ?? false;
 }
@@ -144,7 +148,8 @@ function legalTransition(from: RecoveryDrillState, to: RecoveryDrillState): bool
 function toRecoveryDrillState(decision: AuthorityRecoveryDecision, state: AuthorityRecoveryState): RecoveryDrillState {
   if (decision === "requires_operator_authorization") return "authorization-required";
   if (decision === "allowed") return state === "recovered" ? "recovered" : "authorized";
-  if (state === "conflicted" || state === "stale" || state === "unavailable") return "degraded";
+  if (state === "conflicted") return "conflicted";
+  if (state === "stale" || state === "unavailable") return "degraded";
   if (state === "rejected") return "rejected";
   return "degraded";
 }
@@ -183,6 +188,7 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
   let persisted: RecoveryDrillRecord | undefined;
   let persistenceState: "missing" | "valid" | "corrupt" = "missing";
   let persistedHealthy = true;
+  const consumedAuthorizationIds = new Set<string>();
 
   const readPersisted = (): void => {
     if (!options.persistencePath) return;
@@ -196,7 +202,20 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
     try {
       const parsed = JSON.parse(readFileSync(options.persistencePath, "utf8")) as RecoveryDrillRecord;
       if (!parsed || parsed.version !== 1 || !VALID_DRILL_STATES.includes(parsed.state)) throw new Error("invalid drill record");
+      const current = parsed.state;
+      if (current === "authorized") {
+        if (parsed.recoveryState !== "authorized" && parsed.recoveryState !== "recovered") {
+          throw new Error("persisted authorized state is invalid");
+        }
+      }
+      if (current === "recovered" || current === "verification-failed") {
+        if (current === "recovered" && parsed.recoveryState !== "recovered" && parsed.recoveryState !== "authorized") {
+          throw new Error("persisted recovered state is invalid");
+        }
+      }
       persisted = parsed;
+      if (parsed.authorizationId) consumedAuthorizationIds.add(parsed.authorizationId);
+      if (parsed.state === "recovered" || parsed.state === "authorized") consumedAuthorizationIds.add(parsed.authorizationId ?? "");
       persistenceState = "valid";
       persistedHealthy = true;
     } catch {
@@ -267,6 +286,21 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
     }
   };
 
+  const currentPersistedState = (): RecoveryDrillState => {
+    if (persistenceState === "corrupt") return "rejected";
+    if (!persisted) return "idle";
+    return persisted.state;
+  };
+
+  const stateFromResult = (result: RecoveryDrillResult): RecoveryDrillState => {
+    if (result.state === "authorization-required" || result.reason === "authorization_required") return "authorization-required";
+    if (result.state === "authorized" || result.authorized) return "authorized";
+    if (result.state === "recovered" || result.executed || result.verified) return "recovered";
+    if (result.state === "verification-failed") return "verification-failed";
+    if (result.state === "degraded" || result.state === "conflicted") return result.state;
+    return result.state;
+  };
+
   const snapshot = (evidence?: AuthorityRecoveryEvidence, authorization?: RecoveryOperatorAuthorization): RecoveryDiagnosticSnapshot => {
     const result = evaluate(evidence, authorization);
     const runtimeStatus = options.runtime?.status();
@@ -294,10 +328,26 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
   };
 
   const applyTransition = (current: RecoveryDrillState, next: RecoveryDrillState): RecoveryDrillState => {
-    if (current !== "idle" && !legalTransition(current, next)) {
+    if (!legalTransition(current, next)) {
       throw new Error(`illegal recovery drill transition: ${current} -> ${next}`);
     }
     return next;
+  };
+
+  const transitionOrReject = (current: RecoveryDrillState, next: RecoveryDrillState, fallback: RecoveryDrillResult): RecoveryDrillResult => {
+    try {
+      applyTransition(current, next);
+      return fallback;
+    } catch {
+      return { ...fallback, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+    }
+  };
+
+  const requireValidatedState = (expected: RecoveryDrillState, actual: RecoveryDrillState, fallback: RecoveryDrillResult): RecoveryDrillResult => {
+    if (actual !== expected) {
+      return { ...fallback, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+    }
+    return fallback;
   };
 
   const record = (result: RecoveryDrillResult, evidence?: AuthorityRecoveryEvidence, authorization?: RecoveryOperatorAuthorization): RecoveryDrillRecord => ({
@@ -320,7 +370,14 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
   const persistIfPossible = (state: RecoveryDrillState, reason: RecoveryDrillReason, result: RecoveryDrillResult, evidence?: AuthorityRecoveryEvidence, authorization?: RecoveryOperatorAuthorization): void => {
     if (!options.persistencePath) return;
     const input = record({ ...result, state, reason }, evidence, authorization);
-    try { persist(input); } catch { /* fail closed; no implicit recovery */ }
+    try {
+      if (state === "executing" || state === "recovered" || state === "verification-failed") {
+        if (persistenceState === "corrupt") {
+          throw new Error("recovery drill persistence is corrupt");
+        }
+      }
+      persist(input);
+    } catch { /* fail closed; no implicit recovery */ }
   };
 
   readPersisted();
@@ -344,31 +401,49 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
     },
     prepare(evidence, authorization) {
       const result = evaluate(evidence, authorization);
+      const from = currentPersistedState();
       if (result.decision === "requires_operator_authorization") {
         const next: RecoveryDrillResult = { ...result, state: "authorization-required", reason: "authorization_required" };
-        const state = applyTransition("idle", "authorization-required");
-        if (state !== "authorization-required") throw new Error("invalid drill state transition");
+        if (!legalTransition(from, "authorization-required")) {
+          return { ...next, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+        }
+        applyTransition(from, "authorization-required");
         persistIfPossible("authorization-required", "authorization_required", next, evidence, authorization);
         event("authority.recovery.authorization.requested", "warning", { state: "authorization-required", reason: "authorization_required" });
         return next;
       }
       if (result.decision === "denied" || result.decision === "blocked") {
-        const next: RecoveryDrillResult = { ...result, state: "rejected", reason: result.reason === "authorization_revoked" ? "authorization_revoked" : result.reason === "authorization_expired" ? "authorization_expired" : result.reason === "authorization_invalid" ? "authorization_invalid" : "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: result.recoveryReason, authorizationRequired: false, authorized: false, executed: false, verified: false };
-        applyTransition("idle", "rejected");
-        persistIfPossible("rejected", next.reason, next, evidence, authorization);
-        event("authority.recovery.blocked", "error", { state: "rejected", reason: next.reason });
+        const conflict = result.state === "conflicted" || result.reason === "ownership_conflict";
+        const next: RecoveryDrillResult = conflict
+          ? { ...result, state: "conflicted", reason: "ownership_conflict", decision: "blocked", recoveryState: "conflicted", recoveryReason: "ownership_conflict", authorizationRequired: false, authorized: false, executed: false, verified: false }
+          : { ...result, state: "rejected", reason: result.reason === "authorization_revoked" ? "authorization_revoked" : result.reason === "authorization_expired" ? "authorization_expired" : result.reason === "authorization_invalid" ? "authorization_invalid" : "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: result.recoveryReason, authorizationRequired: false, authorized: false, executed: false, verified: false };
+        const target = conflict ? "conflicted" : "rejected";
+        if (!legalTransition(from, target)) return { ...next, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+        applyTransition(from, target);
+        persistIfPossible(target, next.reason, next, evidence, authorization);
+        event("authority.recovery.blocked", "error", { state: target, reason: next.reason });
         return next;
       }
-      const next: RecoveryDrillResult = { ...result, state: "authorized", reason: "executed", executed: true, verified: true };
-      applyTransition("diagnosed", "authorized");
+      const next: RecoveryDrillResult = { ...result, state: "authorized", reason: "executed", decision: "allowed", recoveryState: "authorized", recoveryReason: "authorization_accepted", authorizationRequired: false, authorized: true, executed: false, verified: false };
+      if (!legalTransition(from, "authorized")) {
+        return { ...next, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+      }
+      applyTransition(from, "authorized");
       persistIfPossible("authorized", "executed", next, evidence, authorization);
       event("authority.recovery.authorization.accepted", "info", { state: "authorized", epoch: evidence.authorityEpoch });
       return next;
     },
     execute(action, evidence, authorization) {
+      const from = currentPersistedState();
       if (action === "inspect") {
         const result = evaluate(evidence, authorization);
-        applyTransition("idle", result.state === "authorization-required" ? "authorization-required" : "diagnosed");
+        if (result.state === "authorization-required") {
+          if (!legalTransition(from, "authorization-required")) return { ...result, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+          applyTransition(from, "authorization-required");
+        } else {
+          if (!legalTransition(from, "diagnosed")) return { ...result, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+          applyTransition(from, "diagnosed");
+        }
         return result;
       }
       if (action === "reset") {
@@ -383,7 +458,8 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
           executed: false,
           verified: false,
         };
-        applyTransition("executing", "aborted");
+        if (!legalTransition(from, "aborted")) return { ...next, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+        applyTransition(from, "aborted");
         persistIfPossible("aborted", "aborted", next, evidence, authorization);
         event("authority.recovery.action.executed", "warning", { action: "reset", state: "aborted" });
         return next;
@@ -400,7 +476,8 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
           executed: false,
           verified: false,
         };
-        applyTransition("authorized", "degraded");
+        if (!legalTransition(from, "degraded")) return { ...next, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+        applyTransition(from, "degraded");
         persistIfPossible("degraded", "ownership_conflict", next, evidence, authorization);
         event("authority.recovery.blocked", "error", { action: "fence", state: "conflicted", reason: "ownership_conflict" });
         return next;
@@ -418,34 +495,59 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
           executed: false,
           verified: false,
         };
-        applyTransition("authorized", "authorization-required");
+        if (!legalTransition(from, "authorization-required")) return { ...next, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+        applyTransition(from, "authorization-required");
         persistIfPossible("authorization-required", "authorization_required", next, evidence, authorization);
+        return next;
+      }
+      if (authorization.authorizationId && consumedAuthorizationIds.has(authorization.authorizationId)) {
+        const next: RecoveryDrillResult = { state: "rejected", reason: "authorization_revoked", decision: "denied", recoveryState: "rejected", recoveryReason: "authorization_revoked", authorizationRequired: false, authorized: false, executed: false, verified: false };
+        if (!legalTransition(from, "rejected")) return { ...next, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+        applyTransition(from, "rejected");
+        persistIfPossible("rejected", "authorization_revoked", next, evidence, authorization);
         return next;
       }
       let next: RecoveryDrillResult;
       try {
-        applyTransition("authorized", "executing");
+        const policyEvaluation = policy.evaluateRecovery(evidence, authorization);
+        if (policyEvaluation.decision !== "allowed") {
+          throw new Error("execution requires valid authorization");
+        }
+        const authorizedState = from === "authorized" ? from : "authorized";
+        if (!legalTransition(from, authorizedState)) {
+          throw new Error("execution requires authorized state");
+        }
+        applyTransition(from, authorizedState);
+        if (!legalTransition(authorizedState, "executing")) {
+          throw new Error("illegal execution transition");
+        }
+        applyTransition(authorizedState, "executing");
         const result = policy.approveRecovery(evidence, authorization);
+        const recovered = result.state === "recovered" || result.decision === "allowed";
         next = {
-          state: result.state === "recovered" ? "recovered" : "authorized",
-          reason: result.state === "recovered" ? "executed" : "healthy",
+          state: recovered ? "recovered" : "authorized",
+          reason: recovered ? "executed" : "healthy",
           decision: result.decision,
-          recoveryState: result.state,
-          recoveryReason: result.reason,
+          recoveryState: recovered ? "recovered" : result.state,
+          recoveryReason: recovered ? "authorization_accepted" : result.reason,
           authorizationRequired: false,
           authorized: result.authorized,
-          executed: result.decision === "allowed",
-          verified: result.decision === "allowed",
+          executed: recovered,
+          verified: recovered,
         };
-        if (next.state === "recovered") {
+        if (recovered) consumedAuthorizationIds.add(authorization.authorizationId);
+        if (recovered) {
+          if (!legalTransition("executing", "recovered")) throw new Error("illegal recovery completion transition");
           applyTransition("executing", "recovered");
         } else {
+          if (!legalTransition("executing", "authorized")) throw new Error("illegal execution rollback transition");
           applyTransition("executing", "authorized");
         }
       } catch {
         const result = evaluate(evidence, authorization);
         next = { ...result, state: "rejected", reason: result.reason === "authorization_revoked" ? "authorization_revoked" : result.reason === "authorization_expired" ? "authorization_expired" : result.reason === "authorization_invalid" ? "authorization_invalid" : "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
-        applyTransition("executing", "rejected");
+        if (!legalTransition(from, "rejected")) return { ...next, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+        applyTransition(from, "rejected");
       }
       persistIfPossible(next.state, next.reason, next, evidence, authorization);
       if (next.state === "recovered") {
@@ -458,13 +560,20 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
       return next;
     },
     verify(evidence, authorization) {
+      const current = currentPersistedState();
       const evaluation = evaluate(evidence, authorization);
       const runtimeStatus = options.runtime?.status();
-      const verified = evaluation.decision === "allowed" && !runtimeStatus?.ownership.conflict && (runtimeStatus?.authority.placementAuthorized === true || evidence.ownershipState === "authoritative");
+      const verified = current === "recovered" && evaluation.decision === "allowed" && !runtimeStatus?.ownership.conflict && (runtimeStatus?.authority.placementAuthorized === true || evidence.ownershipState === "authoritative");
       const next: RecoveryDrillResult = verified
         ? { ...evaluation, state: "recovered", reason: "executed", decision: "allowed", recoveryState: "recovered", recoveryReason: "authorization_accepted", authorizationRequired: false, authorized: true, executed: true, verified: true }
         : { ...evaluation, state: "verification-failed", reason: evaluation.reason === "authorization_expired" ? "authorization_expired" : evaluation.reason === "authorization_revoked" ? "authorization_revoked" : evaluation.reason === "authorization_invalid" ? "authorization_invalid" : "verification_failed", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
-      applyTransition("executing", verified ? "recovered" : "verification-failed");
+      if (current !== "recovered") {
+        return { ...next, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+      }
+      if (!legalTransition(current, verified ? "recovered" : "verification-failed")) {
+        return { ...next, state: "rejected", reason: "validation_failure", decision: "denied", recoveryState: "rejected", recoveryReason: "validation_failure", authorizationRequired: false, authorized: false, executed: false, verified: false };
+      }
+      applyTransition(current, verified ? "recovered" : "verification-failed");
       persistIfPossible(next.state, next.reason, next, evidence, authorization);
       if (verified) {
         metric("authority_recovery_verifications_total", { result: "success" });

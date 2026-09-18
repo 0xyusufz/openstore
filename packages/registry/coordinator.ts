@@ -323,7 +323,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, registry: Regis
           if (!evidence) return respond(400, { error: "missing recovery evidence", state: "rejected", reason: "missing_evidence" });
           const result = authorityControlPlane?.verifyRecoveryDrill(evidence as never, authorization as never) ?? authorityRuntime?.inspectRecoveryDrill(evidence as never);
           const payload = sanitizeRecoveryPayload(result ?? { state: "rejected", reason: "missing_evidence", decision: "denied", authorized: false, executed: false, verified: false });
-          if (payload.state === "verification-failed" || payload.reason === "verification_failed") return respond(400, payload);
+          if (payload.state === "verification-failed" || payload.reason === "verification_failed") return respond(422, payload);
           if (payload.state === "authorization-required" || payload.reason === "operator_authorization_required") return respond(403, payload);
           if (payload.state === "conflicted" || payload.reason === "ownership_conflict") return respond(503, payload);
           if (payload.state === "rejected" || payload.reason === "authorization_expired" || payload.reason === "authorization_revoked" || payload.reason === "invalid_authorization" || payload.reason === "validation_failed") return respond(422, payload);
@@ -337,21 +337,25 @@ async function handle(req: IncomingMessage, res: ServerResponse, registry: Regis
       }
       return respond(405, { error: "method not allowed", state: "rejected", reason: "invalid_request" });
     } catch (error) {
+      const message = error instanceof Error ? error.message : "invalid recovery request";
+      const sanitized = /request body too large|invalid JSON|missing recovery evidence|invalid recovery evidence|invalid recovery request|unsupported recovery operation|method not allowed/i.test(message) ? message : "invalid recovery request";
       metrics.increment("coordinator_request_errors_total", 1, { status_class: "4xx" });
       emit({ type: "coordinator.request", operation: `recovery.${action ?? "inspect"}`, outcome: "error" });
-      const message = error instanceof Error ? error.message : "invalid request";
-      const normalized = message.toLowerCase().includes("too large") ? "request_body_too_large" : message.toLowerCase().includes("json") || message.toLowerCase().includes("invalid") ? "invalid_request" : "validation_failed";
-      return respond(400, { error: message, state: "rejected", reason: normalized });
+      return respond(400, { error: "invalid recovery request", state: "rejected", reason: "invalid_request", details: sanitized.includes("invalid recovery request") ? undefined : "invalid_request" });
     }
   }
-  if (req.method !== "POST") return respond(405, { error: "method not allowed" });
+  if (req.method !== "POST") return respond(405, { error: "method not allowed", state: "rejected", reason: "invalid_request" });
   try {
     const body = await readBody(req, maxBody);
     if (path === "/register" || path === "/v1/register") { const node = registry.registerSigned(body as SignedRegistration); metrics.increment("coordinator_registrations_total", 1, { result: "success" }); emit({ type: "coordinator.request", operation: "register", outcome: "success" }); return respond(200, { node }); }
     if (path === "/heartbeat" || path === "/v1/heartbeat") { const node = registry.heartbeatSigned(body as SignedHeartbeat); metrics.increment("coordinator_heartbeats_total", 1, { result: "success" }); emit({ type: "coordinator.request", operation: "heartbeat", outcome: "success" }); return respond(200, { node }); }
     if (path === "/unregister" || path === "/v1/unregister") { registry.unregisterSigned(body as SignedUnregister); metrics.increment("coordinator_unregisters_total", 1, { result: "success" }); emit({ type: "coordinator.request", operation: "unregister", outcome: "success" }); return respond(200, { ok: true }); }
-    return respond(404, { error: "not found" });
-  } catch (error) { metrics.increment("coordinator_request_errors_total", 1, { status_class: "4xx" }); emit({ type: "coordinator.request", operation: route, outcome: "error" }); return respond(400, { error: error instanceof Error ? error.message : "invalid request" }); }
+    return respond(404, { error: "not found", state: "rejected", reason: "invalid_request" });
+  } catch {
+    metrics.increment("coordinator_request_errors_total", 1, { status_class: "4xx" });
+    emit({ type: "coordinator.request", operation: route, outcome: "error" });
+    return respond(400, { error: "invalid request", state: "rejected", reason: "invalid_request" });
+  }
 }
 function readBody(req: IncomingMessage, max: number): Promise<unknown> { return new Promise((resolve, reject) => { let data = ""; let size = 0; req.setEncoding("utf8"); req.on("data", (chunk: string) => { size += Buffer.byteLength(chunk); if (size > max) { reject(new Error("request body too large")); return; } data += chunk; }); req.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("invalid JSON")); } }); req.on("error", reject); }); }
 function send(res: ServerResponse, status: number, payload: unknown): void { const body = JSON.stringify(payload); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body), "cache-control": "no-store" }); res.end(body); }
