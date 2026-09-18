@@ -1,4 +1,4 @@
-# OpenStore 050A Docker testnet
+# OpenStore 050A/057A Docker testnet
 
 This directory packages the existing coordinator and standalone libp2p
 storage-node runtimes. It does not add a client daemon or change any storage,
@@ -34,6 +34,26 @@ The topology contains one coordinator and three independent libp2p nodes.
 Nodes advertise `/dns4/node-N/tcp/410N`, which is reachable from other
 containers on `openstore-net`; `127.0.0.1` is used only for host-published
 operator ports.
+
+For the isolated 057A testnet, use the dedicated port range 4290/4201–4203
+in the environment file so it cannot disturb the legacy 4190 testnet:
+
+```sh
+cp deploy/testnet/.env.example deploy/testnet/.env.057a
+sed -i.bak \
+  -e 's/OPENSTORE_COORDINATOR_HOST_PORT=4190/OPENSTORE_COORDINATOR_HOST_PORT=4290/' \
+  -e 's/OPENSTORE_NODE_1_HOST_PORT=4101/OPENSTORE_NODE_1_HOST_PORT=4201/' \
+  -e 's/OPENSTORE_NODE_2_HOST_PORT=4102/OPENSTORE_NODE_2_HOST_PORT=4202/' \
+  -e 's/OPENSTORE_NODE_3_HOST_PORT=4103/OPENSTORE_NODE_3_HOST_PORT=4203/' \
+  deploy/testnet/.env.057a
+rm -f deploy/testnet/.env.057a.bak
+# Replace the four local placeholder secrets in .env.057a.
+OPENSTORE_TESTNET_ENV_FILE=deploy/testnet/.env.057a deploy/testnet/testnet.sh start
+```
+
+The 057A integration test allocates free localhost ports for CI isolation;
+it uses the same Compose services and always removes its temporary project and
+volumes during cleanup.
 
 ## Operations
 
