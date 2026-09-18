@@ -124,6 +124,54 @@ describe("059B provider lifecycle coordinator propagation", () => {
       await rm(dir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("propagates safe reallocation through heartbeat and keeps draining excluded", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openstore-060b-reallocation-"));
+    const keystore = join(dir, "identity.json");
+    const storageDir = join(dir, "pieces");
+    await saveIdentity(createIdentity(), "test-password", keystore);
+    const coordinator = createRegistryCoordinator({ registry: createRegistry(), token: "060b-token" });
+    const port = await coordinator.listen(0);
+    const config = {
+      storageDir, allocationPath: join(storageDir, "allocation.json"), lifecyclePath: join(storageDir, "lifecycle.json"),
+      capacityBytes: 4096, identityPath: keystore, identityPassword: "test-password",
+      listenAddrs: ["/ip4/127.0.0.1/tcp/0"], coordinatorUrl: `http://127.0.0.1:${port}`,
+      coordinatorToken: "060b-token", coordinatorHeartbeatIntervalMs: 100,
+    };
+    const runtime = await createLibp2pStorageNodeRuntime(config);
+    const client = createRegistryClient({ baseUrl: `http://127.0.0.1:${port}`, token: "060b-token" });
+    try {
+      await runtime.start();
+      const initial = await waitForNode(client, runtime.node.peerId, "sharing");
+      expect(initial.capacity.allocatedBytes).toBe(4096);
+      expect(() => selectNodes([initial], 5000, 1)).toThrow(/insufficient/i);
+      expect(runtime.increaseAllocation?.(8192).allocationBytes).toBe(8192);
+      const increased = await waitForCapacity(client, runtime.node.peerId, 8192);
+      expect(increased.capacity.availableBytes).toBeGreaterThanOrEqual(8192);
+      expect(selectNodes([increased], 5000, 1)).toHaveLength(1);
+      expect(runtime.decreaseAllocation?.(7000).allocationBytes).toBe(7000);
+      const decreased = await waitForCapacity(client, runtime.node.peerId, 7000);
+      expect(decreased.capacity.allocatedBytes).toBe(7000);
+      expect(runtime.stopSharing?.().state).toBe("draining");
+      expect(runtime.increaseAllocation?.(7500).allocationBytes).toBe(7500);
+      const draining = await waitForNode(client, runtime.node.peerId, "draining");
+      expect(draining.capacity.allocatedBytes).toBe(7500);
+      expect(() => selectNodes([draining], 1, 1)).toThrow(/insufficient/i);
+      expect(runtime.releaseAllocation).toBeDefined();
+      expect((await runtime.releaseAllocation?.())?.state).toBe("released");
+      expect(() => runtime.increaseAllocation?.(8000)).toThrow(/released|resized/i);
+      await runtime.stop();
+      const restarted = await createLibp2pStorageNodeRuntime({ ...config, capacityBytes: undefined });
+      try {
+        expect((await restarted.statusSnapshot()).capacity.allocatedBytes).toBe(7500);
+        expect((await restarted.statusSnapshot()).lifecycle?.state).toBe("released");
+      } finally { await restarted.stop(); }
+    } finally {
+      if (runtime.state !== "stopped") await runtime.stop();
+      await coordinator.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 function clientFor(port: number) {
@@ -137,5 +185,16 @@ async function waitForNode(client: ReturnType<typeof createRegistryClient>, node
     if (node && node.lifecycle === lifecycle) return node;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+
   throw new Error(`node did not reach lifecycle ${lifecycle}`);
+}
+
+async function waitForCapacity(client: ReturnType<typeof createRegistryClient>, nodeId: string, allocatedBytes: number) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const node = (await client.nodes()).find((candidate) => candidate.nodeId === nodeId);
+    if (node?.capacity.allocatedBytes === allocatedBytes) return node;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`node did not report allocation ${allocatedBytes}`);
 }

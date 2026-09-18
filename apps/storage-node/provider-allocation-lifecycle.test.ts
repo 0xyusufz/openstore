@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProviderAllocationLifecycle } from "./provider-allocation-lifecycle.js";
+import { createCapacityAllocation } from "./capacity-allocation.js";
 
 describe("provider allocation lifecycle", () => {
   it("persists drain and enforces safe release", async () => {
@@ -42,6 +43,18 @@ describe("provider allocation lifecycle", () => {
       expect(lifecycle.stopSharing().state).toBe("draining");
       expect(lifecycle.release(0, 0).state).toBe("released");
       expect(() => lifecycle.startSharing()).toThrow(/released|transition/i);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("preserves usage and rejects decreases below usage or reservations", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openstore-060b-capacity-"));
+    const path = join(dir, "allocation.json");
+    try {
+      const allocation = createCapacityAllocation(dir, 1000, path);
+      allocation.updateUsed(400);
+      expect(() => allocation.setAllocation(399)).toThrow(/usage|reservation/i);
+      expect(allocation.setAllocation(600)).toMatchObject({ allocationBytes: 600, usedBytes: 400, reservedBytes: 0 });
+      expect(createCapacityAllocation(dir, undefined, path).state()).toMatchObject({ allocationBytes: 600, usedBytes: 400 });
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 });

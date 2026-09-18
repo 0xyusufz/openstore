@@ -356,8 +356,14 @@ export async function createLibp2pStorageNodeRuntime(
     statusSnapshot: status,
     ...(lifecycle ? {
       allocationLifecycle: lifecycle,
-      increaseAllocation: (bytes: number) => allocation!.setAllocation(bytes),
-      decreaseAllocation: (bytes: number) => allocation!.setAllocation(bytes),
+      increaseAllocation: (bytes: number) => {
+        if (lifecycle.inspect().state === "released") throw new Error("released allocation cannot be resized");
+        return allocation!.setAllocation(bytes);
+      },
+      decreaseAllocation: (bytes: number) => {
+        if (lifecycle.inspect().state === "released") throw new Error("released allocation cannot be resized");
+        return allocation!.setAllocation(bytes);
+      },
       stopSharing: () => lifecycle.stopSharing(),
       startSharing: () => {
         const current = allocation!.state();
