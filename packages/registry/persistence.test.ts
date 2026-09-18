@@ -78,6 +78,27 @@ describe("persistent node registry (OPENSTORE-014)", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  it("4a. legacy zero-capacity records survive reload without weakening durable validation", async () => {
+    const file = await tempFile();
+    const dir = file.split("/").slice(0, -1).join("/");
+    const reg = createRegistry({ persistencePath: file });
+    const id = createIdentity();
+    reg.register("http://127.0.0.1:4014", id);
+    const persisted = JSON.parse(await readFile(file, "utf8")) as { nodes: Array<Record<string, unknown>> };
+    expect(persisted.nodes[0]?.capacity).toEqual({
+      allocatedBytes: 0, totalBytes: 0, usedBytes: 0, availableBytes: 0,
+    });
+    const reloaded = createRegistry({ persistencePath: file });
+    expect(reloaded.get(id.publicKey.toString("base64"))?.capacity).toMatchObject({
+      allocatedBytes: 0, totalBytes: 0, usedBytes: 0, availableBytes: 0,
+    });
+
+    persisted.nodes[0]!.capacity = { allocatedBytes: 1024, totalBytes: 1024, usedBytes: 2, availableBytes: 2 };
+    await writeFile(file, JSON.stringify(persisted), { mode: 0o600 });
+    expect(createRegistry({ persistencePath: file }).list()).toHaveLength(0);
+    await rm(dir, { recursive: true, force: true });
+  });
+
   it("5. malformed persistence file handled safely", async () => {
     const file = await tempFile();
     const dir = file.split("/").slice(0, -1).join("/");

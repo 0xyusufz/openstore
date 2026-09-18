@@ -416,10 +416,21 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     // capacity optional for backward compat
     let capacity: NodeCapacity;
     if (r["capacity"] !== undefined) {
-      try {
-        capacity = validateCapacity(r["capacity"]);
-      } catch {
-        return null;
+      const rawCapacity = r["capacity"];
+      const legacyZeroCapacity = rawCapacity !== null && typeof rawCapacity === "object" &&
+        !Array.isArray(rawCapacity) &&
+        ["allocatedBytes", "totalBytes", "usedBytes", "availableBytes"]
+          .every((field) => (rawCapacity as Record<string, unknown>)[field] === 0) &&
+        !("physicalBytes" in (rawCapacity as Record<string, unknown>)) &&
+        !("usableBytes" in (rawCapacity as Record<string, unknown>));
+      if (legacyZeroCapacity) {
+        capacity = { allocatedBytes: 0, totalBytes: 0, usedBytes: 0, availableBytes: 0 };
+      } else {
+        try {
+          capacity = validateCapacity(rawCapacity);
+        } catch {
+          return null;
+        }
       }
     } else {
       capacity = { allocatedBytes: 0, totalBytes: 0, usedBytes: 0, availableBytes: 0 };
