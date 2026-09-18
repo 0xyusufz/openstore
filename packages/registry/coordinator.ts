@@ -3,6 +3,7 @@
  */
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "http";
 import { request as httpsRequest } from "https";
+import { timingSafeEqual } from "crypto";
 import type { Identity } from "../identity/index.js";
 import type { NodeCapacity, P2PRegistrationDescriptor, Registry, SignedHeartbeat, SignedRegistration, SignedUnregister } from "./index.js";
 import { createSignedHeartbeat, createSignedLibp2pHeartbeat, createSignedLibp2pRegistration, createSignedRegistration, createSignedUnregister } from "./index.js";
@@ -267,8 +268,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, registry: Regis
       persistence: { enabled: persistence.enabled, healthy: persistence.healthy, degraded: persistence.degraded },
     });
   }
+  // Readiness stays public for orchestrators; every other route (including
+  // operational metrics) requires the bearer token when one is configured.
+  if (token && !isAuthorizedBearer(req.headers.authorization, token)) { emit({ type: "coordinator.request", operation: "auth", outcome: "error" }); return respond(401, { error: "unauthorized" }); }
   if (req.method === "GET" && (path === "/metrics" || path === "/v1/metrics")) return respond(200, metrics.snapshot());
-  if (token && req.headers.authorization !== "Bearer " + token) { emit({ type: "coordinator.request", operation: "auth", outcome: "error" }); return respond(401, { error: "unauthorized" }); }
   if (req.method === "GET" && (path === "/conditions" || path === "/v1/conditions")) { const aggregate = registry.healthSnapshot(); const persistence = registry.persistenceStatus(); const safeDiscovery = discovery?.(); return respond(200, { protocol: REGISTRY_PROTOCOL_VERSION, ...(safeDiscovery ? { discovery: safeDiscovery } : {}), conditions: conditions.evaluate({ coordinator: { persistenceHealthy: persistence.healthy, availableNodes: aggregate.availableNodes, unavailableNodes: aggregate.unavailableNodes, ...(safeDiscovery ? { discovery: safeDiscovery } : {}) }, metrics: metrics.snapshot() }), events: events.recent(100) }); }
   if (req.method === "GET" && (path === "/health" || path === "/v1/health")) { const persistence = registry.persistenceStatus(); const aggregate = registry.healthSnapshot(); const safeDiscovery = discovery?.(); return respond(200, { status: persistence.degraded ? "degraded" : "ok", protocol: REGISTRY_PROTOCOL_VERSION, persistence, aggregate, health: aggregate, coordinator: coordinatorStatus(), ...(safeDiscovery ? { discovery: safeDiscovery } : {}), conditions: conditions.evaluate({ coordinator: { persistenceHealthy: persistence.healthy, availableNodes: aggregate.availableNodes, unavailableNodes: aggregate.unavailableNodes, ...(safeDiscovery ? { discovery: safeDiscovery } : {}) }, metrics: metrics.snapshot() }), events: events.recent(100) }); }
   if (req.method === "GET" && (path === "/events" || path === "/v1/events")) return respond(200, events.snapshot());
@@ -358,4 +361,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, registry: Regis
   }
 }
 function readBody(req: IncomingMessage, max: number): Promise<unknown> { return new Promise((resolve, reject) => { let data = ""; let size = 0; req.setEncoding("utf8"); req.on("data", (chunk: string) => { size += Buffer.byteLength(chunk); if (size > max) { reject(new Error("request body too large")); return; } data += chunk; }); req.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("invalid JSON")); } }); req.on("error", reject); }); }
+/**
+ * Constant-time bearer comparison so token prefixes/lengths are not
+ * distinguishable through response timing. Returns false for any missing
+ * or malformed header without leaking which part mismatched.
+ */
+function isAuthorizedBearer(header: string | undefined, token: string): boolean {
+  if (typeof header !== "string") return false;
+  const expected = Buffer.from(`Bearer ${token}`, "utf8");
+  const actual = Buffer.from(header, "utf8");
+  if (actual.length !== expected.length) return false;
+  return timingSafeEqual(actual, expected);
+}
 function send(res: ServerResponse, status: number, payload: unknown): void { const body = JSON.stringify(payload); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body), "cache-control": "no-store" }); res.end(body); }

@@ -74,6 +74,8 @@ export interface StorageNodeOptions {
   maxHttpRequestBodyBytes?: number;
   /** Maximum remembered authenticated request nonces. */
   maxReplayCacheEntries?: number;
+  /** Maximum accepted piece size in bytes (mirrors the libp2p path). Unset = bounded only by request body + quota. */
+  maxPieceBytes?: number;
   metrics?: MetricsRegistry;
   events?: EventStore;
   /** Optional in-memory registry for node discovery */
@@ -225,6 +227,11 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   if (!Number.isSafeInteger(maxReplayCacheEntries) || maxReplayCacheEntries <= 0) {
     throw new TypeError("maxReplayCacheEntries must be a positive safe integer");
   }
+  const maxPieceBytes = options.maxPieceBytes;
+  if (maxPieceBytes !== undefined && (!Number.isSafeInteger(maxPieceBytes) || maxPieceBytes <= 0)) {
+    throw new TypeError("maxPieceBytes must be a positive safe integer");
+  }
+  const pieceLimits: PieceLimits = maxPieceBytes === undefined ? {} : { maxPieceBytes };
   const seenNonces = new Map<string, number>();
   let capacityBytes = options.capacityBytes ?? DEFAULT_CAPACITY_BYTES;
   if (!Number.isInteger(capacityBytes) || capacityBytes <= 0) {
@@ -273,7 +280,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       metrics.observe("storage_request_duration_ms", Date.now() - started, { operation });
       return originalEnd(...args);
     }) as typeof res.end;
-    void handleRequest(req, res, storageDir, capacityBytes, provenance, { requireAuth, maxClockSkewMs, seenNonces, maxReplayCacheEntries, maxHttpRequestBodyBytes }, () => nodeIdentity, () => draining, getStatusSnapshot, metrics, events, options.__testCrashHook).catch((error) => {
+    void handleRequest(req, res, storageDir, capacityBytes, provenance, { requireAuth, maxClockSkewMs, seenNonces, maxReplayCacheEntries, maxHttpRequestBodyBytes }, () => nodeIdentity, () => draining, getStatusSnapshot, metrics, events, options.__testCrashHook, pieceLimits).catch((error) => {
       if (!res.headersSent) {
         sendJson(res, error instanceof RequestBodyTooLargeError ? 413 : 500, {
           error: error instanceof RequestBodyTooLargeError ? "request body too large" : "internal error",
@@ -490,6 +497,11 @@ interface AuthState {
   maxHttpRequestBodyBytes: number;
 }
 
+/** Abuse bound for inbound piece bytes, shared by the plain and provenance store paths. */
+interface PieceLimits {
+  maxPieceBytes?: number;
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -503,6 +515,7 @@ async function handleRequest(
   metrics: MetricsRegistry,
   events: EventStore,
   crashHook?: DurabilityCrashHook,
+  limits: PieceLimits = {},
 ): Promise<void> {
   const method = (req.method ?? "").toUpperCase();
   const rawPath = (req.url ?? "/").split("?")[0] as string;
@@ -517,7 +530,7 @@ async function handleRequest(
   if (rawPath.startsWith("/v2/pieces/")) {
     const body = method === "POST" ? await readBody(req, auth.maxHttpRequestBodyBytes) : undefined;
     if (!checkAuth(req, method, rawPath, body, auth, res)) return;
-    await handleProvenanceRequest(req, res, rawPath, body, storageDir, capacityBytes, provenance, crashHook);
+    await handleProvenanceRequest(req, res, rawPath, body, storageDir, capacityBytes, provenance, crashHook, limits);
     return;
   }
 
@@ -531,7 +544,7 @@ async function handleRequest(
     }
     const rawBody = await readBody(req, auth.maxHttpRequestBodyBytes);
     if (!checkAuth(req, method, rawPath, rawBody, auth, res)) return;
-    await handlePostPieceWithBody(rawBody, res, storageDir, capacityBytes, crashHook);
+    await handlePostPieceWithBody(rawBody, res, storageDir, capacityBytes, crashHook, limits);
     return;
   }
 
@@ -599,6 +612,7 @@ async function handleProvenanceRequest(
   capacityBytes: number,
   provenance: PieceProvenanceStore,
   crashHook?: DurabilityCrashHook,
+  limits: PieceLimits = {},
 ): Promise<void> {
   const segments = rawPath.split("/");
   const body = parseJsonObject(rawBody);
@@ -624,7 +638,7 @@ async function handleProvenanceRequest(
         await provenance.associatePiece(pieceId, body.claimId, async () => {
           const bytes = Buffer.from(body.data as string, "base64");
           if (hashPieceId(bytes) !== pieceId) throw new Error("piece bytes do not match piece id");
-          await storePieceBytes(storageDir, capacityBytes, pieceId, bytes, crashHook);
+          await storePieceBytes(storageDir, capacityBytes, pieceId, bytes, crashHook, limits);
         });
         sendJson(res, 200, { status: "stored", pieceId });
         return;
@@ -677,8 +691,9 @@ function parseJsonObject(rawBody: Buffer | undefined): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-async function storePieceBytes(storageDir: string, capacityBytes: number, id: string, bytes: Buffer, crashHook?: DurabilityCrashHook): Promise<void> {
+async function storePieceBytes(storageDir: string, capacityBytes: number, id: string, bytes: Buffer, crashHook?: DurabilityCrashHook, limits: PieceLimits = {}): Promise<void> {
   const piecePath = join(storageDir, id);
+  if (limits.maxPieceBytes !== undefined && bytes.length > limits.maxPieceBytes) throw new Error("piece too large");
   let previous = 0;
   try { previous = (await stat(piecePath)).size; } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -765,6 +780,7 @@ async function handlePostPieceWithBody(
   storageDir: string,
   capacityBytes: number = DEFAULT_CAPACITY_BYTES,
   crashHook?: DurabilityCrashHook,
+  limits: PieceLimits = {},
 ): Promise<void> {
   let parsed: unknown;
   try {
@@ -793,6 +809,10 @@ async function handlePostPieceWithBody(
 
   const id = body["id"];
   const bytes = Buffer.from(body["data"], "base64");
+  if (limits.maxPieceBytes !== undefined && bytes.length > limits.maxPieceBytes) {
+    sendJson(res, 413, { error: "piece too large" });
+    return;
+  }
   const piecePath = join(storageDir, id);
 
   let existed = false;

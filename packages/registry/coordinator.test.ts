@@ -41,10 +41,13 @@ describe("cross-process registry coordinator", () => {
     await coordinator.close();
   });
 
-  it("exposes bounded sanitized metrics without credentials", async () => {
+  it("requires credentials for metrics while readiness stays public", async () => {
     const coordinator = createRegistryCoordinator({ registry: createRegistry(), token: "secret" });
     const port = await coordinator.listen(0);
-    const response = await fetch(`http://127.0.0.1:${port}/v1/metrics`);
+    // Unauthenticated metrics access is rejected (operational disclosure).
+    expect((await fetch(`http://127.0.0.1:${port}/v1/metrics`)).status).toBe(401);
+    expect((await fetch(`http://127.0.0.1:${port}/v1/metrics`, { headers: { authorization: "Bearer wrong" } })).status).toBe(401);
+    const response = await fetch(`http://127.0.0.1:${port}/v1/metrics`, { headers: { authorization: "Bearer secret" } });
     expect(response.status).toBe(200);
     const body = await response.json() as { counters: unknown[]; gauges: unknown[]; histograms: unknown[] };
     expect(body.counters).toBeInstanceOf(Array);
