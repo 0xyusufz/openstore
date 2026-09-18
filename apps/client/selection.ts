@@ -61,6 +61,7 @@ export function selectAvailableNodes(
 
   const suitable = candidates
     .filter((n) => n.available)
+    .filter((n) => n.lifecycle === undefined || n.lifecycle === "sharing")
     .filter((n) => hasTrustedCapacity(n.capacity, pieceSize))
     .sort((a, b) => {
       const capDiff = b.capacity.availableBytes - a.capacity.availableBytes;

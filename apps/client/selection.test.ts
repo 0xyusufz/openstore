@@ -166,4 +166,11 @@ describe("intelligent node selection (OPENSTORE-013)", () => {
     expect(() => selectNodes([{ ...valid, capacity: { allocatedBytes: Number.MAX_SAFE_INTEGER, usedBytes: Number.MAX_SAFE_INTEGER, availableBytes: 1 } }], 1, 1)).toThrow(/insufficient/i);
     expect(() => selectNodes([{ ...valid, available: false }], 1, 1)).toThrow(/insufficient/i);
   });
+
+  it("excludes draining and released lifecycle nodes", () => {
+    const sharing = { ...makeRecord("sharing", true, 100), lifecycle: "sharing" as const };
+    const draining = { ...makeRecord("draining", true, 100), lifecycle: "draining" as const };
+    const released = { ...makeRecord("released", true, 100), lifecycle: "released" as const };
+    expect(selectNodes([sharing, draining, released], 10, 1).map((node) => node.nodeId)).toEqual(["sharing"]);
+  });
 });

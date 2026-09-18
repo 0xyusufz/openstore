@@ -52,6 +52,7 @@ export interface StorageNodeEndpoint {
     physicalBytes?: number;
     usableBytes?: number;
   };
+  lifecycle?: "sharing" | "draining" | "released";
   /** Capability metadata advertised by the coordinator. */
   capabilities?: {
     pieceStore: boolean;

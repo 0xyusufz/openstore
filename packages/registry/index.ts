@@ -121,6 +121,7 @@ export interface NodeRecord {
   multiaddr?: string;
   identityBinding?: string;
   capabilities?: { pieceStore: boolean; pieceGet: boolean; pieceDelete: boolean; maxPieceBytes?: number };
+  lifecycle?: "sharing" | "draining" | "released";
 }
 
 /** Public descriptor submitted by a libp2p node. It never contains private key material. */
@@ -427,6 +428,12 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     try {
       validateBaseUrl(r["baseUrl"] as string);
       validatePublicKey(r["publicKey"] as string);
+      if (r["lifecycle"] !== undefined) validateLifecycle(r["lifecycle"]);
+      const persistedCapabilities = r["capabilities"];
+      if (persistedCapabilities && typeof persistedCapabilities === "object" &&
+          (persistedCapabilities as Record<string, unknown>).lifecycle !== undefined) {
+        validateLifecycle((persistedCapabilities as Record<string, unknown>).lifecycle);
+      }
     } catch {
       return null;
     }
@@ -468,6 +475,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         multiaddr: r["multiaddr"] as string | undefined,
         identityBinding: r["identityBinding"] as string | undefined,
         capabilities: r["capabilities"] as NodeRecord["capabilities"],
+        ...(r["lifecycle"] === undefined ? {} : { lifecycle: r["lifecycle"] as NodeRecord["lifecycle"] }),
       }),
     };
   }
@@ -634,6 +642,13 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     return pubkeyB64;
   }
 
+  function validateLifecycle(value: unknown): "sharing" | "draining" | "released" {
+    if (value !== "sharing" && value !== "draining" && value !== "released") {
+      throw new Error("malformed node record: invalid lifecycle state");
+    }
+    return value;
+  }
+
   function validateCapacity(cap: unknown): NodeCapacity {
     if (!cap || typeof cap !== "object" || Array.isArray(cap)) throw new Error("malformed node record: invalid capacity");
     const c = cap as Record<string, unknown>;
@@ -642,6 +657,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     if (typeof totalRaw !== "number" || !Number.isSafeInteger(totalRaw as number) || (totalRaw as number) <= 0) {
       throw new Error("malformed node record: invalid capacity allocatedBytes");
     }
+
     for (const f of ["usedBytes", "availableBytes"] as const) {
       if (typeof c[f] !== "number" || !Number.isSafeInteger(c[f] as number) || (c[f] as number) < 0) {
         throw new Error(`malformed node record: invalid capacity ${f}`);
@@ -753,6 +769,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
             descriptor.identityBinding !== descriptor.nodeId || descriptor.nodeId !== peerIdFromOpenStorePublicKey(Buffer.from(publicKey, "base64"))) {
           throw new Error("libp2p descriptor identity does not match registration");
         }
+        if (descriptor.capabilities.lifecycle !== undefined) validateLifecycle(descriptor.capabilities.lifecycle);
       }
       const payload = descriptor === undefined
         ? registrationPayload(baseUrl, cap, timestamp, nonce)
@@ -767,7 +784,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         nodeId,
         publicKey,
         baseUrl,
-        available: true,
+        available: descriptor?.capabilities.lifecycle !== "released",
         lastSeen: Date.now(),
         capacity: cap ?? { allocatedBytes: 0, totalBytes: 0, usedBytes: 0, availableBytes: 0 },
         reliability,
@@ -776,6 +793,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
           multiaddr: descriptor.multiaddr,
           identityBinding: descriptor.identityBinding,
           capabilities: { ...descriptor.capabilities },
+          ...(descriptor.capabilities.lifecycle === undefined ? {} : { lifecycle: descriptor.capabilities.lifecycle }),
         }),
       };
       nodes.set(nodeId, record);
@@ -836,6 +854,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
             descriptor.identityBinding !== descriptor.nodeId) {
           throw new Error("libp2p descriptor identity does not match heartbeat");
         }
+        if (descriptor.capabilities.lifecycle !== undefined) validateLifecycle(descriptor.capabilities.lifecycle);
       }
       const payload = descriptor === undefined
         ? heartbeatPayload(nodeId as string, cap, timestamp as string, nonce as string)
@@ -850,7 +869,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
       if (!existing) throw new Error("node not found");
       existing.lastSeen = Date.now();
       lastMutationAt = existing.lastSeen;
-      existing.available = true;
+      existing.available = descriptor?.capabilities.lifecycle !== "released";
       if (cap) existing.capacity = cap;
       if (descriptor) {
         existing.baseUrl = descriptor.baseUrl;
@@ -858,6 +877,7 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
         existing.multiaddr = descriptor.multiaddr;
         existing.identityBinding = descriptor.identityBinding;
         existing.capabilities = { ...descriptor.capabilities };
+        existing.lifecycle = descriptor.capabilities.lifecycle;
       }
       // Successful authenticated heartbeat improves reliability gradually & deterministically.
       existing.reliability.successfulHeartbeats += 1;

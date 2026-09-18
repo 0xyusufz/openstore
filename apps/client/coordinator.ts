@@ -286,10 +286,13 @@ function nodeToEndpoint(value: unknown, index: number): StorageNodeEndpoint {
   if (transport === "http" && !/^https?:\/\//.test(baseUrl)) throw new TypeError(`node[${index}] HTTP baseUrl is invalid`);
   if (transport === "libp2p" && !/^libp2p:\/\//.test(baseUrl)) throw new TypeError(`node[${index}] libp2p baseUrl is invalid`);
   const capacity = validateCapacity(node.capacity, index);
+  const lifecycle = node.lifecycle === undefined ? undefined :
+    node.lifecycle === "sharing" || node.lifecycle === "draining" || node.lifecycle === "released" ? node.lifecycle :
+      (() => { throw new TypeError(`node[${index}].lifecycle is invalid`); })();
   const reliability = validateReliability(node.reliability, index);
   const result: StorageNodeEndpoint = {
     id, baseUrl, transport, capacity, reliabilityScore: reliability.score,
-    storageScore: reliability.storageScore,
+    storageScore: reliability.storageScore, ...(lifecycle === undefined ? {} : { lifecycle }),
   };
   if (transport === "libp2p") {
     result.multiaddr = requiredString(node.multiaddr, `node[${index}].multiaddr`);

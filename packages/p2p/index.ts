@@ -33,6 +33,7 @@ export interface P2PNodeCapabilities {
   maxPieceBytes?: number;
   allocatedBytes?: number;
   availableBytes?: number;
+  lifecycle?: "sharing" | "draining" | "released";
 }
 
 export interface P2PNodeDescriptor extends P2PNodeAddress {

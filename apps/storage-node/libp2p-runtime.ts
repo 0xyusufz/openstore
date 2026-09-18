@@ -190,7 +190,7 @@ export async function createLibp2pStorageNodeRuntime(
     multiaddr: input.advertisedMultiaddr ? `${input.advertisedMultiaddr}/p2p/${node.peerId}` : node.listenAddrs[0],
     identity: node.applicationIdentity,
     identityBinding: node.peerId,
-    capabilities: { ...node.capabilities, ...snapshot },
+    capabilities: { ...node.capabilities, ...snapshot, ...(lifecycle ? { lifecycle: lifecycle.inspect().state } : {}) },
   });
   const capacitySnapshot = async () => {
     const usedBytes = await store.usedBytes();
@@ -201,6 +201,7 @@ export async function createLibp2pStorageNodeRuntime(
       usedBytes,
       availableBytes: Math.max(0, allocatedBytes - usedBytes - (stateSnapshot?.reservedBytes ?? 0)),
       ...(stateSnapshot ? { physicalBytes: stateSnapshot.physicalBytes, usableBytes: stateSnapshot.usableBytes } : {}),
+      ...(lifecycle ? { lifecycle: lifecycle.inspect().state } : {}),
     };
   };
   const status = async (): Promise<Libp2pStorageNodeStatusSnapshot> => {
