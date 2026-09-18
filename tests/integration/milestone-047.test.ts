@@ -25,7 +25,7 @@ describe("Milestone 047 resilience and outage policy", () => {
         return new Response(JSON.stringify({ nodes: [{
           nodeId: "node-a", publicKey: Buffer.alloc(44).toString("base64"),
           baseUrl: "http://127.0.0.1:1", available: true,
-          capacity: { usedBytes: 0, availableBytes: 10 },
+          capacity: { allocatedBytes: 10, usedBytes: 0, availableBytes: 10 },
           reliability: { score: 100, storageScore: 100 },
         }] }), { status: 200 });
       },
@@ -53,7 +53,7 @@ describe("Milestone 047 resilience and outage policy", () => {
       fetch: async () => new Response(JSON.stringify({ nodes: [{
         nodeId: "node-a", publicKey: Buffer.alloc(44).toString("base64"),
         baseUrl: "http://127.0.0.1:1", available: false,
-        capacity: { usedBytes: 0, availableBytes: 10 },
+        capacity: { allocatedBytes: 10, usedBytes: 0, availableBytes: 10 },
         reliability: { score: 0, storageScore: 0 },
       }] }), { status: 200 }),
     });

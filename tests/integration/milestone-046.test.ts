@@ -47,7 +47,7 @@ describe("Milestone 046 coordinator and lifecycle status", () => {
         if (!available) throw new Error("offline");
         return new Response(JSON.stringify({ nodes: [{
           nodeId: "node-a", publicKey: Buffer.alloc(44).toString("base64"), baseUrl: "http://127.0.0.1:1",
-          available: true, capacity: { usedBytes: 0, availableBytes: 1 }, reliability: { score: 50, storageScore: 50 },
+          available: true, capacity: { allocatedBytes: 1, usedBytes: 0, availableBytes: 1 }, reliability: { score: 50, storageScore: 50 },
         }] }), { status: 200 });
       },
     });
