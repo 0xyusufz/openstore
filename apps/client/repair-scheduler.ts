@@ -397,6 +397,11 @@ export function createRepairScheduler(input: RepairSchedulerOptions): RepairSche
       for (const candidate of pending.values()) {
         statusValue.cancelledCount += 1;
         emit({ type: "repair.cancelled", lifecycle: "cancelled", ...candidateFields(candidate), classification: "cancelled" });
+        // 063: cancellation must not permanently suppress future repair. Clear
+        // cooldown/exhausted for cancelled pending keys so healing can resume
+        // without waiting for discoverySignature change.
+        cooldowns.delete(candidate.key);
+        exhausted.delete(candidate.key);
       }
       pending.clear();
       for (const candidate of inFlight.values()) candidate.controller?.abort();
