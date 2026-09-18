@@ -17,6 +17,34 @@ export interface SelectionOptions {
   pieceSize: number;
 }
 
+/** Shared target admission predicate for repair and other endpoint-based placement. */
+export function isPlacementEligibleEndpoint(
+  endpoint: StorageNodeEndpoint,
+  pieceSize: number,
+  requireTrustedCapacity = true,
+): boolean {
+  if (!endpoint || endpoint.lifecycle === "draining" || endpoint.lifecycle === "released") return false;
+  if (endpoint.capabilities?.pieceStore === false) return false;
+  if (endpoint.capabilities?.maxPieceBytes !== undefined &&
+      (!Number.isSafeInteger(endpoint.capabilities.maxPieceBytes) || endpoint.capabilities.maxPieceBytes < pieceSize)) return false;
+  if (endpoint.capacity === undefined) return !requireTrustedCapacity;
+  const allocated = endpoint.capacity.allocatedBytes ?? endpoint.capacity.totalBytes;
+  const { usedBytes, availableBytes } = endpoint.capacity;
+  if (allocated === undefined) {
+    return !requireTrustedCapacity && endpoint.lifecycle === undefined &&
+      Number.isSafeInteger(usedBytes) && usedBytes >= 0 &&
+      Number.isSafeInteger(availableBytes) && availableBytes >= 0 &&
+      pieceSize <= availableBytes;
+  }
+  if (allocated === undefined || !Number.isSafeInteger(allocated) || allocated <= 0 ||
+      !Number.isSafeInteger(usedBytes) || usedBytes < 0 ||
+      !Number.isSafeInteger(availableBytes) || availableBytes < 0 ||
+      usedBytes > allocated || availableBytes > allocated ||
+      usedBytes > Number.MAX_SAFE_INTEGER - availableBytes ||
+      usedBytes + availableBytes > allocated) return false;
+  return pieceSize >= 0 && pieceSize <= availableBytes;
+}
+
 /**
  * Select storage nodes for a piece based on availability and capacity.
  *

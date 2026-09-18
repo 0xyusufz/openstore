@@ -139,6 +139,59 @@ describe("explicit replica repair (048B)", () => {
     })).rejects.toMatchObject({ classification: "target-unavailable" });
   });
 
+  it("excludes draining and released targets while allowing a sharing target", async () => {
+    const state = await setup();
+    const draining = { ...endpoint("draining"), lifecycle: "draining" as const };
+    const released = { ...endpoint("released"), lifecycle: "released" as const };
+    const sharing = endpoint("sharing", 1_000);
+    const report = await repairManifestReplica(state.manifest.fileId, {
+      manifestStore: state.store,
+      coordinator: makeCoordinator([state.a, draining, released, sharing], [state.a, state.b, draining, released, sharing]),
+      lostNodeId: state.b.id,
+      observationCount: 1,
+      transport: makeTransport(state.pieces),
+    });
+    expect(report.chunks[0]?.addedNodeId).toBe("sharing");
+    expect(state.pieces.get("draining")).toBeUndefined();
+    expect(state.pieces.get("released")).toBeUndefined();
+  });
+
+  it("fails explicitly when only draining/released or insufficient-capacity targets exist", async () => {
+    const state = await setup();
+    const draining = { ...endpoint("draining", 1_000), lifecycle: "draining" as const };
+    const released = { ...endpoint("released", 1_000), lifecycle: "released" as const };
+    await expect(repairManifestReplica(state.manifest.fileId, {
+      manifestStore: state.store,
+      coordinator: makeCoordinator([state.a, draining, released], [state.a, state.b, draining, released]),
+      lostNodeId: state.b.id,
+      observationCount: 1,
+      transport: makeTransport(state.pieces),
+    })).rejects.toMatchObject({ classification: "target-unavailable" });
+    expect((await state.store.load(state.manifest.fileId))?.chunks[0].nodeIds).toEqual(["node-a", "node-b"]);
+  });
+
+  it("leaves the manifest unchanged when a target changes state during store", async () => {
+    const state = await setup();
+    const target = endpoint("node-c");
+    const base = makeTransport(state.pieces);
+    const transport: P2PTransport = {
+      ...base,
+      async storePiece(node, pieceId, data, request) {
+        if (node.nodeId === target.id) return { status: 503 };
+        return base.storePiece(node, pieceId, data, request);
+      },
+    };
+    await expect(repairManifestReplica(state.manifest.fileId, {
+      manifestStore: state.store,
+      coordinator: makeCoordinator([state.a, target], [state.a, state.b, target]),
+      lostNodeId: state.b.id,
+      observationCount: 1,
+      transport,
+      retryAttempts: 1,
+    })).rejects.toMatchObject({ classification: "target-unavailable" });
+    expect((await state.store.load(state.manifest.fileId))?.chunks[0].nodeIds).toEqual(["node-a", "node-b"]);
+  });
+
   it("does not select a target from stale data when the coordinator is unavailable", async () => {
     const state = await setup();
     const coordinator: CoordinatorEndpointProvider = {

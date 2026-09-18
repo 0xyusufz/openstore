@@ -27,6 +27,7 @@ import {
 } from "./provenance.js";
 import type { PieceClaim } from "../../packages/provenance/index.js";
 import { CoordinatorDiscoveryError } from "./coordinator.js";
+import { isPlacementEligibleEndpoint } from "./selection.js";
 
 export type RepairClassification =
   | "coordinator-unavailable"
@@ -241,6 +242,8 @@ async function repairChunk(
     const hasCapacityCandidate = observation.available.some((endpoint) =>
       endpoint.id !== options.lostNodeId &&
       !survivingIds.includes(endpoint.id) &&
+      endpoint.lifecycle !== "draining" &&
+      endpoint.lifecycle !== "released" &&
       endpoint.capabilities?.pieceStore !== false,
     );
     throw new RepairError(
@@ -346,9 +349,7 @@ function selectTargets(
   const existing = new Set(chunk.nodeIds);
   return endpoints
     .filter((endpoint) => !existing.has(endpoint.id) && endpoint.id !== lostNodeId)
-    .filter((endpoint) => endpoint.capabilities?.pieceStore !== false)
-    .filter((endpoint) => endpoint.capabilities?.maxPieceBytes === undefined || endpoint.capabilities.maxPieceBytes >= pieceSize)
-    .filter((endpoint) => endpoint.capacity === undefined || endpoint.capacity.availableBytes >= pieceSize)
+    .filter((endpoint) => isPlacementEligibleEndpoint(endpoint, pieceSize, false))
     .filter((endpoint, index, all) => all.findIndex((candidate) => candidate.id === endpoint.id) === index)
     .sort((a, b) => (b.capacity?.availableBytes ?? 0) - (a.capacity?.availableBytes ?? 0));
 }
