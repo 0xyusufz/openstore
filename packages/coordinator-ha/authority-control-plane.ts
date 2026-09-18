@@ -93,11 +93,12 @@ export function createAuthorityControlPlane(options: AuthorityControlPlaneOption
       now: options.now,
     }) : undefined
   );
+  const drillPersistencePath = options.drillPersistencePath ?? (options.recoveryPersistencePath ? `${options.recoveryPersistencePath}.drill` : undefined);
   const recoveryDrill = createAuthorityRecoveryDrill({
     policy: recoveryPolicy,
     runtime: undefined,
     controlPlane: undefined,
-    persistencePath: options.drillPersistencePath,
+    persistencePath: drillPersistencePath,
     now: options.now,
   });
   let delivered: SignedAuthorityGrant | undefined;

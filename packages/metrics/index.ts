@@ -7,7 +7,7 @@ const VALUE = /^[a-z0-9][a-z0-9_.-]{0,31}$/;
 const ALLOWED_KEYS = new Set(["operation", "route", "result", "status_class", "transport", "reason", "state"]);
 const ALLOWED_VALUES: Record<string, Set<string>> = {
   operation: new Set(["request", "register", "heartbeat", "unregister", "store", "get", "head", "delete", "verify", "upload", "download", "repair"]),
-  route: new Set(["request", "health", "status", "nodes", "register", "heartbeat", "unregister", "ready", "metrics", "pieces"]),
+  route: new Set(["request", "health", "status", "nodes", "register", "heartbeat", "unregister", "ready", "metrics", "pieces", "recovery", "conditions", "events"]),
   result: new Set(["success", "error", "rejected", "absent"]),
   status_class: new Set(["2xx", "4xx", "5xx"]),
   transport: new Set(["http", "libp2p"]),
