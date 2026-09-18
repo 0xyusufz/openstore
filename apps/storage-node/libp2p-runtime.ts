@@ -5,7 +5,7 @@
  * for nodes which expose the same opaque piece store over libp2p.
  */
 import { mkdir, readFile, stat, unlink, writeFile, readdir } from "fs/promises";
-import { join, resolve } from "path";
+import { basename, join, resolve } from "path";
 import type { Identity } from "../../packages/identity/index.js";
 import { loadIdentity } from "../../packages/identity/keystore.js";
 import { DhtPeerDiscovery } from "../../packages/p2p/dht-discovery.js";
@@ -17,6 +17,7 @@ import type { RegistryClient } from "../../packages/registry/coordinator.js";
 import { createPieceProvenanceStore } from "./provenance-store.js";
 import { createOrphanScanner, type OrphanScanner } from "./orphan-scanner.js";
 import { safeErrorMessage } from "./safe-error.js";
+import { createCapacityAllocation, type CapacityAllocation } from "./capacity-allocation.js";
 
 export interface Libp2pStorageNodeRuntimeConfig {
   storageDir: string;
@@ -26,6 +27,8 @@ export interface Libp2pStorageNodeRuntimeConfig {
   advertisedMultiaddr?: string;
   bootstrapPeers?: P2PPeerDescriptor[];
   capacityBytes?: number;
+  /** Enables durable allocation state when set. */
+  allocationPath?: string;
   maxPieceBytes?: number;
   discoveryRefreshIntervalMs?: number;
   coordinatorUrl?: string;
@@ -79,7 +82,7 @@ export interface Libp2pStorageNodeStatusSnapshot {
   retryCount: number;
   nextRetryAt?: number;
   shuttingDown: boolean;
-  capacity: { allocatedBytes: number; usedBytes: number; availableBytes: number };
+  capacity: { physicalBytes?: number; usableBytes?: number; allocatedBytes: number; usedBytes: number; availableBytes: number };
 }
 
 export function validateLibp2pStorageNodeRuntimeConfig(
@@ -101,6 +104,7 @@ export function validateLibp2pStorageNodeRuntimeConfig(
     if (typeof value.coordinatorUrl !== "string" || !/^https?:\/\//.test(value.coordinatorUrl)) throw new TypeError("coordinatorUrl must be an HTTP URL");
   }
   if (value.coordinatorToken !== undefined && (typeof value.coordinatorToken !== "string" || value.coordinatorToken.length === 0)) throw new TypeError("coordinatorToken must be a non-empty string");
+  if (value.allocationPath !== undefined && (typeof value.allocationPath !== "string" || value.allocationPath.length === 0)) throw new TypeError("allocationPath must be a non-empty string");
   if (value.readinessFile !== undefined && (typeof value.readinessFile !== "string" || value.readinessFile.length === 0)) throw new TypeError("readinessFile must be a non-empty string");
   for (const field of ["capacityBytes", "maxPieceBytes", "discoveryRefreshIntervalMs", "heartbeatIntervalMs", "coordinatorHeartbeatIntervalMs", "coordinatorRetryAttempts", "coordinatorRetryBackoffMs", "coordinatorRetryMaxBackoffMs"]) {
     const n = value[field];
@@ -115,8 +119,13 @@ export async function createLibp2pStorageNodeRuntime(
   const identity = await loadIdentity(input.identityPassword, resolve(input.identityPath));
   const storageDir = resolve(input.storageDir);
   await mkdir(storageDir, { recursive: true });
-  const capacity = input.capacityBytes ?? 1 * 1024 * 1024 * 1024;
-  const store = createPieceStore(storageDir, capacity, input.maxPieceBytes ?? DEFAULT_MAX_PIECE_BYTES);
+  let allocation: CapacityAllocation | undefined;
+  if (input.allocationPath) {
+    allocation = createCapacityAllocation(storageDir, input.capacityBytes, resolve(input.allocationPath));
+  }
+  const initialCapacity = allocation?.state().allocationBytes ?? input.capacityBytes ?? 1 * 1024 * 1024 * 1024;
+  const store = createPieceStore(storageDir, initialCapacity, input.maxPieceBytes ?? DEFAULT_MAX_PIECE_BYTES, allocation, allocation ? basename(allocation.path) : undefined);
+  if (allocation) allocation.updateUsed(await store.usedBytes());
   const provenance = createPieceProvenanceStore(join(storageDir, ".provenance"), input.orphanCleanup?.gracePeriodMs);
   let orphanScanner: OrphanScanner | undefined;
   if (input.orphanCleanup?.enabled) {
@@ -135,8 +144,8 @@ export async function createLibp2pStorageNodeRuntime(
     applicationPrivateKey: identity.privateKey,
     listenAddrs: input.listenAddrs,
     maxPieceBytes: input.maxPieceBytes ?? DEFAULT_MAX_PIECE_BYTES,
-    allocatedBytes: capacity,
-    availableBytes: capacity,
+    allocatedBytes: initialCapacity,
+    availableBytes: initialCapacity,
     discovery,
     discoveryRefreshIntervalMs: input.discoveryRefreshIntervalMs,
     storePiece: store.store,
@@ -171,9 +180,20 @@ export async function createLibp2pStorageNodeRuntime(
     identityBinding: node.peerId,
     capabilities: { ...node.capabilities, ...snapshot },
   });
-  const status = async (): Promise<Libp2pStorageNodeStatusSnapshot> => {
+  const capacitySnapshot = async () => {
     const usedBytes = await store.usedBytes();
-    return { peerId: node.peerId, state, coordinatorConfigured: Boolean(coordinator), coordinatorConnected, registered, registrationStatus, lastSuccessfulRegistrationAt, lastSuccessfulHeartbeatAt, lastFailureClassification, retryAttempt, retryCount, nextRetryAt, shuttingDown: stopping, capacity: { allocatedBytes: capacity, usedBytes, availableBytes: Math.max(0, capacity - usedBytes) } };
+    const stateSnapshot = allocation?.state();
+    const allocatedBytes = stateSnapshot?.allocationBytes ?? initialCapacity;
+    return {
+      allocatedBytes,
+      usedBytes,
+      availableBytes: Math.max(0, allocatedBytes - usedBytes - (stateSnapshot?.reservedBytes ?? 0)),
+      ...(stateSnapshot ? { physicalBytes: stateSnapshot.physicalBytes, usableBytes: stateSnapshot.usableBytes } : {}),
+    };
+  };
+  const status = async (): Promise<Libp2pStorageNodeStatusSnapshot> => {
+    const capacity = await capacitySnapshot();
+    return { peerId: node.peerId, state, coordinatorConfigured: Boolean(coordinator), coordinatorConnected, registered, registrationStatus, lastSuccessfulRegistrationAt, lastSuccessfulHeartbeatAt, lastFailureClassification, retryAttempt, retryCount, nextRetryAt, shuttingDown: stopping, capacity };
   };
   const emit = (next: Libp2pStorageNodeLifecycleState, error?: unknown, eventType?: string, attempt?: number) => {
     const previousState = state;
@@ -203,10 +223,6 @@ export async function createLibp2pStorageNodeRuntime(
   const clearTimers = () => {
     if (heartbeatTimer) { clearTimeout(heartbeatTimer); heartbeatTimer = undefined; }
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
-  };
-  const capacitySnapshot = async () => {
-    const usedBytes = await store.usedBytes();
-    return { allocatedBytes: capacity, usedBytes, availableBytes: Math.max(0, capacity - usedBytes) };
   };
   const performRegister = async () => {
     if (!coordinator) return;
@@ -334,7 +350,7 @@ function safeLifecycleError(error: unknown): string {
   return safeErrorMessage(error);
 }
 
-function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number) {
+function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number, allocation?: CapacityAllocation, allocationFileName?: string) {
   const pathFor = (id: string) => {
     if (!isValidPieceId(id)) throw new Error("invalid piece id");
     return join(dir, id);
@@ -342,6 +358,7 @@ function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number)
   const used = async () => {
     let total = 0;
     for (const name of await readdir(dir)) {
+      if (name === allocationFileName || name === ".capacity-allocation.json" || name.startsWith(".capacity-allocation.json.tmp-")) continue;
       try { const item = await stat(join(dir, name)); if (item.isFile()) total += item.size; } catch { /* concurrent deletion */ }
     }
     return total;
@@ -357,8 +374,10 @@ function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number)
       let existed = false;
       try { previous = (await stat(path)).size; existed = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const current = await used();
-      if (current - previous + data.length > capacity) return 507;
+      const limit = allocation?.state().allocationBytes ?? capacity;
+      if (current - previous + data.length > limit) return 507;
       await writeFile(path, data, { mode: 0o600 });
+      allocation?.updateUsed(await used());
       return existed ? 200 : 201;
     },
     async get(id: string) {
@@ -368,7 +387,7 @@ function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number)
       }
     },
     async remove(id: string) {
-      try { await unlink(pathFor(id)); return 204; } catch (error) {
+      try { await unlink(pathFor(id)); allocation?.updateUsed(await used()); return 204; } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return 404;
         throw error;
       }

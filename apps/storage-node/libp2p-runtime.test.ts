@@ -15,6 +15,9 @@ describe("libp2p storage-node runtime", () => {
     expect(() => validateLibp2pStorageNodeRuntimeConfig({
       storageDir: "pieces", identityPath: "identity.json", identityPassword: "secret", capacityBytes: 0,
     })).toThrow(/capacityBytes/);
+    expect(() => validateLibp2pStorageNodeRuntimeConfig({
+      storageDir: "pieces", identityPath: "identity.json", identityPassword: "secret", allocationPath: "",
+    })).toThrow(/allocationPath/);
   });
 
   it("loads a keystore and starts with its stable identity", async () => {
@@ -116,6 +119,65 @@ describe("libp2p storage-node runtime", () => {
       await rm(dir, { recursive: true, force: true });
     }
   }, 45_000);
+
+  it("enforces and restores durable allocation through the real libp2p runtime", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openstore-libp2p-allocation-"));
+    const keystore = join(dir, "identity.json");
+    const storageDir = join(dir, "pieces");
+    const allocationPath = join(storageDir, "allocation.json");
+    await saveIdentity(createIdentity(), "test-password", keystore);
+    const config = {
+      storageDir, allocationPath, capacityBytes: 200,
+      identityPath: keystore, identityPassword: "test-password",
+      listenAddrs: ["/ip4/127.0.0.1/tcp/0"],
+    };
+    const first = await createLibp2pStorageNodeRuntime(config);
+    await first.start();
+    const endpoint = {
+      nodeId: first.node.peerId,
+      baseUrl: `libp2p://${first.node.peerId}`,
+      multiaddr: first.node.listenAddrs[0],
+      identityBinding: first.node.peerId,
+      identity: first.node.applicationIdentity,
+    };
+    const transport = new Libp2pPieceTransport();
+    try {
+      expect((await transport.storePiece(endpoint, "near-limit", Buffer.alloc(150), { timeoutMs: 5_000 })).status).toBe(201);
+      expect((await first.statusSnapshot()).capacity).toMatchObject({ allocatedBytes: 200, usedBytes: 150, availableBytes: 50 });
+      expect((await transport.storePiece(endpoint, "over-limit", Buffer.alloc(100), { timeoutMs: 5_000 })).status).toBe(507);
+      expect((await transport.getPiece(endpoint, "near-limit", { timeoutMs: 5_000 })).bytes?.length).toBe(150);
+    } finally {
+      await first.stop();
+    }
+    const second = await createLibp2pStorageNodeRuntime({ ...config, capacityBytes: undefined });
+    await second.start();
+    try {
+      const snapshot = await second.statusSnapshot();
+      expect(snapshot.capacity).toMatchObject({ allocatedBytes: 200, usedBytes: 150, availableBytes: 50 });
+      expect(JSON.stringify(snapshot)).not.toMatch(/password|private|secret|plaintext|pieces|allocation\.json/i);
+    } finally {
+      await second.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("fails closed when durable allocation state is corrupt or impossible", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openstore-libp2p-corrupt-allocation-"));
+    const keystore = join(dir, "identity.json");
+    const allocationPath = join(dir, "allocation.json");
+    await saveIdentity(createIdentity(), "test-password", keystore);
+    await writeFile(allocationPath, JSON.stringify({ version: 1, allocationBytes: 20, usedBytes: 21, reservedBytes: 0, physicalBytes: 20, usableBytes: 20 }));
+    await expect(createLibp2pStorageNodeRuntime({
+      storageDir: join(dir, "pieces"), allocationPath,
+      identityPath: keystore, identityPassword: "test-password",
+    })).rejects.toThrow(/impossible/i);
+    await writeFile(allocationPath, "{not-json");
+    await expect(createLibp2pStorageNodeRuntime({
+      storageDir: join(dir, "pieces"), allocationPath,
+      identityPath: keystore, identityPassword: "test-password",
+    })).rejects.toThrow(/corrupt/i);
+    await rm(dir, { recursive: true, force: true });
+  });
 });
 
 async function waitForOutput(child: ChildProcess, text: string): Promise<void> {
