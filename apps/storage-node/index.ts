@@ -37,6 +37,7 @@ import { safeErrorMessage } from "./safe-error.js";
 import { defaultMetrics, type MetricsRegistry } from "../../packages/metrics/index.js";
 import { defaultEvents, type EventStore } from "../../packages/events/index.js";
 import { ConditionEvaluator } from "../../packages/conditions/index.js";
+import { createCapacityAllocation, type CapacityAllocation } from "./capacity-allocation.js";
 
 export const STORAGE_NODE_VERSION = 1;
 
@@ -73,6 +74,8 @@ export interface StorageNodeOptions {
   registryHeartbeatIntervalMs?: number;
   /** Total allocated bytes for this node (capacity). Defaults to 1 GiB */
   capacityBytes?: number;
+  /** Optional durable allocation state path; durable mode requires an explicit capacityBytes. */
+  allocationPath?: string;
   onLifecycleEvent?: (event: StorageNodeLifecycleEvent) => void;
   orphanCleanup?: { enabled?: boolean; gracePeriodMs?: number; intervalMs?: number; batchSize?: number; maxDeletionsPerRun?: number };
 }
@@ -88,6 +91,8 @@ export interface StorageNodeStatusSnapshot {
 
 export interface NodeCapacity {
   allocatedBytes?: number;
+  physicalBytes?: number;
+  usableBytes?: number;
   usedBytes: number;
   availableBytes: number;
   /** @deprecated use allocatedBytes */
@@ -195,6 +200,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   // Draining mode (OPENSTORE-029): when true the node serves reads but
   // rejects new stores so it can be decommissioned without data loss.
   let draining = false;
+  let allocation: CapacityAllocation | undefined;
   const emit = (event: StorageNodeLifecycleEvent): void => {
     try {
       const error = event.error === undefined ? undefined : safeErrorMessage(event.error);
@@ -254,6 +260,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       const entries = await readdir(storageDir);
       let total = 0;
       for (const e of entries) {
+        if (e === ".capacity-allocation.json" || e.startsWith(".capacity-allocation.json.tmp-")) continue;
         try {
           const s = await stat(join(storageDir, e));
           if (s.isFile()) total += s.size;
@@ -267,13 +274,16 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
 
   async function getCapacity(): Promise<NodeCapacity> {
     const used = await getUsedBytes();
+    if (allocation && used > allocation.state().allocationBytes) throw new Error("used bytes exceed persisted allocation");
+    allocation?.updateUsed(used);
     const available = Math.max(0, capacityBytes - used);
-    return { allocatedBytes: capacityBytes, totalBytes: capacityBytes, usedBytes: used, availableBytes: available };
+    const state = allocation?.state();
+    return { allocatedBytes: capacityBytes, totalBytes: capacityBytes, usedBytes: used, availableBytes: available, ...(state ? { physicalBytes: state.physicalBytes, usableBytes: state.usableBytes } : {}) };
   }
   async function getStatusSnapshot(): Promise<StorageNodeStatusSnapshot> {
     const capacity = await getCapacity();
     let pieceCount = 0;
-    try { pieceCount = (await readdir(storageDir)).length; } catch {}
+    try { pieceCount = (await readdir(storageDir)).filter((entry) => entry !== ".capacity-allocation.json" && !entry.startsWith(".capacity-allocation.json.tmp-")).length; } catch {}
     metrics.set("storage_used_bytes", capacity.usedBytes);
     metrics.set("storage_capacity_bytes", capacity.allocatedBytes ?? capacity.totalBytes ?? 0);
     metrics.set("storage_piece_count", pieceCount);
@@ -303,6 +313,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       if (!Number.isInteger(next) || next <= 0) {
         throw new TypeError("capacityBytes must be a positive integer");
       }
+      if (allocation) allocation.setAllocation(next);
       capacityBytes = next;
     },
     isDraining(): boolean {
@@ -342,6 +353,10 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
         nodeIdentity = await loadIdentity(options.identityPassword, options.identityPath as string);
       }
       await mkdir(storageDir, { recursive: true });
+      if (options.allocationPath) {
+        allocation = createCapacityAllocation(storageDir, options.capacityBytes, options.allocationPath);
+        capacityBytes = allocation.state().allocationBytes;
+      }
       await new Promise<void>((resolveListen, rejectListen) => {
         server.once("error", rejectListen);
         server.listen(port, host, () => {
@@ -883,6 +898,7 @@ async function getUsedBytesForDir(dir: string): Promise<number> {
     const entries = await readdir(dir);
     let total = 0;
     for (const e of entries) {
+      if (e === ".capacity-allocation.json" || e.startsWith(".capacity-allocation.json.tmp-")) continue;
       try {
         const s = await stat(join(dir, e));
         if (s.isFile()) total += s.size;
