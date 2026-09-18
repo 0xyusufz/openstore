@@ -1,14 +1,66 @@
 import { createAuthHeaders } from "../../packages/auth/index.js";
-import type {
-  P2PGetResult,
-  P2PHealthResult,
-  P2PNodeAddress,
-  P2PTransport,
-  P2PTransportRequestOptions,
-  P2PProvenanceTransport,
+import {
+  DEFAULT_MAX_RESPONSE_BYTES,
+  type P2PGetResult,
+  type P2PHealthResult,
+  type P2PNodeAddress,
+  type P2PTransport,
+  type P2PTransportRequestOptions,
+  type P2PProvenanceTransport,
 } from "../../packages/p2p/index.js";
 import { Libp2pPieceTransport, Libp2pProvenanceTransport } from "../../packages/p2p/libp2p.js";
-import type { DeleteIfUnclaimedResult, PieceClaim } from "../../packages/provenance/index.js";
+import { validatePieceClaim, type DeleteIfUnclaimedResult, type PieceClaim } from "../../packages/provenance/index.js";
+
+/** Error message used when a node response exceeds the caller-configured bound. */
+export const RESPONSE_TOO_LARGE_MESSAGE = "response body exceeds size bound";
+
+function responseCap(options: P2PTransportRequestOptions): number {
+  const cap = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  if (!Number.isSafeInteger(cap) || cap <= 0) throw new TypeError("maxResponseBytes must be a positive safe integer");
+  return cap;
+}
+
+/**
+ * Read a fetch body with an explicit byte bound. The declared
+ * content-length is checked first so oversized responses fail fast
+ * without buffering; the stream is then drained incrementally so a
+ * lying content-length cannot bypass the cap either.
+ */
+async function readBoundedBody(response: Response, maxBytes: number): Promise<Buffer> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (Number.isSafeInteger(length) && length > maxBytes) {
+      try { await response.body?.cancel(); } catch {}
+      throw new Error(RESPONSE_TOO_LARGE_MESSAGE);
+    }
+  }
+  if (!response.body) return Buffer.from(await response.arrayBuffer());
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        try { await reader.cancel(); } catch {}
+        throw new Error(RESPONSE_TOO_LARGE_MESSAGE);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = Buffer.allocUnsafe(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
 
 export interface HttpTransportIdentity {
   publicKey: Buffer;
@@ -54,7 +106,7 @@ export class HttpStorageTransport implements P2PTransport {
     });
     return {
       status: response.status,
-      bytes: response.status === 200 ? Buffer.from(await response.arrayBuffer()) : undefined,
+      bytes: response.status === 200 ? await readBoundedBody(response, responseCap(options)) : undefined,
     };
   }
 
@@ -151,13 +203,23 @@ export class HttpProvenanceTransport implements P2PProvenanceTransport {
     const response = await this.request(node, "POST", path, Buffer.from(JSON.stringify(value)), options);
     if (response.status < 200 || response.status >= 300) throw new Error(`provenance request returned ${response.status}`);
     const payload = response.body ? JSON.parse(response.body.toString("utf8")) as Record<string, unknown> : {};
-    return payload.claim ?? payload;
+    // A malicious node must not be able to inject malformed claim state:
+    // validate any returned claim before the caller trusts it.
+    if (payload.claim !== undefined && payload.claim !== null) {
+      try {
+        validatePieceClaim(payload.claim as PieceClaim);
+      } catch {
+        throw new Error("provenance claim response is invalid");
+      }
+      return payload.claim;
+    }
+    return payload;
   }
   private async request(node: P2PNodeAddress, method: string, path: string, body: Buffer | undefined, options: P2PTransportRequestOptions): Promise<{ status: number; body?: Buffer }> {
     const headers: Record<string, string> = { ...(body ? { "content-type": "application/json" } : {}) };
     if (this.identity) Object.assign(headers, createAuthHeaders(this.identity, method, path, body));
     const response = await fetch(`${normalize(node.baseUrl)}${path}`, { method, headers, ...(body ? { body: new Uint8Array(body) } : {}), signal: AbortSignal.timeout(options.timeoutMs) });
-    return { status: response.status, body: response.status === 204 ? undefined : Buffer.from(await response.arrayBuffer()) };
+    return { status: response.status, body: response.status === 204 ? undefined : await readBoundedBody(response, responseCap(options)) };
   }
 }
 

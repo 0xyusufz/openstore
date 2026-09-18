@@ -73,6 +73,8 @@ export interface RepairOptions {
   gracePeriodMs?: number;
   maxTargetAttempts?: number;
   maxCasRetries?: number;
+  /** Maximum accepted piece response body per replica. */
+  maxResponseBytes?: number;
   signal?: AbortSignal;
   transport?: P2PTransport;
   identity?: { publicKey: Buffer; privateKey: Buffer };
@@ -218,6 +220,7 @@ async function repairChunk(
       retryBackoffMs: options.retryBackoffMs,
       transport: options.transport,
       identity: options.identity,
+      ...(options.maxResponseBytes === undefined ? {} : { maxResponseBytes: options.maxResponseBytes }),
       validate: (candidate) => {
         if (hashPieceId(candidate) !== chunk.pieceId) {
           throw new RepairError("source-corrupt", fileId, `source bytes do not match piece ${chunk.pieceId}`, chunk.index);
@@ -375,8 +378,12 @@ async function ensureTargetPiece(
     await createClaimOnNode(target, claim, options.identity, { timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
     await operationStore.create(operation);
   }
+  const responseOptions = {
+    timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    ...(options.maxResponseBytes === undefined ? {} : { maxResponseBytes: options.maxResponseBytes }),
+  };
   try {
-    const existing = await transport.getPiece(address, pieceId, { timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
+    const existing = await transport.getPiece(address, pieceId, responseOptions);
     if (existing.status === 200 && existing.bytes) {
       if (hashPieceId(existing.bytes) !== pieceId) {
         throw new RepairError("failed", fileId, `target "${target.id}" contains bytes inconsistent with ${pieceId}`, chunkIndex);
@@ -408,7 +415,7 @@ async function ensureTargetPiece(
     replicationFactor: 1,
   });
   if (report.succeeded.length !== 1) throw new Error(`target "${target.id}" did not acknowledge piece storage`);
-  const readBack = await transport.getPiece(address, pieceId, { timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
+  const readBack = await transport.getPiece(address, pieceId, responseOptions);
   if (readBack.status !== 200 || !readBack.bytes || hashPieceId(readBack.bytes) !== pieceId || !readBack.bytes.equals(bytes)) {
     throw new Error(`target "${target.id}" failed piece read-back verification`);
   }

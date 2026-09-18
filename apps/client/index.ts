@@ -129,6 +129,8 @@ export interface GetPieceOptions {
   validate?: (bytes: Buffer, endpoint: StorageNodeEndpoint) => void | Promise<void>;
   transport?: P2PTransport;
   metrics?: MetricsRegistry;
+  /** Maximum accepted response body per replica (fail-closed bound against oversized-node responses). */
+  maxResponseBytes?: number;
 }
 
 /**
@@ -293,6 +295,10 @@ export async function getPieceFromNodes(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   assertValidTimeout(timeoutMs);
   assertValidRetryOptions(options.retryAttempts, options.retryBackoffMs);
+  if (options.maxResponseBytes !== undefined &&
+      (!Number.isSafeInteger(options.maxResponseBytes) || options.maxResponseBytes <= 0)) {
+    throw new RangeError("maxResponseBytes must be a positive safe integer");
+  }
 
   const problems: string[] = [];
   const transport = options.transport ?? new MixedStorageTransport(new HttpStorageTransport(options.identity));
@@ -300,7 +306,10 @@ export async function getPieceFromNodes(
     const attempts = options.retryAttempts ?? DEFAULT_RETRY_ATTEMPTS;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        const res = await transport.getPiece(toP2PAddress(endpoint), pieceId, { timeoutMs });
+        const res = await transport.getPiece(toP2PAddress(endpoint), pieceId, {
+          timeoutMs,
+          ...(options.maxResponseBytes === undefined ? {} : { maxResponseBytes: options.maxResponseBytes }),
+        });
         if (res.status === 200 && res.bytes) {
           const bytes = res.bytes;
           try {
@@ -315,7 +324,12 @@ export async function getPieceFromNodes(
         problems.push(`${endpoint.id}: unexpected status ${res.status}`);
         if (!isTransientStatus(res.status)) break;
       } catch (err) {
-        problems.push(`${endpoint.id}: ${toErrorMessage(err)}`);
+        const message = toErrorMessage(err);
+        problems.push(`${endpoint.id}: ${message}`);
+        // An oversized response is a property of this replica, not a
+        // transient fault: retrying the same node is pointless, so move on
+        // to the next replica instead of burning the retry budget here.
+        if (/response body exceeds size bound|response body too large/i.test(message)) break;
       }
       if (attempt + 1 < attempts) (options.metrics ?? defaultMetrics).increment("client_retries_total", 1, { operation: "get", result: "error" });
       if (attempt + 1 < attempts) await backoff(options.retryBackoffMs, attempt);

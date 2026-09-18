@@ -72,7 +72,21 @@ export interface PeerDiscoveryOptions {
 
 export interface P2PTransportRequestOptions {
   timeoutMs: number;
+  /**
+   * Maximum accepted response body in bytes. Responses beyond this bound
+   * are rejected before buffering so a malicious node cannot exhaust
+   * client memory with oversized bodies. Defaults to
+   * {@link DEFAULT_MAX_RESPONSE_BYTES}.
+   */
+  maxResponseBytes?: number;
 }
+
+/**
+ * Default cap for a single transport response body. Mirrors the libp2p
+ * stream message bound and comfortably exceeds the largest legitimate
+ * piece (maxPieceBytes plus framing overhead).
+ */
+export const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
 export interface P2PStoreResult {
   status: number;

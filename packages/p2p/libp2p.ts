@@ -6,7 +6,8 @@ import { privateKeyFromRaw } from "@libp2p/crypto/keys";
 import { multiaddr } from "@multiformats/multiaddr";
 import type { Libp2p } from "@libp2p/interface";
 import type { P2PNodeCapabilities, P2PNodeIdentity, P2PTransport, P2PTransportRequestOptions, P2PNodeAddress, P2PGetResult, P2PHealthResult, PeerDiscovery, P2PPeerDescriptor, P2PProvenanceTransport } from "./index.js";
-import type { DeleteIfUnclaimedResult, PieceClaim } from "../provenance/index.js";
+import { DEFAULT_MAX_RESPONSE_BYTES } from "./index.js";
+import { validatePieceClaim, type DeleteIfUnclaimedResult, type PieceClaim } from "../provenance/index.js";
 import { validateP2PPeerDescriptor } from "./index.js";
 import { createDhtServices, DhtPeerDiscovery } from "./dht-discovery.js";
 import { peerIdFromOpenStorePrivateKey, peerIdFromOpenStorePublicKey } from "./identity-binding.js";
@@ -320,7 +321,12 @@ export class Libp2pPieceTransport implements P2PTransport {
 
   async getPiece(node: P2PNodeAddress, pieceId: string, options: P2PTransportRequestOptions): Promise<P2PGetResult> {
     const response = await this.request(node, { op: "get", pieceId }, options);
-    return { status: response.status, bytes: response.data === undefined ? undefined : Buffer.from(response.data, "base64") };
+    if (response.data === undefined) return { status: response.status };
+    const bytes = Buffer.from(response.data, "base64");
+    const cap = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+    if (!Number.isSafeInteger(cap) || cap <= 0) throw new TypeError("maxResponseBytes must be a positive safe integer");
+    if (bytes.length > cap) throw new Error("response body exceeds size bound");
+    return { status: response.status, bytes };
   }
 
   async deletePiece(node: P2PNodeAddress, pieceId: string, options: P2PTransportRequestOptions): Promise<{ status: number }> {
@@ -401,6 +407,14 @@ export class Libp2pProvenanceTransport implements P2PProvenanceTransport {
       void stream.close();
       const response = await readMessage<{ claim?: PieceClaim; result?: DeleteIfUnclaimedResult; status?: number; error?: string }>(stream as AsyncIterable<unknown>);
       if (response.status !== undefined && response.status >= 400) throw new Error(response.error ?? `provenance request returned ${response.status}`);
+      // A malicious node must not be able to inject malformed claim state.
+      if (response.claim !== undefined && response.claim !== null) {
+        try {
+          validatePieceClaim(response.claim);
+        } catch {
+          throw new Error("provenance claim response is invalid");
+        }
+      }
       return response;
     } finally {
       await local.stop();

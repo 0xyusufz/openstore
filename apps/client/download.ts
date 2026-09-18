@@ -52,6 +52,8 @@ export interface DownloadOptions {
   identity?: { publicKey: Buffer; privateKey: Buffer };
   metrics?: MetricsRegistry;
   events?: EventStore;
+  /** Maximum accepted piece response body per replica. */
+  maxResponseBytes?: number;
 }
 
 /**
@@ -120,6 +122,7 @@ export async function downloadBuffer(
             transport: options.transport,
             identity: options.identity,
             metrics: options.metrics,
+            ...(options.maxResponseBytes === undefined ? {} : { maxResponseBytes: options.maxResponseBytes }),
           });
           bytes = got.bytes;
         } catch (err) {
