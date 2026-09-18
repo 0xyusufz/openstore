@@ -228,4 +228,104 @@ describe("repair scheduler (049A)", () => {
     await scheduler.runOnce();
     expect(events.some((event) => event.type === "repair.node-recovered")).toBe(true);
   });
+
+  it("bounds repeated failures permanently", async () => {
+    const state = await setup();
+    let calls = 0;
+    const scheduler = createRepairScheduler({
+      manifestStore: state.store,
+      coordinator: coordinator([state.a, state.c]),
+      repair: async (fileId, options) => {
+        calls += 1;
+        throw new RepairError("target-unavailable", fileId, "target unavailable", options.chunkIndex);
+      },
+      options: { retryBackoffMs: 0, maxRetryRounds: 1 },
+    });
+    for (let i = 0; i < 6; i += 1) await scheduler.runOnce();
+    expect(calls).toBe(2);
+    expect(scheduler.status.failedCounts["target-unavailable"]).toBe(2);
+  });
+
+  it("does not invoke repair with stale or unavailable coordinator discovery", async () => {
+    const state = await setup();
+    let calls = 0;
+    const scheduler = createRepairScheduler({
+      manifestStore: state.store,
+      coordinator: {
+        ...coordinator([state.a, state.c]),
+        discovery: {
+          version: 1,
+          freshness: "stale",
+          source: "coordinator",
+          canRepair: false,
+          canPlaceNew: false,
+          endpointCount: 2,
+          ageMs: 100,
+          canReadExisting: true,
+          canDeleteExisting: true,
+          requiresFreshForPlacement: true,
+        },
+      },
+      repair: async () => { calls += 1; return successReport("scheduler-file", 0, "piece"); },
+      options: { retryBackoffMs: 0, maxRetryRounds: 1 },
+    },
+    );
+    await scheduler.runOnce();
+    expect(calls).toBe(0);
+    expect(scheduler.status.lastSchedulerErrorClassification).toBe("coordinator-stale");
+  });
+
+  it("keeps manifest unchanged after exhausted repair failures", async () => {
+    const state = await setup();
+    const before = JSON.stringify(await state.store.load("scheduler-file"));
+    const scheduler = createRepairScheduler({
+      manifestStore: state.store,
+      coordinator: coordinator([state.a, state.c]),
+      repair: async (fileId, options) => {
+        throw new RepairError("insufficient-capacity", fileId, "capacity unavailable", options.chunkIndex);
+      },
+      options: { retryBackoffMs: 0, maxRetryRounds: 1 },
+    });
+    await scheduler.runOnce();
+    await scheduler.runOnce();
+    expect(JSON.stringify(await state.store.load("scheduler-file"))).toBe(before);
+    expect(scheduler.status.failedCounts["insufficient-capacity"]).toBe(2);
+  });
+
+  it("allows a bounded failed attempt to succeed on retry", async () => {
+    const state = await setup();
+    let calls = 0;
+    const scheduler = createRepairScheduler({
+      manifestStore: state.store,
+      coordinator: coordinator([state.a, state.c]),
+      repair: async (fileId, options) => {
+        calls += 1;
+        if (calls === 1) throw new RepairError("target-unavailable", fileId, "temporary target failure", options.chunkIndex);
+        return successReport(fileId, options.chunkIndex!, hashPieceId(Buffer.from("piece-0")));
+      },
+      options: { retryBackoffMs: 0, maxRetryRounds: 2 },
+    });
+    await scheduler.runOnce();
+    await scheduler.runOnce();
+    expect(calls).toBe(2);
+    expect(scheduler.status.completedCount).toBe(1);
+  });
+
+  it("coalesces concurrent scheduler runs and sanitizes status", async () => {
+    const state = await setup();
+    let calls = 0;
+    const scheduler = createRepairScheduler({
+      manifestStore: state.store,
+      coordinator: coordinator([state.a, state.c]),
+      repair: async (fileId, options) => {
+        calls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return successReport(fileId, options.chunkIndex!, hashPieceId(Buffer.from("piece-0")));
+      },
+      options: { retryBackoffMs: 0 },
+    });
+    await Promise.all([scheduler.runOnce(), scheduler.runOnce(), scheduler.runOnce()]);
+    expect(calls).toBe(1);
+    expect(JSON.stringify(scheduler.status)).not.toMatch(/plaintext|dek|private|token|password/i);
+  });
 });

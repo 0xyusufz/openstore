@@ -138,6 +138,8 @@ export function createRepairScheduler(input: RepairSchedulerOptions): RepairSche
   const inFlight = new Map<string, Candidate>();
   const observing = new Set<string>();
   const cooldowns = new Map<string, number>();
+  const exhausted = new Set<string>();
+  let discoverySignature: string | undefined;
   const fileActive = new Map<string, number>();
   const statusValue: RepairSchedulerStatus = {
     state,
@@ -201,6 +203,26 @@ export function createRepairScheduler(input: RepairSchedulerOptions): RepairSche
       syncStatus();
       return;
     }
+    const discovery = input.coordinator.discovery;
+    if (discovery && !discovery.canRepair) {
+      const classification: RepairError["classification"] =
+        discovery.freshness === "stale" || discovery.freshness === "cached"
+          ? "coordinator-stale"
+          : "coordinator-unavailable";
+      statusValue.lastSchedulerErrorClassification = classification;
+      for (const candidate of pending.values()) scheduleFailure(candidate, classification);
+      syncStatus();
+      return;
+    }
+    const nextSignature = available
+      .map((endpoint) => `${endpoint.id}:${endpoint.lifecycle ?? "sharing"}:${endpoint.capacity?.availableBytes ?? -1}`)
+      .sort()
+      .join("|");
+    if (discoverySignature !== undefined && discoverySignature !== nextSignature) {
+      exhausted.clear();
+      cooldowns.clear();
+    }
+    discoverySignature = nextSignature;
     const availableIds = new Set(available.map((endpoint) => endpoint.id));
     for (const candidate of [...pending.values(), ...inFlight.values()]) {
       if (availableIds.has(candidate.lostNodeId)) {
@@ -209,6 +231,7 @@ export function createRepairScheduler(input: RepairSchedulerOptions): RepairSche
         inFlight.delete(candidate.key);
         observing.delete(candidate.key);
         cooldowns.delete(candidate.key);
+        exhausted.delete(candidate.key);
         emit({ type: "repair.node-recovered", lifecycle: "node-recovered", ...candidateFields(candidate) });
       }
     }
@@ -229,8 +252,9 @@ export function createRepairScheduler(input: RepairSchedulerOptions): RepairSche
           const key = `${manifest.fileId}:${chunk.index}:${chunk.pieceId}:${lostNodeId}`;
           if (pending.has(key) || inFlight.has(key)) continue;
           const cooldownUntil = cooldowns.get(key);
+          if (exhausted.has(key)) continue;
           if (cooldownUntil !== undefined && cooldownUntil > Date.now()) continue;
-          cooldowns.delete(key);
+          if (cooldownUntil !== undefined) cooldowns.delete(key);
           const candidate: Candidate = {
             key,
             fileId: manifest.fileId,
@@ -305,6 +329,7 @@ export function createRepairScheduler(input: RepairSchedulerOptions): RepairSche
     statusValue.lastSchedulerErrorClassification = classification;
     candidate.retryCount += 1;
     if (candidate.retryCount > maxRetryRounds || state === "stopped") {
+      exhausted.add(candidate.key);
       cooldowns.set(candidate.key, Date.now() + maxRetryBackoffMs);
     } else {
       const delay = Math.min(maxRetryBackoffMs, retryBackoffMs * (2 ** Math.max(0, candidate.retryCount - 1)));
