@@ -37,7 +37,7 @@ if [ -n "$CONFIG_ARGS" ]; then
   --listen "/ip4/0.0.0.0/tcp/${OPENSTORE_NODE_INTERNAL_PORT:-4101}" \
   --advertise "$OPENSTORE_NODE_ADVERTISED_ADDR" \
   --capacity-bytes "${OPENSTORE_NODE_CAPACITY_BYTES:-1073741824}" \
-  --max-piece-bytes "${OPENSTORE_NODE_MAX_PIECE_BYTES:-4194304}" \
+  --max-piece-bytes "${OPENSTORE_NODE_MAX_PIECE_BYTES:-8388608}" \
   --coordinator-url "${OPENSTORE_COORDINATOR_URL:-http://coordinator:4190}" \
   --coordinator-token-env OPENSTORE_COORDINATOR_TOKEN \
   --readiness-file "${OPENSTORE_NODE_READINESS_FILE:-/tmp/openstore-node-ready}" \
@@ -51,7 +51,7 @@ exec gosu openstore node /app/dist/apps/storage-node/libp2p-cli.js \
   --listen "/ip4/0.0.0.0/tcp/${OPENSTORE_NODE_INTERNAL_PORT:-4101}" \
   --advertise "$OPENSTORE_NODE_ADVERTISED_ADDR" \
   --capacity-bytes "${OPENSTORE_NODE_CAPACITY_BYTES:-1073741824}" \
-  --max-piece-bytes "${OPENSTORE_NODE_MAX_PIECE_BYTES:-4194304}" \
+  --max-piece-bytes "${OPENSTORE_NODE_MAX_PIECE_BYTES:-8388608}" \
   --coordinator-url "${OPENSTORE_COORDINATOR_URL:-http://coordinator:4190}" \
   --coordinator-token-env OPENSTORE_COORDINATOR_TOKEN \
   --readiness-file "${OPENSTORE_NODE_READINESS_FILE:-/tmp/openstore-node-ready}" \

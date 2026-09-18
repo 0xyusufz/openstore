@@ -35,6 +35,12 @@ Nodes advertise `/dns4/node-N/tcp/410N`, which is reachable from other
 containers on `openstore-net`; `127.0.0.1` is used only for host-published
 operator ports.
 
+The node image accepts up to 8 MiB opaque pieces by default. This accommodates
+the existing fixed 4 MiB plaintext chunks after AES-GCM authentication data,
+the JSON encrypted-piece envelope, and transport framing. The limit applies to
+stored ciphertext pieces, not plaintext input; encryption and integrity checks
+remain unchanged.
+
 For the isolated 057A testnet, use the dedicated port range 4290/4201–4203
 in the environment file so it cannot disturb the legacy 4190 testnet:
 

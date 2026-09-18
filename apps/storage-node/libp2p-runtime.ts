@@ -41,6 +41,9 @@ export interface Libp2pStorageNodeRuntimeConfig {
   orphanCleanup?: { enabled?: boolean; gracePeriodMs?: number; intervalMs?: number; batchSize?: number; maxDeletionsPerRun?: number };
 }
 
+/** Maximum opaque piece size for the fixed 4 MiB plaintext chunk format. */
+export const DEFAULT_MAX_PIECE_BYTES = 8 * 1024 * 1024;
+
 export type Libp2pStorageNodeLifecycleState =
   | "starting" | "registered" | "coordinator-unreachable" | "reconnecting" | "stopped";
 export interface Libp2pStorageNodeLifecycleEvent {
@@ -113,7 +116,7 @@ export async function createLibp2pStorageNodeRuntime(
   const storageDir = resolve(input.storageDir);
   await mkdir(storageDir, { recursive: true });
   const capacity = input.capacityBytes ?? 1 * 1024 * 1024 * 1024;
-  const store = createPieceStore(storageDir, capacity, input.maxPieceBytes);
+  const store = createPieceStore(storageDir, capacity, input.maxPieceBytes ?? DEFAULT_MAX_PIECE_BYTES);
   const provenance = createPieceProvenanceStore(join(storageDir, ".provenance"), input.orphanCleanup?.gracePeriodMs);
   let orphanScanner: OrphanScanner | undefined;
   if (input.orphanCleanup?.enabled) {
@@ -131,7 +134,7 @@ export async function createLibp2pStorageNodeRuntime(
     applicationIdentity: { publicKey: identity.publicKey.toString("base64") },
     applicationPrivateKey: identity.privateKey,
     listenAddrs: input.listenAddrs,
-    maxPieceBytes: input.maxPieceBytes,
+    maxPieceBytes: input.maxPieceBytes ?? DEFAULT_MAX_PIECE_BYTES,
     allocatedBytes: capacity,
     availableBytes: capacity,
     discovery,
