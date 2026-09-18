@@ -18,6 +18,7 @@ import { createPieceProvenanceStore } from "./provenance-store.js";
 import { createOrphanScanner, type OrphanScanner } from "./orphan-scanner.js";
 import { safeErrorMessage } from "./safe-error.js";
 import { createCapacityAllocation, type CapacityAllocation } from "./capacity-allocation.js";
+import { createProviderAllocationLifecycle, type ProviderAllocationLifecycle, type ProviderAllocationLifecycleSnapshot } from "./provider-allocation-lifecycle.js";
 
 export interface Libp2pStorageNodeRuntimeConfig {
   storageDir: string;
@@ -29,6 +30,7 @@ export interface Libp2pStorageNodeRuntimeConfig {
   capacityBytes?: number;
   /** Enables durable allocation state when set. */
   allocationPath?: string;
+  lifecyclePath?: string;
   maxPieceBytes?: number;
   discoveryRefreshIntervalMs?: number;
   coordinatorUrl?: string;
@@ -65,6 +67,12 @@ export interface Libp2pStorageNodeRuntime {
   readonly state: Libp2pStorageNodeLifecycleState;
   readonly status: () => Promise<Libp2pStorageNodeStatusSnapshot>;
   readonly statusSnapshot: () => Promise<Libp2pStorageNodeStatusSnapshot>;
+  readonly allocationLifecycle?: ProviderAllocationLifecycle;
+  increaseAllocation?(bytes: number): ReturnType<CapacityAllocation["setAllocation"]>;
+  decreaseAllocation?(bytes: number): ReturnType<CapacityAllocation["setAllocation"]>;
+  stopSharing?(): ProviderAllocationLifecycleSnapshot;
+  startSharing?(): ProviderAllocationLifecycleSnapshot;
+  releaseAllocation?(): Promise<ProviderAllocationLifecycleSnapshot>;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -83,6 +91,7 @@ export interface Libp2pStorageNodeStatusSnapshot {
   nextRetryAt?: number;
   shuttingDown: boolean;
   capacity: { physicalBytes?: number; usableBytes?: number; allocatedBytes: number; usedBytes: number; availableBytes: number };
+  lifecycle?: ProviderAllocationLifecycleSnapshot;
 }
 
 export function validateLibp2pStorageNodeRuntimeConfig(
@@ -105,6 +114,7 @@ export function validateLibp2pStorageNodeRuntimeConfig(
   }
   if (value.coordinatorToken !== undefined && (typeof value.coordinatorToken !== "string" || value.coordinatorToken.length === 0)) throw new TypeError("coordinatorToken must be a non-empty string");
   if (value.allocationPath !== undefined && (typeof value.allocationPath !== "string" || value.allocationPath.length === 0)) throw new TypeError("allocationPath must be a non-empty string");
+  if (value.lifecyclePath !== undefined && (typeof value.lifecyclePath !== "string" || value.lifecyclePath.length === 0)) throw new TypeError("lifecyclePath must be a non-empty string");
   if (value.readinessFile !== undefined && (typeof value.readinessFile !== "string" || value.readinessFile.length === 0)) throw new TypeError("readinessFile must be a non-empty string");
   for (const field of ["capacityBytes", "maxPieceBytes", "discoveryRefreshIntervalMs", "heartbeatIntervalMs", "coordinatorHeartbeatIntervalMs", "coordinatorRetryAttempts", "coordinatorRetryBackoffMs", "coordinatorRetryMaxBackoffMs"]) {
     const n = value[field];
@@ -124,7 +134,9 @@ export async function createLibp2pStorageNodeRuntime(
     allocation = createCapacityAllocation(storageDir, input.capacityBytes, resolve(input.allocationPath));
   }
   const initialCapacity = allocation?.state().allocationBytes ?? input.capacityBytes ?? 1 * 1024 * 1024 * 1024;
-  const store = createPieceStore(storageDir, initialCapacity, input.maxPieceBytes ?? DEFAULT_MAX_PIECE_BYTES, allocation, allocation ? basename(allocation.path) : undefined);
+  const lifecycle = allocation ? createProviderAllocationLifecycle(resolve(input.lifecyclePath ?? join(storageDir, ".provider-lifecycle.json"))) : undefined;
+  if (lifecycle?.inspect().state === "released") throw new Error("provider allocation is released");
+  const store = createPieceStore(storageDir, initialCapacity, input.maxPieceBytes ?? DEFAULT_MAX_PIECE_BYTES, allocation, allocation ? basename(allocation.path) : undefined, lifecycle ? basename(lifecycle.path) : undefined, lifecycle);
   if (allocation) allocation.updateUsed(await store.usedBytes());
   const provenance = createPieceProvenanceStore(join(storageDir, ".provenance"), input.orphanCleanup?.gracePeriodMs);
   let orphanScanner: OrphanScanner | undefined;
@@ -193,7 +205,7 @@ export async function createLibp2pStorageNodeRuntime(
   };
   const status = async (): Promise<Libp2pStorageNodeStatusSnapshot> => {
     const capacity = await capacitySnapshot();
-    return { peerId: node.peerId, state, coordinatorConfigured: Boolean(coordinator), coordinatorConnected, registered, registrationStatus, lastSuccessfulRegistrationAt, lastSuccessfulHeartbeatAt, lastFailureClassification, retryAttempt, retryCount, nextRetryAt, shuttingDown: stopping, capacity };
+    return { peerId: node.peerId, state, coordinatorConfigured: Boolean(coordinator), coordinatorConnected, registered, registrationStatus, lastSuccessfulRegistrationAt, lastSuccessfulHeartbeatAt, lastFailureClassification, retryAttempt, retryCount, nextRetryAt, shuttingDown: stopping, capacity, ...(lifecycle ? { lifecycle: lifecycle.inspect() } : {}) };
   };
   const emit = (next: Libp2pStorageNodeLifecycleState, error?: unknown, eventType?: string, attempt?: number) => {
     const previousState = state;
@@ -341,6 +353,14 @@ export async function createLibp2pStorageNodeRuntime(
     get state() { return state; },
     status,
     statusSnapshot: status,
+    ...(lifecycle ? {
+      allocationLifecycle: lifecycle,
+      increaseAllocation: (bytes: number) => allocation!.setAllocation(bytes),
+      decreaseAllocation: (bytes: number) => allocation!.setAllocation(bytes),
+      stopSharing: () => lifecycle.stopSharing(),
+      startSharing: () => lifecycle.startSharing(),
+      releaseAllocation: async () => lifecycle.release(await store.usedBytes(), allocation!.state().reservedBytes),
+    } : {}),
     start() { return startPromise ??= start().finally(() => { startPromise = undefined; }); },
     stop() { return stopPromise ??= stop().finally(() => { stopPromise = undefined; }); },
   };
@@ -350,7 +370,7 @@ function safeLifecycleError(error: unknown): string {
   return safeErrorMessage(error);
 }
 
-function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number, allocation?: CapacityAllocation, allocationFileName?: string) {
+function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number, allocation?: CapacityAllocation, allocationFileName?: string, lifecycleFileName?: string, lifecycle?: ProviderAllocationLifecycle) {
   const pathFor = (id: string) => {
     if (!isValidPieceId(id)) throw new Error("invalid piece id");
     return join(dir, id);
@@ -358,7 +378,11 @@ function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number,
   const used = async () => {
     let total = 0;
     for (const name of await readdir(dir)) {
-      if (name === allocationFileName || name === ".capacity-allocation.json" || name.startsWith(".capacity-allocation.json.tmp-")) continue;
+      if (name === allocationFileName || name === lifecycleFileName ||
+          name === ".capacity-allocation.json" || name.startsWith(".capacity-allocation.json.tmp-") ||
+          (allocationFileName !== undefined && name.startsWith(`${allocationFileName}.tmp-`)) ||
+          name === ".provider-lifecycle.json" || name.startsWith(".provider-lifecycle.json.tmp-") ||
+          (lifecycleFileName !== undefined && name.startsWith(`${lifecycleFileName}.tmp-`))) continue;
       try { const item = await stat(join(dir, name)); if (item.isFile()) total += item.size; } catch { /* concurrent deletion */ }
     }
     return total;
@@ -368,6 +392,7 @@ function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number,
       return used();
     },
     async store(id: string, data: Buffer) {
+      if (lifecycle && lifecycle.inspect().state !== "sharing") return 503;
       if (maxPieceBytes !== undefined && data.length > maxPieceBytes) return 413;
       const path = pathFor(id);
       let previous = 0;

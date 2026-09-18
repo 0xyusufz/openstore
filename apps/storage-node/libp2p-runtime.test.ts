@@ -178,6 +178,42 @@ describe("libp2p storage-node runtime", () => {
     })).rejects.toThrow(/corrupt/i);
     await rm(dir, { recursive: true, force: true });
   });
+
+  it("drains durably, rejects new stores, serves reads, and releases after deletion", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openstore-059a-runtime-"));
+    const keystore = join(dir, "identity.json");
+    const storageDir = join(dir, "pieces");
+    await saveIdentity(createIdentity(), "test-password", keystore);
+    const config = {
+      storageDir, allocationPath: join(storageDir, "allocation.json"), capacityBytes: 4096,
+      identityPath: keystore, identityPassword: "test-password", listenAddrs: ["/ip4/127.0.0.1/tcp/0"],
+    };
+    const first = await createLibp2pStorageNodeRuntime(config);
+    const endpoint = { nodeId: first.node.peerId, baseUrl: `libp2p://${first.node.peerId}`, multiaddr: first.node.listenAddrs[0], identityBinding: first.node.peerId, identity: first.node.applicationIdentity };
+    const transport = new Libp2pPieceTransport();
+    try {
+      await first.start();
+      expect((await transport.storePiece(endpoint, "kept", Buffer.from("opaque"), { timeoutMs: 5_000 })).status).toBe(201);
+      expect(first.stopSharing?.().state).toBe("draining");
+      expect((await transport.storePiece(endpoint, "new", Buffer.from("opaque"), { timeoutMs: 5_000 })).status).toBe(503);
+      expect((await transport.getPiece(endpoint, "kept", { timeoutMs: 5_000 })).bytes?.toString()).toBe("opaque");
+      await first.stop();
+    } finally {
+      if (first.state !== "stopped") await first.stop();
+    }
+    const second = await createLibp2pStorageNodeRuntime({ ...config, capacityBytes: undefined });
+    expect((await second.statusSnapshot()).lifecycle?.state).toBe("draining");
+    await second.start();
+    try {
+      const secondEndpoint = { ...endpoint, multiaddr: second.node.listenAddrs[0] };
+      expect((await transport.getPiece(secondEndpoint, "kept", { timeoutMs: 5_000 })).bytes?.toString()).toBe("opaque");
+      expect((await transport.deletePiece(secondEndpoint, "kept", { timeoutMs: 5_000 })).status).toBe(204);
+      expect((await second.releaseAllocation?.())?.state).toBe("released");
+    } finally {
+      await second.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 async function waitForOutput(child: ChildProcess, text: string): Promise<void> {
