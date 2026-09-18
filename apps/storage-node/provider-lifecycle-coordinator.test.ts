@@ -59,7 +59,76 @@ describe("059B provider lifecycle coordinator propagation", () => {
       await rm(dir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("resumes only after durable capacity revalidation and persists sharing across restart", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openstore-060a-resume-"));
+    const identity = createIdentity();
+    const keystore = join(dir, "identity.json");
+    const storageDir = join(dir, "pieces");
+    await saveIdentity(identity, "test-password", keystore);
+    const coordinator = createRegistryCoordinator({ registry: createRegistry(), token: "060a-token" });
+    const port = await coordinator.listen(0);
+    const config = {
+      storageDir, allocationPath: join(storageDir, "allocation.json"), lifecyclePath: join(storageDir, "lifecycle.json"),
+      capacityBytes: 4096, identityPath: keystore, identityPassword: "test-password",
+      listenAddrs: ["/ip4/127.0.0.1/tcp/0"], coordinatorUrl: `http://127.0.0.1:${port}`,
+      coordinatorToken: "060a-token", coordinatorHeartbeatIntervalMs: 100,
+    };
+    const first = await createLibp2pStorageNodeRuntime(config);
+    try {
+      await first.start();
+      expect(first.stopSharing?.().state).toBe("draining");
+      expect((await waitForNode(clientFor(port), first.node.peerId, "draining")).lifecycle).toBe("draining");
+      expect(first.resumeSharing?.().state).toBe("sharing");
+      expect((await waitForNode(clientFor(port), first.node.peerId, "sharing")).lifecycle).toBe("sharing");
+      expect((await first.statusSnapshot()).lifecycle?.state).toBe("sharing");
+      await first.stop();
+    } finally {
+      if (first.state !== "stopped") await first.stop();
+    }
+    const restarted = await createLibp2pStorageNodeRuntime({ ...config, capacityBytes: undefined });
+    try {
+      expect((await restarted.statusSnapshot()).lifecycle?.state).toBe("sharing");
+      await restarted.start();
+      expect((await waitForNode(clientFor(port), restarted.node.peerId, "sharing")).lifecycle).toBe("sharing");
+      expect(() => restarted.resumeSharing?.()).toThrow(/transition/i);
+    } finally {
+      await restarted.stop();
+      await coordinator.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("keeps released state after runtime restart and rejects resume", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openstore-060a-released-"));
+    const keystore = join(dir, "identity.json");
+    const storageDir = join(dir, "pieces");
+    await saveIdentity(createIdentity(), "test-password", keystore);
+    const config = {
+      storageDir, allocationPath: join(storageDir, "allocation.json"), lifecyclePath: join(storageDir, "lifecycle.json"),
+      capacityBytes: 4096, identityPath: keystore, identityPassword: "test-password",
+      listenAddrs: ["/ip4/127.0.0.1/tcp/0"],
+    };
+    const first = await createLibp2pStorageNodeRuntime(config);
+    expect(first.stopSharing?.().state).toBe("draining");
+    expect((await first.releaseAllocation?.())?.state).toBe("released");
+    await first.stop();
+    const restarted = await createLibp2pStorageNodeRuntime({ ...config, capacityBytes: undefined });
+    try {
+      expect((await restarted.statusSnapshot()).lifecycle?.state).toBe("released");
+      expect(() => restarted.resumeSharing?.()).toThrow(/released|transition/i);
+      await restarted.start();
+      expect((await restarted.statusSnapshot()).lifecycle?.state).toBe("released");
+    } finally {
+      await restarted.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
+
+function clientFor(port: number) {
+  return createRegistryClient({ baseUrl: `http://127.0.0.1:${port}`, token: "060a-token" });
+}
 
 async function waitForNode(client: ReturnType<typeof createRegistryClient>, nodeId: string, lifecycle: "sharing" | "draining" | "released") {
   const deadline = Date.now() + 10_000;

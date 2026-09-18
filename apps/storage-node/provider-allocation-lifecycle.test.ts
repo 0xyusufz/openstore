@@ -29,4 +29,19 @@ describe("provider allocation lifecycle", () => {
       expect(() => createProviderAllocationLifecycle(path)).toThrow(/invalid/i);
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
+
+  it("allows only draining to resume and keeps release irreversible", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openstore-060a-transition-"));
+    const path = join(dir, "lifecycle.json");
+    try {
+      const lifecycle = createProviderAllocationLifecycle(path);
+      expect(() => lifecycle.startSharing()).toThrow(/transition/i);
+      expect(lifecycle.stopSharing().state).toBe("draining");
+      expect(lifecycle.startSharing().state).toBe("sharing");
+      expect(() => lifecycle.startSharing()).toThrow(/transition/i);
+      expect(lifecycle.stopSharing().state).toBe("draining");
+      expect(lifecycle.release(0, 0).state).toBe("released");
+      expect(() => lifecycle.startSharing()).toThrow(/released|transition/i);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
 });

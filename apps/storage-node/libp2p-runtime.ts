@@ -72,6 +72,7 @@ export interface Libp2pStorageNodeRuntime {
   decreaseAllocation?(bytes: number): ReturnType<CapacityAllocation["setAllocation"]>;
   stopSharing?(): ProviderAllocationLifecycleSnapshot;
   startSharing?(): ProviderAllocationLifecycleSnapshot;
+  resumeSharing?(): ProviderAllocationLifecycleSnapshot;
   releaseAllocation?(): Promise<ProviderAllocationLifecycleSnapshot>;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -135,7 +136,6 @@ export async function createLibp2pStorageNodeRuntime(
   }
   const initialCapacity = allocation?.state().allocationBytes ?? input.capacityBytes ?? 1 * 1024 * 1024 * 1024;
   const lifecycle = allocation ? createProviderAllocationLifecycle(resolve(input.lifecyclePath ?? join(storageDir, ".provider-lifecycle.json"))) : undefined;
-  if (lifecycle?.inspect().state === "released") throw new Error("provider allocation is released");
   const store = createPieceStore(storageDir, initialCapacity, input.maxPieceBytes ?? DEFAULT_MAX_PIECE_BYTES, allocation, allocation ? basename(allocation.path) : undefined, lifecycle ? basename(lifecycle.path) : undefined, lifecycle);
   if (allocation) allocation.updateUsed(await store.usedBytes());
   const provenance = createPieceProvenanceStore(join(storageDir, ".provenance"), input.orphanCleanup?.gracePeriodMs);
@@ -359,7 +359,16 @@ export async function createLibp2pStorageNodeRuntime(
       increaseAllocation: (bytes: number) => allocation!.setAllocation(bytes),
       decreaseAllocation: (bytes: number) => allocation!.setAllocation(bytes),
       stopSharing: () => lifecycle.stopSharing(),
-      startSharing: () => lifecycle.startSharing(),
+      startSharing: () => {
+        const current = allocation!.state();
+        allocation!.setAllocation(current.allocationBytes, current.usedBytes);
+        return lifecycle.startSharing();
+      },
+      resumeSharing: () => {
+        const current = allocation!.state();
+        allocation!.setAllocation(current.allocationBytes, current.usedBytes);
+        return lifecycle.startSharing();
+      },
       releaseAllocation: async () => lifecycle.release(await store.usedBytes(), allocation!.state().reservedBytes),
     } : {}),
     start() { return startPromise ??= start().finally(() => { startPromise = undefined; }); },
