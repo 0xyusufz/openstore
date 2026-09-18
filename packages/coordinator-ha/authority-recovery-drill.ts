@@ -1,5 +1,5 @@
-import { closeSync, chmodSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { closeSync, chmodSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { EventStore } from "../events/index.js";
 import type { ConditionEvaluator } from "../conditions/index.js";
 import type { MetricsRegistry } from "../metrics/index.js";
@@ -192,6 +192,15 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
 
   const readPersisted = (): void => {
     if (!options.persistencePath) return;
+    // Sweep stale `<file>.tmp-*` artifacts from interrupted persists so they
+    // cannot accumulate unboundedly. The loader only reads the final path.
+    try {
+      for (const entry of readdirSync(dirname(options.persistencePath))) {
+        if (entry.startsWith(`${basename(options.persistencePath)}.tmp-`) || entry.startsWith(`${basename(options.persistencePath)}.tmp.`)) {
+          try { unlinkSync(join(dirname(options.persistencePath), entry)); } catch {}
+        }
+      }
+    } catch {}
     const exists = existsSync(options.persistencePath);
     if (!exists) {
       persistenceState = "missing";
@@ -227,9 +236,9 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
 
   const persist = (record: RecoveryDrillRecord): void => {
     if (!options.persistencePath) return;
+    const temp = `${options.persistencePath}.tmp-${process.pid}-${Date.now()}`;
     try {
       mkdirSync(dirname(options.persistencePath), { recursive: true, mode: 0o700 });
-      const temp = `${options.persistencePath}.tmp-${process.pid}-${Date.now()}`;
       const fd = openSync(temp, "wx", 0o600);
       try { writeFileSync(fd, `${JSON.stringify(record)}\n`, "utf8"); fsyncSync(fd); }
       finally { closeSync(fd); }
@@ -242,6 +251,7 @@ export function createAuthorityRecoveryDrill(options: AuthorityRecoveryDrillOpti
       persistenceState = "valid";
       persistedHealthy = true;
     } catch {
+      try { unlinkSync(temp); } catch {}
       persistenceState = "corrupt";
       persistedHealthy = false;
       throw new Error("recovery drill persistence is unavailable");

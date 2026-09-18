@@ -1,5 +1,5 @@
-import { closeSync, chmodSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { closeSync, chmodSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { createCoordinatorInstanceIdentity, type CoordinatorInstanceIdentity } from "./index.js";
 import { createSignedAuthorityGrant, type SignedAuthorityGrant } from "./authority-grant.js";
 import { type AuthorityGrant } from "./authority-contract.js";
@@ -115,6 +115,15 @@ export function createAuthorityIssuer(options: AuthorityIssuerOptions): Authorit
   };
   let persistenceHealthy = true;
   let persistenceState: "missing" | "valid" | "corrupt" = "missing";
+  // Sweep stale `<file>.tmp-*` artifacts from interrupted persists so they
+  // cannot accumulate unboundedly. The loader only reads the final path.
+  try {
+    for (const entry of readdirSync(dirname(options.persistencePath))) {
+      if (entry.startsWith(`${basename(options.persistencePath)}.tmp-`) || entry.startsWith(`${basename(options.persistencePath)}.tmp.`)) {
+        try { unlinkSync(join(dirname(options.persistencePath), entry)); } catch {}
+      }
+    }
+  } catch {}
   try {
     const parsed = JSON.parse(readFileSync(options.persistencePath, "utf8")) as IssuerState;
     if (parsed.version !== 1 || parsed.issuerInstanceId !== issuer.instanceId || parsed.issuerPublicKey !== issuer.publicKey ||

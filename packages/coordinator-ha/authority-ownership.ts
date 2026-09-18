@@ -1,5 +1,5 @@
-import { closeSync, chmodSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { closeSync, chmodSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { createCoordinatorInstanceIdentity, type CoordinatorInstanceIdentity } from "./index.js";
 import { signMessage, verifyMessage } from "../identity/index.js";
 import type { SignedAuthorityGrant } from "./authority-grant.js";
@@ -90,6 +90,16 @@ export function createAuthorityOwnershipService(options: AuthorityOwnershipOptio
   let record: AuthorityOwnershipRecord = Object.freeze({ version: 1, state: "non-authoritative", authorityEpoch: 0, conflict: false });
   let healthy = true;
   let persistenceState: "missing" | "valid" | "corrupt" = "missing";
+  // Crash between temp write and rename leaves `<file>.tmp-<pid>-<ts>` behind.
+  // The loader only reads the final path, but without a sweep the stale temps
+  // would accumulate unboundedly across repeated interruptions. Best-effort.
+  try {
+    for (const entry of readdirSync(dirname(options.persistencePath))) {
+      if (entry.startsWith(`${basename(options.persistencePath)}.tmp-`) || entry.startsWith(`${basename(options.persistencePath)}.tmp.`)) {
+        try { unlinkSync(join(dirname(options.persistencePath), entry)); } catch {}
+      }
+    }
+  } catch {}
   try {
     const parsed = JSON.parse(readFileSync(options.persistencePath, "utf8")) as AuthorityOwnershipRecord;
     if (parsed.version !== 1 || !["non-authoritative", "authoritative", "released", "fenced"].includes(parsed.state) ||

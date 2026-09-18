@@ -14,12 +14,13 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from "fs";
-import { dirname } from "path";
+import { basename, dirname, join } from "path";
 import { signMessage, verifyMessage } from "../identity/index.js";
 import type { Identity } from "../identity/index.js";
 import type { StorageNodeEndpoint } from "../../apps/client/index.js";
@@ -491,9 +492,32 @@ export function createRegistry(options: RegistryOptions = {}): Registry {
     };
   }
 
+  function sweepStaleTempFiles(): void {
+    if (!persistencePath) return;
+    // Crash between temp write and rename leaves `<file>.tmp.<hex>` behind.
+    // These can never be mistaken for committed state (the loader only reads
+    // the final path), but without a sweep they would accumulate unboundedly
+    // across repeated interruptions. Best-effort: never throws.
+    const base = basename(persistencePath);
+    let entries: string[];
+    try {
+      entries = readdirSync(dirname(persistencePath));
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.startsWith(`${base}.tmp.`) || entry.startsWith(`${base}.tmp-`)) {
+        try {
+          unlinkSync(join(dirname(persistencePath), entry));
+        } catch {}
+      }
+    }
+  }
+
   function loadPersisted(): void {
     emit({ type: "registry.started", persistence: persistencePath ? "enabled" : "disabled" });
     if (!persistencePath) return;
+    sweepStaleTempFiles();
     try {
       const data = readFileSync(persistencePath, "utf8");
       const parsed = JSON.parse(data) as Record<string, unknown>;

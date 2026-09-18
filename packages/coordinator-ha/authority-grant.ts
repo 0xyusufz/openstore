@@ -1,5 +1,5 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, chmodSync } from "node:fs";
-import { dirname } from "node:path";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, chmodSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { createCoordinatorInstanceIdentity, type CoordinatorInstanceIdentity } from "./index.js";
 import { signMessage, verifyMessage } from "../identity/index.js";
@@ -78,6 +78,15 @@ export function createAuthorityGrantService(options: AuthorityGrantServiceOption
   let persistenceHealthy = true;
   let persistenceState: "missing" | "valid" | "corrupt" = "missing";
   if (options.persistencePath) {
+    // Sweep stale `<file>.tmp-*` artifacts from interrupted persists so they
+    // cannot accumulate unboundedly. The loader only reads the final path.
+    try {
+      for (const entry of readdirSync(dirname(options.persistencePath))) {
+        if (entry.startsWith(`${basename(options.persistencePath)}.tmp-`) || entry.startsWith(`${basename(options.persistencePath)}.tmp.`)) {
+          try { unlinkSync(join(dirname(options.persistencePath), entry)); } catch {}
+        }
+      }
+    } catch {}
     try {
       const parsed = JSON.parse(readFileSync(options.persistencePath, "utf8")) as AuthorityGrantState;
       if (parsed.version !== 1 || parsed.instanceId !== options.instance.instanceId || !["non-authoritative", "authoritative", "revoked"].includes(parsed.state) ||

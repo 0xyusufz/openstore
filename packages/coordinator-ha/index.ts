@@ -605,11 +605,15 @@ function canonical(value: unknown): string {
       this.persistenceHealthy = true;
       this.lifecycle = "uninitialized";
       if (this.persistencePath) {
-        try { unlinkSync(this.persistencePath); } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-            this.persistenceHealthy = false;
-            this.lifecycle = "unavailable";
-            throw new Error("persistence failure");
+        // Remove both the committed file and any fixed-name temp left by an
+        // interrupted persist, so a rebootstrap starts from a clean slate.
+        for (const candidate of [this.persistencePath, `${this.persistencePath}.tmp`]) {
+          try { unlinkSync(candidate); } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+              this.persistenceHealthy = false;
+              this.lifecycle = "unavailable";
+              throw new Error("persistence failure");
+            }
           }
         }
       }
@@ -638,6 +642,12 @@ function canonical(value: unknown): string {
     }
 
     private loadPersisted(): void {
+      // A crash between temp write and rename leaves `<file>.tmp` behind.
+      // The loader only reads the final path, but without a sweep the stale
+      // temp would linger forever. Best-effort: never throws.
+      if (this.persistencePath) {
+        try { unlinkSync(`${this.persistencePath}.tmp`); } catch {}
+      }
       try {
         const raw = requirePersistedFile(this.persistencePath as string);
         if (Buffer.byteLength(raw, "utf8") > MAX_SNAPSHOT_BYTES + 4096) throw new RangeError("persisted replica state is too large");
