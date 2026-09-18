@@ -24,8 +24,16 @@
 import { createHash } from "crypto";
 import { createServer } from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
-import { mkdir, readFile, readdir, stat, unlink, writeFile } from "fs/promises";
+import { mkdir, readFile, readdir, stat, unlink } from "fs/promises";
+import { closeSync, fsyncSync, openSync } from "node:fs";
 import { join, resolve } from "path";
+import {
+  durableUnlinkSync,
+  durableWriteFileSync,
+  isTempFileName,
+  recoverDirTempFiles,
+  type DurabilityCrashHook,
+} from "./durable-fs.js";
 import { DEFAULT_MAX_CLOCK_SKEW_MS, DEFAULT_MAX_REPLAY_CACHE_ENTRIES, PUBKEY_HEADER, verifyAuthHeaders } from "../../packages/auth/index.js";
 import type { Identity } from "../../packages/identity/index.js";
 import type { Registry } from "../../packages/registry/index.js";
@@ -78,6 +86,8 @@ export interface StorageNodeOptions {
   allocationPath?: string;
   onLifecycleEvent?: (event: StorageNodeLifecycleEvent) => void;
   orphanCleanup?: { enabled?: boolean; gracePeriodMs?: number; intervalMs?: number; batchSize?: number; maxDeletionsPerRun?: number };
+  /** Test-only crash injection hook at durability boundary (never used in production). */
+  __testCrashHook?: (stage: "pre-rename" | "post-rename" | "pre-dir-fsync" | "pre-unlink-fsync") => void;
 }
 export type StorageNodeLifecycleEvent = { type: "storage-node.started" | "storage-node.closed" | "storage-node.draining" | "storage-node.recovery"; draining?: boolean; error?: string };
 export interface StorageNodeStatusSnapshot {
@@ -151,6 +161,29 @@ export function isValidPieceId(id: string): boolean {
   );
 }
 
+const isTempPieceFile = isTempFileName;
+
+function durableWritePiece(
+  storageDir: string,
+  id: string,
+  bytes: Buffer,
+  crashHook?: DurabilityCrashHook,
+): void {
+  durableWriteFileSync(join(storageDir, id), bytes, {
+    mode: 0o600,
+    crashHook,
+    tempPrefix: `.tmp.${id}`,
+  });
+}
+
+function durableUnlink(piecePath: string, crashHook?: DurabilityCrashHook): void {
+  durableUnlinkSync(piecePath, crashHook);
+}
+
+async function recoverStorageDir(storageDir: string): Promise<void> {
+  await recoverDirTempFiles(storageDir);
+}
+
 /**
  * Create a storage node bound to a local directory (not yet listening).
  *
@@ -174,7 +207,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       maxDeletionsPerRun: options.orphanCleanup.maxDeletionsPerRun,
       events: options.events,
       deletePiece: async (pieceId) => {
-        try { await unlink(join(storageDir, pieceId)); return "deleted"; }
+        try { durableUnlink(join(storageDir, pieceId), options.__testCrashHook); return "deleted"; }
         catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return "not-found"; throw error; }
       },
     });
@@ -240,7 +273,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       metrics.observe("storage_request_duration_ms", Date.now() - started, { operation });
       return originalEnd(...args);
     }) as typeof res.end;
-    void handleRequest(req, res, storageDir, capacityBytes, provenance, { requireAuth, maxClockSkewMs, seenNonces, maxReplayCacheEntries, maxHttpRequestBodyBytes }, () => nodeIdentity, () => draining, getStatusSnapshot, metrics, events).catch((error) => {
+    void handleRequest(req, res, storageDir, capacityBytes, provenance, { requireAuth, maxClockSkewMs, seenNonces, maxReplayCacheEntries, maxHttpRequestBodyBytes }, () => nodeIdentity, () => draining, getStatusSnapshot, metrics, events, options.__testCrashHook).catch((error) => {
       if (!res.headersSent) {
         sendJson(res, error instanceof RequestBodyTooLargeError ? 413 : 500, {
           error: error instanceof RequestBodyTooLargeError ? "request body too large" : "internal error",
@@ -260,7 +293,8 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
       const entries = await readdir(storageDir);
       let total = 0;
       for (const e of entries) {
-        if (e === ".capacity-allocation.json" || e.startsWith(".capacity-allocation.json.tmp-")) continue;
+        if (e === ".capacity-allocation.json" || e.startsWith(".capacity-allocation.json.tmp-") || isTempPieceFile(e) || e === ".provenance") continue;
+        if (!isValidPieceId(e)) continue;
         try {
           const s = await stat(join(storageDir, e));
           if (s.isFile()) total += s.size;
@@ -283,7 +317,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
   async function getStatusSnapshot(): Promise<StorageNodeStatusSnapshot> {
     const capacity = await getCapacity();
     let pieceCount = 0;
-    try { pieceCount = (await readdir(storageDir)).filter((entry) => entry !== ".capacity-allocation.json" && !entry.startsWith(".capacity-allocation.json.tmp-")).length; } catch {}
+    try { pieceCount = (await readdir(storageDir)).filter((entry) => isValidPieceId(entry)).length; } catch {}
     metrics.set("storage_used_bytes", capacity.usedBytes);
     metrics.set("storage_capacity_bytes", capacity.allocatedBytes ?? capacity.totalBytes ?? 0);
     metrics.set("storage_piece_count", pieceCount);
@@ -353,6 +387,7 @@ export function createStorageNode(options: StorageNodeOptions): StorageNode {
         nodeIdentity = await loadIdentity(options.identityPassword, options.identityPath as string);
       }
       await mkdir(storageDir, { recursive: true });
+      await recoverStorageDir(storageDir);
       if (options.allocationPath) {
         allocation = createCapacityAllocation(storageDir, options.capacityBytes, options.allocationPath);
         capacityBytes = allocation.state().allocationBytes;
@@ -467,6 +502,7 @@ async function handleRequest(
   getStatusSnapshot: () => Promise<StorageNodeStatusSnapshot>,
   metrics: MetricsRegistry,
   events: EventStore,
+  crashHook?: DurabilityCrashHook,
 ): Promise<void> {
   const method = (req.method ?? "").toUpperCase();
   const rawPath = (req.url ?? "/").split("?")[0] as string;
@@ -481,7 +517,7 @@ async function handleRequest(
   if (rawPath.startsWith("/v2/pieces/")) {
     const body = method === "POST" ? await readBody(req, auth.maxHttpRequestBodyBytes) : undefined;
     if (!checkAuth(req, method, rawPath, body, auth, res)) return;
-    await handleProvenanceRequest(req, res, rawPath, body, storageDir, capacityBytes, provenance);
+    await handleProvenanceRequest(req, res, rawPath, body, storageDir, capacityBytes, provenance, crashHook);
     return;
   }
 
@@ -495,7 +531,7 @@ async function handleRequest(
     }
     const rawBody = await readBody(req, auth.maxHttpRequestBodyBytes);
     if (!checkAuth(req, method, rawPath, rawBody, auth, res)) return;
-    await handlePostPieceWithBody(rawBody, res, storageDir, capacityBytes);
+    await handlePostPieceWithBody(rawBody, res, storageDir, capacityBytes, crashHook);
     return;
   }
 
@@ -533,7 +569,7 @@ async function handleRequest(
       return;
     }
     if (method === "DELETE") {
-      await handleDeletePiece(res, piecePath);
+      await handleDeletePiece(res, piecePath, crashHook);
       return;
     }
     sendJson(res, 405, { error: "method not allowed" });
@@ -562,6 +598,7 @@ async function handleProvenanceRequest(
   storageDir: string,
   capacityBytes: number,
   provenance: PieceProvenanceStore,
+  crashHook?: DurabilityCrashHook,
 ): Promise<void> {
   const segments = rawPath.split("/");
   const body = parseJsonObject(rawBody);
@@ -587,7 +624,7 @@ async function handleProvenanceRequest(
         await provenance.associatePiece(pieceId, body.claimId, async () => {
           const bytes = Buffer.from(body.data as string, "base64");
           if (hashPieceId(bytes) !== pieceId) throw new Error("piece bytes do not match piece id");
-          await storePieceBytes(storageDir, capacityBytes, pieceId, bytes);
+          await storePieceBytes(storageDir, capacityBytes, pieceId, bytes, crashHook);
         });
         sendJson(res, 200, { status: "stored", pieceId });
         return;
@@ -616,7 +653,7 @@ async function handleProvenanceRequest(
       }
       const result = await provenance.deleteIfUnclaimed(pieceId, async () => {
         try {
-          await unlink(join(storageDir, pieceId));
+          durableUnlink(join(storageDir, pieceId), crashHook);
           return "deleted";
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === "ENOENT") return "not-found";
@@ -640,7 +677,7 @@ function parseJsonObject(rawBody: Buffer | undefined): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-async function storePieceBytes(storageDir: string, capacityBytes: number, id: string, bytes: Buffer): Promise<void> {
+async function storePieceBytes(storageDir: string, capacityBytes: number, id: string, bytes: Buffer, crashHook?: DurabilityCrashHook): Promise<void> {
   const piecePath = join(storageDir, id);
   let previous = 0;
   try { previous = (await stat(piecePath)).size; } catch (error) {
@@ -649,7 +686,7 @@ async function storePieceBytes(storageDir: string, capacityBytes: number, id: st
   const used = await getUsedBytesForDir(storageDir);
   if (used - previous + bytes.length > capacityBytes) throw new Error("insufficient storage");
   await mkdir(storageDir, { recursive: true });
-  await writeFile(piecePath, bytes, { mode: 0o600 });
+  durableWritePiece(storageDir, id, bytes, crashHook);
 }
 
 function safeClaim(claim: PieceClaim): Omit<PieceClaim, "clientNamespace"> & { clientNamespace: string } {
@@ -727,6 +764,7 @@ async function handlePostPieceWithBody(
   res: ServerResponse,
   storageDir: string,
   capacityBytes: number = DEFAULT_CAPACITY_BYTES,
+  crashHook?: DurabilityCrashHook,
 ): Promise<void> {
   let parsed: unknown;
   try {
@@ -781,7 +819,7 @@ async function handlePostPieceWithBody(
   }
 
   await mkdir(storageDir, { recursive: true });
-  await writeFile(piecePath, bytes);
+  durableWritePiece(storageDir, id, bytes, crashHook);
   sendJson(res, existed ? 200 : 201, {
     version: STORAGE_NODE_VERSION,
     id,
@@ -867,9 +905,10 @@ async function handleVerifyPiece(
 async function handleDeletePiece(
   res: ServerResponse,
   piecePath: string,
+  crashHook?: DurabilityCrashHook,
 ): Promise<void> {
   try {
-    await unlink(piecePath);
+    durableUnlink(piecePath, crashHook);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       sendJson(res, 404, { error: "piece not found" });
@@ -898,7 +937,8 @@ async function getUsedBytesForDir(dir: string): Promise<number> {
     const entries = await readdir(dir);
     let total = 0;
     for (const e of entries) {
-      if (e === ".capacity-allocation.json" || e.startsWith(".capacity-allocation.json.tmp-")) continue;
+      if (e === ".capacity-allocation.json" || e.startsWith(".capacity-allocation.json.tmp-") || isTempPieceFile(e) || e === ".provenance") continue;
+      if (!isValidPieceId(e)) continue;
       try {
         const s = await stat(join(dir, e));
         if (s.isFile()) total += s.size;

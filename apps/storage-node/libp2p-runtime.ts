@@ -6,6 +6,13 @@
  */
 import { mkdir, readFile, stat, unlink, writeFile, readdir } from "fs/promises";
 import { basename, join, resolve } from "path";
+import {
+  durableUnlinkSync,
+  durableWriteFileSync,
+  isTempFileName,
+  recoverDirTempFiles,
+  type DurabilityCrashHook,
+} from "./durable-fs.js";
 import type { Identity } from "../../packages/identity/index.js";
 import { loadIdentity } from "../../packages/identity/keystore.js";
 import { DhtPeerDiscovery } from "../../packages/p2p/dht-discovery.js";
@@ -44,6 +51,8 @@ export interface Libp2pStorageNodeRuntimeConfig {
   lifecycleEventCallback?: (event: Libp2pStorageNodeLifecycleEvent) => void;
   onLifecycleEvent?: (event: Libp2pStorageNodeLifecycleEvent) => void;
   orphanCleanup?: { enabled?: boolean; gracePeriodMs?: number; intervalMs?: number; batchSize?: number; maxDeletionsPerRun?: number };
+  /** Test-only crash injection hook at durability boundary (never used in production). */
+  __testCrashHook?: DurabilityCrashHook;
 }
 
 /** Maximum opaque piece size for the fixed 4 MiB plaintext chunk format. */
@@ -130,13 +139,16 @@ export async function createLibp2pStorageNodeRuntime(
   const identity = await loadIdentity(input.identityPassword, resolve(input.identityPath));
   const storageDir = resolve(input.storageDir);
   await mkdir(storageDir, { recursive: true });
+  // Deterministic fail-closed recovery: temp artifacts from an interrupted
+  // write can never be mistaken for committed pieces.
+  await recoverDirTempFiles(storageDir);
   let allocation: CapacityAllocation | undefined;
   if (input.allocationPath) {
     allocation = createCapacityAllocation(storageDir, input.capacityBytes, resolve(input.allocationPath));
   }
   const initialCapacity = allocation?.state().allocationBytes ?? input.capacityBytes ?? 1 * 1024 * 1024 * 1024;
   const lifecycle = allocation ? createProviderAllocationLifecycle(resolve(input.lifecyclePath ?? join(storageDir, ".provider-lifecycle.json"))) : undefined;
-  const store = createPieceStore(storageDir, initialCapacity, input.maxPieceBytes ?? DEFAULT_MAX_PIECE_BYTES, allocation, allocation ? basename(allocation.path) : undefined, lifecycle ? basename(lifecycle.path) : undefined, lifecycle);
+  const store = createPieceStore(storageDir, initialCapacity, input.maxPieceBytes ?? DEFAULT_MAX_PIECE_BYTES, allocation, allocation ? basename(allocation.path) : undefined, lifecycle ? basename(lifecycle.path) : undefined, lifecycle, input.__testCrashHook);
   if (allocation) allocation.updateUsed(await store.usedBytes());
   const provenance = createPieceProvenanceStore(join(storageDir, ".provenance"), input.orphanCleanup?.gracePeriodMs);
   let orphanScanner: OrphanScanner | undefined;
@@ -386,19 +398,25 @@ function safeLifecycleError(error: unknown): string {
   return safeErrorMessage(error);
 }
 
-function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number, allocation?: CapacityAllocation, allocationFileName?: string, lifecycleFileName?: string, lifecycle?: ProviderAllocationLifecycle) {
+function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number, allocation?: CapacityAllocation, allocationFileName?: string, lifecycleFileName?: string, lifecycle?: ProviderAllocationLifecycle, crashHook?: DurabilityCrashHook) {
   const pathFor = (id: string) => {
     if (!isValidPieceId(id)) throw new Error("invalid piece id");
     return join(dir, id);
   };
+  const isMetadataFile = (name: string): boolean =>
+    name === allocationFileName || name === lifecycleFileName ||
+    name === ".capacity-allocation.json" || name.startsWith(".capacity-allocation.json.tmp-") ||
+    (allocationFileName !== undefined && name.startsWith(`${allocationFileName}.tmp-`)) ||
+    name === ".provider-lifecycle.json" || name.startsWith(".provider-lifecycle.json.tmp-") ||
+    (lifecycleFileName !== undefined && name.startsWith(`${lifecycleFileName}.tmp-`));
   const used = async () => {
     let total = 0;
     for (const name of await readdir(dir)) {
-      if (name === allocationFileName || name === lifecycleFileName ||
-          name === ".capacity-allocation.json" || name.startsWith(".capacity-allocation.json.tmp-") ||
-          (allocationFileName !== undefined && name.startsWith(`${allocationFileName}.tmp-`)) ||
-          name === ".provider-lifecycle.json" || name.startsWith(".provider-lifecycle.json.tmp-") ||
-          (lifecycleFileName !== undefined && name.startsWith(`${lifecycleFileName}.tmp-`))) continue;
+      // Temp artifacts, provenance state, persistence metadata, and
+      // non-piece names never count toward quota: accounting always
+      // reflects durable committed pieces only.
+      if (isMetadataFile(name) || isTempFileName(name) || name === ".provenance") continue;
+      if (!isValidPieceId(name)) continue;
       try { const item = await stat(join(dir, name)); if (item.isFile()) total += item.size; } catch { /* concurrent deletion */ }
     }
     return total;
@@ -417,7 +435,10 @@ function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number,
       const current = await used();
       const limit = allocation?.state().allocationBytes ?? capacity;
       if (current - previous + data.length > limit) return 507;
-      await writeFile(path, data, { mode: 0o600 });
+      // Crash-safe: temp + file fsync + atomic rename + dir fsync. A crash
+      // before rename leaves only an invisible temp; readers always see the
+      // previous complete version or the new complete version, never partial.
+      durableWriteFileSync(path, data, { mode: 0o600, crashHook, tempPrefix: `.tmp.${id}` });
       allocation?.updateUsed(await used());
       return existed ? 200 : 201;
     },
@@ -428,7 +449,7 @@ function createPieceStore(dir: string, capacity: number, maxPieceBytes?: number,
       }
     },
     async remove(id: string) {
-      try { await unlink(pathFor(id)); allocation?.updateUsed(await used()); return 204; } catch (error) {
+      try { durableUnlinkSync(pathFor(id), crashHook); allocation?.updateUsed(await used()); return 204; } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return 404;
         throw error;
       }

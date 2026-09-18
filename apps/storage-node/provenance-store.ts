@@ -1,5 +1,4 @@
-import { randomBytes } from "crypto";
-import { chmod, mkdir, readFile, readdir, rename, unlink, writeFile } from "fs/promises";
+import { mkdir, readFile, readdir, unlink } from "fs/promises";
 import { join, resolve } from "path";
 import {
   canTransitionClaim,
@@ -8,6 +7,7 @@ import {
   type PieceProvenanceEnvelope,
   validatePieceClaim,
 } from "../../packages/provenance/index.js";
+import { durableWriteFileSync } from "./durable-fs.js";
 
 export const DEFAULT_PROVENANCE_GRACE_MS = 24 * 60 * 60 * 1000;
 export type ProvenanceInspectionReason = "eligible" | "active-claim" | "grace-period" | "missing" | "corrupt" | "unsupported";
@@ -61,15 +61,13 @@ export function createPieceProvenanceStore(directory: string, gracePeriodMs = DE
   async function writeEnvelope(envelope: PieceProvenanceEnvelope): Promise<void> {
     envelope.claims.forEach(validatePieceClaim);
     await mkdir(dir, { recursive: true });
-    const temp = join(dir, `.tmp.${randomBytes(8).toString("hex")}.json`);
-    try {
-      await writeFile(temp, JSON.stringify(envelope, null, 2), { mode: 0o600 });
-      await chmod(temp, 0o600);
-      await rename(temp, pathFor(envelope.pieceId));
-    } catch (error) {
-      try { await unlink(temp); } catch {}
-      throw error;
-    }
+    // Crash-safe: temp + file fsync + atomic rename + parent dir fsync, so a
+    // crash can never leave a partially visible/corrupt envelope behind.
+    // Temp names never match `<pieceId>.json`, so they are never read as state.
+    durableWriteFileSync(pathFor(envelope.pieceId), Buffer.from(JSON.stringify(envelope, null, 2), "utf8"), {
+      mode: 0o600,
+      tempPrefix: ".tmp",
+    });
   }
   async function transition(pieceId: string, claimId: string, next: PieceClaim["state"], owner?: string): Promise<PieceClaim> {
     return withLock(pieceId, async () => {
