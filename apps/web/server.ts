@@ -121,6 +121,9 @@ async function handleRequest(
     rawPath === "/api/identity/unlock" ||
     rawPath === "/api/identity/lock" ||
     rawPath === "/api/identity/recover" ||
+    rawPath === "/api/identity/change-password" ||
+    rawPath === "/api/identity/switch" ||
+    rawPath === "/api/accounts/login" ||
     rawPath === "/api/provider/setup" ||
     rawPath === "/api/provider/start" ||
     rawPath === "/api/provider/stop" ||
@@ -135,6 +138,51 @@ async function handleRequest(
   } else if (method === "POST") {
     // No other POST routes exist (downloads land next milestone).
     sendJson(res, 405, { error: "method not allowed" }, headOnly);
+    return;
+  }
+  // ─── Public endpoints (no auth required) ───
+  if (rawPath === "/api/accounts" && (method === "GET" || method === "HEAD")) {
+    try {
+      const accounts = await backend.listAccounts();
+      sendJson(res, 200, { accounts }, headOnly);
+    } catch (err) {
+      sendJson(res, 500, { error: "failed to list accounts" }, headOnly);
+    }
+    return;
+  }
+  if (rawPath === "/api/accounts/login" && method === "POST") {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) return;
+    const fields = body.value as Record<string, unknown>;
+    const accountId = fields["accountId"];
+    const password = fields["password"];
+    if (typeof accountId !== "string" || typeof password !== "string") {
+      sendJson(res, 400, { error: "accountId and password are required" });
+      return;
+    }
+    try {
+      const unlocked = await backend.unlockIdentity(password, accountId);
+      sendJson(res, 200, { unlocked: unlocked.unlocked, publicKey: unlocked.publicKey });
+    } catch (err) {
+      sendJson(res, identityErrorStatus((err as Error).message), { error: toSafeIdentityError((err as Error).message) });
+    }
+    return;
+  }
+  // ─── Auth enforcement: protected data routes require authentication ───
+  // Identity management (create, unlock, recover, lock, status) and
+  // account listing are public so the login page can operate.
+  // Protected: files, nodes, provider, marketplace, change-password, switch.
+  const isIdentityRoute =
+    rawPath === "/api/identity" ||
+    rawPath === "/api/identity/create" ||
+    rawPath === "/api/identity/unlock" ||
+    rawPath === "/api/identity/lock" ||
+    rawPath === "/api/identity/recover" ||
+    rawPath === "/api/identity/switch" ||
+    rawPath === "/api/accounts" ||
+    rawPath === "/api/accounts/login";
+  if (rawPath.startsWith("/api/") && !isIdentityRoute && backend.requiresAuthentication() && !backend.isAuthenticated()) {
+    sendJson(res, 401, { error: "authentication required" });
     return;
   }
   if (rawPath === "/api/files") {
@@ -286,6 +334,34 @@ async function handleRequest(
     try {
       const recovered = await backend.recoverIdentity(phrase as string[], password as string, confirmReplace);
       sendJson(res, 200, { publicKey: recovered.publicKey });
+    } catch (err) {
+      sendJson(res, identityErrorStatus((err as Error).message), { error: toSafeIdentityError((err as Error).message) });
+    }
+    return;
+  }
+  if (rawPath === "/api/identity/change-password" && method === "POST") {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) return;
+    const fields = body.value as Record<string, unknown>;
+    const phrase = fields["phrase"];
+    const newPassword = fields["newPassword"] ?? fields["password"];
+    try {
+      const changed = await backend.changePassword(phrase as string[], newPassword as string);
+      sendJson(res, 200, { publicKey: changed.publicKey });
+    } catch (err) {
+      sendJson(res, identityErrorStatus((err as Error).message), { error: toSafeIdentityError((err as Error).message) });
+    }
+    return;
+  }
+  if (rawPath === "/api/identity/switch" && method === "POST") {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) return;
+    const fields = body.value as Record<string, unknown>;
+    const phrase = fields["phrase"];
+    const password = fields["password"];
+    try {
+      const switched = await backend.switchAccount(phrase as string[], password as string);
+      sendJson(res, 200, { publicKey: switched.publicKey });
     } catch (err) {
       sendJson(res, identityErrorStatus((err as Error).message), { error: toSafeIdentityError((err as Error).message) });
     }

@@ -35,6 +35,8 @@ import {
   uploadFailed,
   uploadPreparing,
   resetUploadDraft,
+  applyAccounts,
+  requireAuth,
 } from "./store.js";
 import { applyBackendSnapshot } from "./store.js";
 import type { BackendSnapshot } from "../backend.js";
@@ -87,54 +89,80 @@ interface ApiProviderPayload {
   provider: BackendSnapshot["provider"];
 }
 
-/**
- * Fetch the live backend snapshot. Falls back to demo state (with an
- * honest notice) when the backend is unreachable or returns garbage.
- */
-async function loadLiveData(state: WebState): Promise<WebState> {
-  try {
-    const [filesRes, nodesRes, identityRes, providerRes] = await Promise.all([
-      fetch("/api/files"),
-      fetch("/api/nodes"),
-      fetch("/api/identity"),
-      fetch("/api/provider"),
-    ]);
-    if (!filesRes.ok || !nodesRes.ok || !identityRes.ok || !providerRes.ok) {
-      throw new Error(
-        `backend responded ${filesRes.status}/${nodesRes.status}/${identityRes.status}/${providerRes.status}`,
-      );
-    }
-    const filesJson = (await filesRes.json()) as Partial<ApiFilesPayload>;
-    const nodesJson = (await nodesRes.json()) as Partial<ApiNodesPayload>;
-    const identityJson = (await identityRes.json()) as Partial<ApiIdentityPayload>;
-    const providerJson = (await providerRes.json()) as Partial<ApiProviderPayload>;
-    if (!Array.isArray(filesJson.files) || !Array.isArray(nodesJson.nodes) || typeof identityJson.identity !== "object") {
-      throw new Error("malformed backend snapshot");
-    }
-    return applyBackendSnapshot(state, {
-      files: filesJson.files,
-      nodes: nodesJson.nodes,
-      identity: identityJson.identity as BackendSnapshot["identity"],
-      filesSource: filesJson.source === "live" ? "live" : "demo",
-      nodesSource: nodesJson.source === "live" ? "live" : "demo",
-      provider: (providerJson.provider ?? null) as BackendSnapshot["provider"],
-    });
-  } catch {
-    return { ...state, notice: "Live backend unavailable — showing demo data." };
-  }
-}
+// loadLiveData is defined inside startApp to share state reference.
 
 export function startApp(): void {
-  let state: WebState = syncFromHash(createInitialState());
+  let state: WebState = guardAuth(syncFromHash(createInitialState()));
   let stagedFile: File | null = null;
   render(state);
-  void loadLiveData(state).then((next) => {
-    state = syncFromHash(next);
+
+  /** Fetch available accounts from the server (public endpoint). */
+  async function loadAccounts(): Promise<void> {
+    try {
+      const res = await fetch("/api/accounts");
+      if (res.ok) {
+        const json = (await res.json()) as { accounts?: Array<{ accountId: string; publicKey: string }> };
+        if (Array.isArray(json.accounts)) {
+          state = applyAccounts(state, json.accounts, json.accounts.length > 0);
+        }
+      }
+    } catch {
+      // Accounts list unavailable — proceed without it.
+    }
+  }
+
+  /** Route guard: redirect to #/login when not authenticated. */
+  function guardAuth(s: WebState): WebState {
+    if (!s.identity.unlocked && s.view !== "login") {
+      return { ...s, view: "login", notice: "Please log in to continue." };
+    }
+    return s;
+  }
+
+  /** Refresh the full live snapshot (files, nodes, identity, provider). */
+  async function loadLiveData(s: WebState): Promise<WebState> {
+    try {
+      const [filesRes, nodesRes, identityRes, providerRes] = await Promise.all([
+        fetch("/api/files"),
+        fetch("/api/nodes"),
+        fetch("/api/identity"),
+        fetch("/api/provider"),
+      ]);
+      if (!filesRes.ok || !nodesRes.ok || !identityRes.ok || !providerRes.ok) {
+        throw new Error(
+          `backend responded ${filesRes.status}/${nodesRes.status}/${identityRes.status}/${providerRes.status}`,
+        );
+      }
+      const filesJson = (await filesRes.json()) as Partial<ApiFilesPayload>;
+      const nodesJson = (await nodesRes.json()) as Partial<ApiNodesPayload>;
+      const identityJson = (await identityRes.json()) as Partial<ApiIdentityPayload>;
+      const providerJson = (await providerRes.json()) as Partial<ApiProviderPayload>;
+      if (!Array.isArray(filesJson.files) || !Array.isArray(nodesJson.nodes) || typeof identityJson.identity !== "object") {
+        throw new Error("malformed backend snapshot");
+      }
+      return applyBackendSnapshot(s, {
+        files: filesJson.files,
+        nodes: nodesJson.nodes,
+        identity: identityJson.identity as BackendSnapshot["identity"],
+        filesSource: filesJson.source === "live" ? "live" : "demo",
+        nodesSource: nodesJson.source === "live" ? "live" : "demo",
+        provider: (providerJson.provider ?? null) as BackendSnapshot["provider"],
+      });
+    } catch {
+      return { ...s, notice: "Live backend unavailable — showing demo data." };
+    }
+  }
+
+  void (async () => {
+    await loadAccounts();
+    const next = await loadLiveData(state);
+    state = guardAuth(syncFromHash(next));
     render(state);
-  });
+  })();
 
   window.addEventListener("hashchange", () => {
     state = syncFromHash(state);
+    state = guardAuth(state);
     render(state);
   });
 
@@ -160,7 +188,7 @@ export function startApp(): void {
   /** Refresh the full live snapshot (files, nodes, identity, provider). */
   async function refreshLiveData(): Promise<void> {
     const refreshed = await loadLiveData(state);
-    state = syncFromHash(refreshed);
+    state = guardAuth(syncFromHash(refreshed));
     render(state);
   }
 
@@ -193,6 +221,8 @@ export function startApp(): void {
       form.id !== "identity-create-form" &&
       form.id !== "identity-unlock-form" &&
       form.id !== "identity-recover-form" &&
+      form.id !== "identity-change-password-form" &&
+      form.id !== "login-password-form" &&
       form.id !== "provider-setup-form" &&
       form.id !== "provider-allocation-form"
     )
@@ -302,13 +332,100 @@ export function startApp(): void {
           });
           if (status === 200 && typeof json["publicKey"] === "string") {
             state = identityRecovered(state, json["publicKey"] as string);
-            state = { ...state, notice: "Identity recovered successfully." };
+            state = { ...state, view: "dashboard", notice: null };
+            await loadAccounts();
+            await refreshLiveData();
           } else if (status === 409) {
             state = { ...state, notice: "A keystore already exists. Check 'Replace existing keystore' to overwrite." };
           } else if (status === 400) {
             state = { ...state, notice: `Recovery failed: ${errorText(json, status)}` };
           } else {
             state = { ...state, notice: `Recovery failed: ${errorText(json, status)}` };
+          }
+        } else if (form.id === "identity-switch-form") {
+          const password = inputValue("switch-password");
+          const confirm = inputValue("switch-confirm");
+          if (password === "" || password !== confirm) {
+            state = { ...state, notice: "Passwords do not match or are empty." };
+            render(state);
+            return;
+          }
+          const words: string[] = [];
+          for (let i = 1; i <= 12; i++) {
+            const w = inputValue(`switch-word-${i}`).trim().toLowerCase();
+            words.push(w);
+          }
+          if (words.some((w) => w === "")) {
+            state = { ...state, notice: "All 12 recovery words are required." };
+            render(state);
+            return;
+          }
+          const invalidWord = words.find((w) => !/^[a-z]+$/.test(w));
+          if (invalidWord) {
+            state = { ...state, notice: `Invalid recovery word: "${invalidWord}". Words must be lowercase letters only.` };
+            render(state);
+            return;
+          }
+          const { status, json } = await postIdentity("/api/identity/switch", { phrase: words, password });
+          if (status === 200 && typeof json["publicKey"] === "string") {
+            state = identityRecovered(state, json["publicKey"] as string);
+            state = { ...state, notice: "Switched account successfully." };
+          } else if (status === 400) {
+            state = { ...state, notice: `Switch failed: ${errorText(json, status)}` };
+          } else {
+            state = { ...state, notice: `Switch failed: ${errorText(json, status)}` };
+          }
+        } else if (form.id === "identity-change-password-form") {
+          const newPassword = inputValue("change-new-password");
+          const confirm = inputValue("change-confirm");
+          if (newPassword === "" || newPassword !== confirm) {
+            state = { ...state, notice: "New passwords do not match or are empty." };
+            render(state);
+            return;
+          }
+          const words: string[] = [];
+          for (let i = 1; i <= 12; i++) {
+            const w = inputValue(`change-word-${i}`).trim().toLowerCase();
+            words.push(w);
+          }
+          if (words.some((w) => w === "")) {
+            state = { ...state, notice: "All 12 recovery words are required." };
+            render(state);
+            return;
+          }
+          const invalidWord = words.find((w) => !/^[a-z]+$/.test(w));
+          if (invalidWord) {
+            state = { ...state, notice: `Invalid recovery word: "${invalidWord}". Words must be lowercase letters only.` };
+            render(state);
+            return;
+          }
+          const { status, json } = await postIdentity("/api/identity/change-password", { phrase: words, newPassword });
+          if (status === 200 && typeof json["publicKey"] === "string") {
+            state = identityRecovered(state, json["publicKey"] as string);
+            state = { ...state, notice: "Password changed successfully. Your account ID is unchanged." };
+          } else if (status === 400 || status === 401) {
+            state = { ...state, notice: `Change password failed: ${errorText(json, status)}` };
+          } else {
+            state = { ...state, notice: `Change password failed: ${errorText(json, status)}` };
+          }
+        } else if (form.id === "login-password-form") {
+          const accountId = (document.getElementById("login-account-id") as HTMLInputElement | null)?.value ?? "";
+          const password = inputValue("login-password");
+          if (password === "" || accountId === "") {
+            state = { ...state, notice: "Enter the account password." };
+            render(state);
+            return;
+          }
+          const { status, json } = await postIdentity("/api/accounts/login", { accountId, password });
+          if (status === 200 && typeof json["publicKey"] === "string") {
+            state = identityUnlocked(state, json["publicKey"] as string);
+            state = { ...state, view: "dashboard", notice: null };
+            await loadAccounts();
+            await refreshLiveData();
+          } else if (status === 401) {
+            state = { ...state, notice: "Incorrect password." };
+          } else {
+            state = { ...state, notice: `Login failed: ${errorText(json, status)}` };
           }
         } else {
           const password = inputValue("unlock-password");
@@ -349,8 +466,11 @@ export function startApp(): void {
       render(state);
     } else if (action === "creation-dismiss") {
       state = identityCreationDismissed(state);
+      state = { ...state, view: "dashboard", notice: null };
+      void loadAccounts();
+      void refreshLiveData();
       render(state);
-    } else if (action === "identity-lock") {
+    } else if (action === "identity-lock" || action === "identity-logout") {
       void (async () => {
         try {
           await postIdentity("/api/identity/lock", {});
@@ -358,8 +478,29 @@ export function startApp(): void {
           // Lock is best-effort client-side regardless.
         }
         state = identityLocked(state);
+        if (action === "identity-logout") {
+          state = { ...state, view: "login", notice: null };
+          await loadAccounts();
+        }
         render(state);
       })();
+    } else if (action === "account-select") {
+      const accountId = actionEl.getAttribute("data-account-id") ?? "";
+      if (!accountId) return;
+      const loginForm = document.getElementById("login-account-form");
+      const title = document.getElementById("login-account-title");
+      const accountIdInput = document.getElementById("login-account-id") as HTMLInputElement | null;
+      if (loginForm) loginForm.hidden = false;
+      if (title) title.textContent = `Enter password for ${accountId.slice(0, 12)}...`;
+      if (accountIdInput) accountIdInput.value = accountId;
+      const pwInput = document.getElementById("login-password") as HTMLInputElement | null;
+      if (pwInput) pwInput.focus();
+    } else if (action === "show-create") {
+      const el = document.getElementById("login-create-form");
+      if (el) el.hidden = false;
+    } else if (action === "show-recover") {
+      const el = document.getElementById("login-recover-form");
+      if (el) el.hidden = false;
     } else if (action === "reveal-phrase") {
       state = toggleRecoveryPhraseReveal(state);
       render(state);
@@ -641,7 +782,11 @@ export function startApp(): void {
       .split(/\s+/)
       .map((w) => w.toLowerCase())
       .filter(Boolean);
-    const errorEl = document.getElementById("phrase-validation-error");
+    const slot = target.getAttribute("data-word-input") ?? "";
+    // Determine prefix for this form's word inputs
+    const prefix = slot.startsWith("switch-") ? "switch-word-" : slot.startsWith("change-") ? "change-word-" : "recovery-word-";
+    const form = target.closest("form");
+    const errorEl = form?.querySelector(".validation-error") as HTMLElement | null;
     if (words.length > 12) {
       if (errorEl) {
         errorEl.textContent = `Too many words (${words.length}). Recovery phrases must be exactly 12 words.`;
@@ -656,13 +801,13 @@ export function startApp(): void {
     }
     event.preventDefault();
     for (let i = 0; i < 12; i++) {
-      const input = document.getElementById(`recovery-word-${i + 1}`) as HTMLInputElement | null;
+      const input = document.getElementById(`${prefix}${i + 1}`) as HTMLInputElement | null;
       if (input) {
         input.value = i < words.length ? (words[i] ?? "") : "";
       }
     }
     const nextEmpty = words.length < 12 ? words.length + 1 : 12;
-    const focusTarget = document.getElementById(`recovery-word-${nextEmpty}`);
+    const focusTarget = document.getElementById(`${prefix}${nextEmpty}`);
     if (focusTarget) focusTarget.focus();
   });
 }

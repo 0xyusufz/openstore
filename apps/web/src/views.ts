@@ -37,8 +37,147 @@ function capacityBar(used: number, allocated: number): string {
   return `<span class="meter"><span class="meter-fill" style="width:${pct}%"></span></span>`;
 }
 
+export function renderLogin(state: WebState): string {
+  if (state.identityCreation) {
+    const revealed = state.recoveryPhraseRevealed;
+    const words = state.identityCreation.recoveryPhrase
+      .map(
+        (word, index) =>
+          `<li><span class="word-index">${index + 1}</span> <span class="${revealed ? "word-revealed" : "word-masked"}">${revealed ? esc(word) : "••••••••"}</span></li>`,
+      )
+      .join("");
+    return `
+  <section aria-label="Account setup">
+    <h2>Back up your recovery phrase</h2>
+    <div class="card">
+      <h3>Back up your recovery phrase</h3>
+      <p class="warning" role="alert"><strong>Write these ${state.identityCreation.recoveryPhrase.length} words down now.</strong>
+      If you lose both your password AND this phrase, your identity is permanently unrecoverable.
+      This is the only time they are shown. They are never stored on disk and cannot be recovered if lost.
+      Never share them with anyone.</p>
+      <ol class="phrase">${words}</ol>
+      <div class="phrase-actions">
+        <button type="button" data-action="reveal-phrase" class="btn-copy">${revealed ? "Hide phrase" : "Reveal phrase"}</button>
+        <button type="button" data-action="copy-phrase" class="btn-copy">Copy phrase</button>
+      </div>
+      <p class="muted">Public key: ${esc(truncateId(state.identityCreation.publicKey, 20))}</p>
+      <div class="row"><button type="button" data-action="creation-dismiss">I have backed it up</button></div>
+    </div>
+  </section>`;
+  }
+
+  const hasAccounts = state.accounts.length > 0;
+  const accountCards = state.accounts.map((acct) => {
+    const label = truncateId(acct.accountId, 16);
+    return `
+    <div class="card account-card" data-account-id="${esc(acct.accountId)}">
+      <p class="account-label">${esc(label)}</p>
+      <p class="muted account-key">${esc(truncateId(acct.publicKey, 20))}</p>
+      <button type="button" data-action="account-select" data-account-id="${esc(acct.accountId)}" class="btn-primary">Open Account</button>
+    </div>`;
+  }).join("");
+
+  const loginForm = `
+    <div class="card login-card" id="login-account-form" hidden>
+      <h3 id="login-account-title">Enter password</h3>
+      <form id="login-password-form" autocomplete="off">
+        <input type="hidden" id="login-account-id" />
+        <div class="form-row"><label>Password
+          <div class="input-wrap"><input id="login-password" name="password" type="password" autocomplete="current-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="login-password" class="btn-reveal">Show</button></div>
+        </label></div>
+        <div class="row"><button type="submit">Unlock</button></div>
+      </form>
+    </div>`;
+
+  const createAccountForm = `
+    <div class="card" id="login-create-form" hidden>
+      <h3>Create New Account</h3>
+      <p class="muted">Generate a new Ed25519 identity and 12-word OpenStore Recovery Phrase v1. You must confirm you backed up the phrase before setup completes. The phrase is shown once and never stored.</p>
+      <form id="identity-create-form" autocomplete="off">
+        <div class="form-row"><label>Password
+          <div class="input-wrap"><input id="create-password" name="password" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="create-password" class="btn-reveal">Show</button></div>
+        </label></div>
+        <div class="form-row"><label>Confirm password
+          <div class="input-wrap"><input id="create-confirm" name="confirm" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="create-confirm" class="btn-reveal">Show</button></div>
+        </label></div>
+        <div class="row"><button type="submit">Create New Account</button></div>
+      </form>
+    </div>`;
+
+  const recoverAccountForm = `
+    <div class="card" id="login-recover-form" hidden>
+      <h3>Recover Existing Account</h3>
+      <p class="muted">Enter your 12-word OpenStore Recovery Phrase v1. You can paste all words at once into any field.</p>
+      <form id="identity-recover-form" autocomplete="off">
+        <div id="phrase-validation-error" class="validation-error" hidden></div>
+        <div class="phrase-inputs">${Array.from({ length: 12 }, (_, i) => {
+          const n = i + 1;
+          return `<div class="form-row phrase-input"><label>${n}
+            <div class="input-wrap"><input id="recovery-word-${n}" name="word${n}" type="password" autocomplete="off" required minlength="1" placeholder="word ${n}" data-word-input="${n}" /><button type="button" data-action="toggle-word-reveal" data-word-slot="${n}" class="btn-reveal">Show</button></div>
+          </label></div>`;
+        }).join("")}</div>
+        <div class="form-row"><label>New password
+          <div class="input-wrap"><input id="recover-password" name="password" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="recover-password" class="btn-reveal">Show</button></div>
+        </label></div>
+        <div class="form-row"><label>Confirm password
+          <div class="input-wrap"><input id="recover-confirm" name="confirm" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="recover-confirm" class="btn-reveal">Show</button></div>
+        </label></div>
+        <div class="row"><button type="submit">Recover Account</button></div>
+      </form>
+    </div>`;
+
+  if (!hasAccounts) {
+    return `
+  <section aria-label="Welcome">
+    <h2>Welcome to OpenStore</h2>
+    <div class="card">
+      <p>No accounts found. Create a new account or recover an existing one.</p>
+    </div>
+    <div class="login-actions">
+      <button type="button" data-action="show-create" class="btn-primary">Create New Account</button>
+      <button type="button" data-action="show-recover">Recover Existing Account</button>
+    </div>
+    ${createAccountForm}
+    ${recoverAccountForm}
+  </section>`;
+  }
+
+  return `
+  <section aria-label="Account selection">
+    <h2>OpenStore</h2>
+    <div class="account-list">
+      ${accountCards}
+    </div>
+    ${loginForm}
+    <div class="login-actions">
+      <button type="button" data-action="show-recover">Recover / Add Account</button>
+    </div>
+    ${recoverAccountForm}
+  </section>`;
+}
+
 export function renderDashboard(state: WebState, stats: DashboardStats): string {
   const grade = healthGrade(stats.avgScore);
+  const provider = state.provider;
+  // Provider visibility is device-global and may persist independently of the active account.
+  // Dashboard must not imply "1/1 online" means sharing when provider is not eligible/active.
+  let providerCard = "";
+  if (provider && provider.configured) {
+    const lifecycle = (provider as unknown as { lifecycle?: string }).lifecycle ?? (provider.draining ? "draining" : "sharing");
+    if (lifecycle === "sharing" && provider.state === "running") {
+      providerCard = `<div class="card"><h3>My Storage Share</h3><p class="stat">${esc(formatBytes(provider.capacity?.availableBytes ?? 0))} available</p><p class="sub">Sharing · ${esc(formatBytes(provider.capacity?.usedBytes ?? 0))} used of ${esc(formatBytes(provider.capacity?.allocatedBytes ?? 0))}</p></div>`;
+    } else if (lifecycle === "draining" || provider.state === "draining") {
+      providerCard = `<div class="card"><h3>My Storage Share</h3><p class="stat">Draining</p><p class="sub">Storage sharing is draining — new pieces are not accepted, existing pieces remain available for reads and repair.</p></div>`;
+    } else if (lifecycle === "released" || provider.state === "released" || provider.state === "stopped" || provider.state === "offline") {
+      providerCard = `<div class="card"><h3>My Storage Share</h3><p class="stat">Not sharing</p><p class="sub">Storage sharing is not active (${esc(lifecycle)}/${esc(provider.state)}). Use the Storage Nodes page to manage sharing.</p></div>`;
+    } else {
+      providerCard = `<div class="card"><h3>My Storage Share</h3><p class="stat">${esc(lifecycle)}/${esc(provider.state)}</p><p class="sub">Provider status reflects the device-global sharing state.</p></div>`;
+    }
+  } else if (provider && !provider.configured) {
+    providerCard = `<div class="card"><h3>My Storage Share</h3><p class="stat">Not configured</p><p class="sub">Share a local directory from the Storage Nodes page to participate.</p></div>`;
+  } else if (!provider && !state.demoMode) {
+    providerCard = `<div class="card"><h3>My Storage Share</h3><p class="stat">Loading…</p><p class="sub">Fetching provider status.</p></div>`;
+  }
   return `
   <section aria-label="Storage overview">
     <h2>Dashboard</h2>
@@ -46,6 +185,7 @@ export function renderDashboard(state: WebState, stats: DashboardStats): string 
       <div class="card"><h3>Storage used</h3><p class="stat">${esc(formatBytes(stats.bytesUsed))}</p><p class="sub">of ${esc(formatBytes(stats.bytesAllocated))} allocated</p></div>
       <div class="card"><h3>Available</h3><p class="stat">${esc(formatBytes(stats.bytesAvailable))}</p><p class="sub">${stats.fileCount} file(s) · ${stats.totalChunks} chunk(s)</p></div>
       <div class="card"><h3>Nodes</h3><p class="stat">${stats.nodesOnline}/${stats.nodeCount} online</p><p class="sub">avg reliability ${stats.avgScore} · ${esc(grade.label)}</p></div>
+      ${providerCard}
     </div>
   </section>`;
 }
@@ -382,62 +522,54 @@ export function renderSettings(state: WebState): string {
   const publicKeyLine = state.identity.publicKey
     ? `<p class="muted">Public key: ${esc(truncateId(state.identity.publicKey, 20))}</p>`
     : "";
-  const form = !state.identity.configured
-    ? `<form id="identity-create-form" autocomplete="off">
-        <h3>Create identity (first run)</h3>
-        <div class="form-row"><label>Password
-          <div class="input-wrap"><input id="create-password" name="password" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="create-password" class="btn-reveal">Show</button></div>
-        </label></div>
-        <div class="form-row"><label>Confirm password
-          <div class="input-wrap"><input id="create-confirm" name="confirm" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="create-confirm" class="btn-reveal">Show</button></div>
-        </label></div>
-        <div class="row"><button type="submit">Create identity</button></div>
-      </form>`
-    : !state.identity.unlocked
-      ? `<form id="identity-unlock-form" autocomplete="off">
-          <h3>Unlock keystore</h3>
-          <div class="form-row"><label>Password
-            <div class="input-wrap"><input id="unlock-password" name="password" type="password" autocomplete="current-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="unlock-password" class="btn-reveal">Show</button></div>
-          </label></div>
-          <div class="row"><button type="submit">Unlock</button></div>
-        </form>`
-      : `<div class="row"><button type="button" data-action="identity-lock">Lock identity</button></div>`;
-  const wordInputs = Array.from({ length: 12 }, (_, i) => {
+  const accountId = state.identity.publicKey
+    ? `<p class="muted">Account ID: ${esc(truncateId(Buffer.from(state.identity.publicKey, "base64").toString("hex"), 16))}</p>`
+    : "";
+
+  const changeWordInputs = Array.from({ length: 12 }, (_, i) => {
     const n = i + 1;
     return `<div class="form-row phrase-input"><label>${n}
-      <div class="input-wrap"><input id="recovery-word-${n}" name="word${n}" type="password" autocomplete="off" required minlength="1" placeholder="word ${n}" data-word-input="${n}" /><button type="button" data-action="toggle-word-reveal" data-word-slot="${n}" class="btn-reveal">Show</button></div>
+      <div class="input-wrap"><input id="change-word-${n}" name="word${n}" type="password" autocomplete="off" required minlength="1" placeholder="word ${n}" data-word-input="change-${n}" /><button type="button" data-action="toggle-word-reveal" data-word-slot="change-${n}" class="btn-reveal">Show</button></div>
     </label></div>`;
   }).join("");
-  const recoveryForm = `<form id="identity-recover-form" autocomplete="off">
-        <h3>Recover from phrase</h3>
-        <p class="muted">Enter your 12-word recovery phrase. You can paste all words at once into any field.</p>
-        <div id="phrase-validation-error" class="validation-error" hidden></div>
-        <div class="phrase-inputs">${wordInputs}</div>
+  const changePasswordForm = state.identity.configured && state.identity.unlocked ? `<details class="card"><summary>Change Password</summary><form id="identity-change-password-form" autocomplete="off">
+        <h3>Change Password</h3>
+        <p class="muted">Changing the password requires your current 12-word OpenStore Recovery Phrase v1, preserves the same account ID, and re-encrypts the keystore. An invalid phrase fails closed and leaves the existing password unchanged.</p>
+        <div id="change-phrase-validation-error" class="validation-error" hidden></div>
+        <div class="phrase-inputs">${changeWordInputs}</div>
         <div class="form-row"><label>New password
-          <div class="input-wrap"><input id="recover-password" name="password" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="recover-password" class="btn-reveal">Show</button></div>
+          <div class="input-wrap"><input id="change-new-password" name="newPassword" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="change-new-password" class="btn-reveal">Show</button></div>
         </label></div>
-        <div class="form-row"><label>Confirm password
-          <div class="input-wrap"><input id="recover-confirm" name="confirm" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="recover-confirm" class="btn-reveal">Show</button></div>
+        <div class="form-row"><label>Confirm new password
+          <div class="input-wrap"><input id="change-confirm" name="confirm" type="password" autocomplete="new-password" required minlength="1" /><button type="button" data-action="toggle-password" data-target="change-confirm" class="btn-reveal">Show</button></div>
         </label></div>
-        ${state.identity.configured ? `<div class="form-row"><label class="checkbox-label"><input id="recover-confirm-replace" type="checkbox" /> Replace existing keystore</label></div>` : ""}
-        <div class="row"><button type="submit">Recover identity</button></div>
-      </form>`;
+        <div class="row"><button type="submit">Change Password</button></div>
+      </form></details>` : "";
+
+  const accountSection = state.identity.configured && state.identity.unlocked
+    ? `
+    <div class="card">
+      <h3>Account</h3>
+      <p>Status: ${statusLine}</p>
+      ${publicKeyLine}
+      ${accountId}
+      <p class="muted">Label: ${esc(state.identity.label)}</p>
+    </div>
+    ${changePasswordForm}
+    <div class="card">
+      <h3>Actions</h3>
+      <div class="row"><a href="#/login" class="btn-secondary" data-action="switch-account-nav">Switch Account</a></div>
+      <div class="row"><button type="button" data-action="identity-logout" class="danger">Log Out</button></div>
+      <p class="muted">Log Out clears the decrypted session and returns to the login page. No account data is deleted.</p>
+    </div>`
+    : `<div class="card">
+        <p>No account is currently unlocked. <a href="#/login">Go to Login</a></p>
+      </div>`;
+
   return `
   <section aria-label="Settings">
     <h2>Settings</h2>
-    <div class="card">
-      <h3>Local identity</h3>
-      <p>Status: ${statusLine}</p>
-      <p class="muted">Label: ${esc(state.identity.label)}</p>
-      ${publicKeyLine}
-      ${form}
-      <p class="muted">Passwords are asked only when needed and never stored — not in this page, not in the backend, nowhere.
-      If you lose both your password and recovery phrase, your identity is permanently unrecoverable.
-      Identity management requires a server started with identity support; otherwise these actions report an error.</p>
-    </div>
-    <div class="card">
-      ${recoveryForm}
-    </div>
+    ${accountSection}
     <div class="card">
       <h3>Security guarantees</h3>
       <ul>
@@ -446,7 +578,6 @@ export function renderSettings(state: WebState): string {
         <li>Recovery phrases are shown once during creation, then immediately cleared from memory.</li>
         <li>Passwords are never stored — not in this page, not in the backend, nowhere.</li>
         <li>Downloads verify every piece before reconstructing your file; corrupt data fails closed.</li>
-        <li>Deletes are disabled until their backend integration lands.</li>
         <li>If you lose both your password and recovery phrase, your identity is permanently unrecoverable.</li>
       </ul>
     </div>
@@ -455,6 +586,14 @@ export function renderSettings(state: WebState): string {
 
 /** Full app body for the current view (header nav + notice + screen). */
 export function renderApp(state: WebState, stats: DashboardStats): string {
+  if (state.view === "login") {
+    return `
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">◈</span> OpenStore</div>
+  </header>
+  <main id="view">${noticeHtml(state.notice)}${renderLogin(state)}</main>
+  <footer class="footer"><span>OpenStore dashboard — encrypted storage network.</span></footer>`;
+  }
   const screen =
     state.view === "files"
       ? renderFiles(state)
@@ -465,11 +604,15 @@ export function renderApp(state: WebState, stats: DashboardStats): string {
           : state.view === "settings"
             ? renderSettings(state)
             : renderDashboard(state, stats);
+  const topbarAction = state.identity.unlocked
+    ? `<button type="button" data-action="identity-logout" class="topbar-action" aria-label="Log Out">Log Out</button>`
+    : `<a href="#/login" class="topbar-action">Log In</a>`;
   return `
   <header class="topbar">
     <div class="brand"><span class="brand-mark" aria-hidden="true">◈</span> OpenStore</div>
     ${navHtml(state.view)}
     ${state.demoMode ? `<span class="demo-badge" title="All data on screen is local mock data">Demo data</span>` : `<span class="live-badge" title="Data served by the OpenStore web backend">Live</span>`}
+    ${topbarAction}
   </header>
   <main id="view">${noticeHtml(state.notice)}${screen}</main>
   <footer class="footer"><span>OpenStore dashboard — encrypted storage network.</span></footer>`;

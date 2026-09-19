@@ -14,7 +14,7 @@ import {
   uploadEncrypting,
   uploadPreparing,
 } from "./store.js";
-import { renderApp, renderDashboard, renderFiles, renderNodes, renderSettings, renderUpload } from "./views.js";
+import { renderApp, renderDashboard, renderFiles, renderLogin, renderNodes, renderSettings, renderUpload } from "./views.js";
 
 // Secret identifiers/values that must never render. The English word
 // "password" legitimately appears in the Settings safety prose, so it is
@@ -102,7 +102,7 @@ describe("web views", () => {
 
   it("settings view discloses identity limits", () => {
     const html = renderSettings(createInitialState());
-    expect(html).toContain("Not configured");
+    expect(html).toContain("No account is currently unlocked");
     expect(html).toContain("never stored");
     expect(html).toContain("Security guarantees");
   });
@@ -143,51 +143,29 @@ describe("web views", () => {
     expect(html).toContain("&lt;img src=x onerror=&quot;1&quot;&gt;");
   });
 
-  it("settings shows creation, unlock, and lock states safely", () => {
-    // Unconfigured: creation form, password fields with show/hide toggles
-    const fresh = renderSettings(createInitialState());
-    expect(fresh).toContain('id="identity-create-form"');
-    expect(fresh).toContain('type="password"');
-    expect(fresh).not.toContain("value=");
-    expect(fresh).toContain('data-action="toggle-password"');
+  it("settings shows account info and controls when unlocked", () => {
+    // Unlocked state shows account info, change password, switch, log out
+    const unlocked = identityUnlocked(createInitialState(), "cHVi");
+    const html = renderSettings(unlocked);
+    expect(html).toContain("Account");
+    expect(html).toContain("Configured");
+    expect(html).toContain("Unlocked");
+    expect(html).toContain("cHVi");
+    expect(html).toContain('id="identity-change-password-form"');
+    expect(html).toContain('data-action="toggle-password"');
+    expect(html).toContain('data-action="identity-logout"');
+    expect(html).toContain('href="#/login"');
+  });
 
-    // Creation result: phrase masked by default, warning, reveal/copy buttons
-    const created = identityCreationReceived(createInitialState(), {
-      publicKey: "cHVi",
-      recoveryPhrase: ["alpha", "bravo"],
-    });
-    const creationHtml = renderSettings(created);
-    expect(creationHtml).toContain("••••••••");
-    expect(creationHtml).not.toContain(">alpha<");
-    expect(creationHtml).not.toContain(">bravo<");
-    expect(creationHtml).toMatch(/only time|back up/i);
-    expect(creationHtml).toContain('data-action="reveal-phrase"');
-    expect(creationHtml).toContain('data-action="copy-phrase"');
-    expect(creationHtml).toContain('data-action="creation-dismiss"');
-    expect(creationHtml).not.toContain("privateKey");
-
-    // When revealed, words appear
-    const revealedState = toggleRecoveryPhraseReveal(created);
-    expect(revealedState.recoveryPhraseRevealed).toBe(true);
-    const revealedHtml = renderSettings(revealedState);
-    expect(revealedHtml).toContain(">alpha<");
-    expect(revealedHtml).toContain(">bravo<");
-    expect(revealedHtml).toContain("Hide phrase");
-
-    // Locked: unlock form with password toggle
+  it("settings shows locked state with link to login", () => {
     const locked = identityLocked(identityUnlocked(createInitialState(), "cHVi"));
-    const lockedHtml = renderSettings(locked);
-    expect(lockedHtml).toContain('id="identity-unlock-form"');
-    expect(lockedHtml).toContain('data-action="toggle-password"');
-
-    // Unlocked: lock button, truncated public key
-    const unlockedHtml = renderSettings(identityUnlocked(createInitialState(), "cHVi"));
-    expect(unlockedHtml).toContain('data-action="identity-lock"');
-    expect(unlockedHtml).toContain("cHVi");
+    const html = renderSettings(locked);
+    expect(html).toContain("No account is currently unlocked");
+    expect(html).toContain('href="#/login"');
   });
 
   it("recovery form has masked word inputs with reveal toggles and paste hint", () => {
-    const html = renderSettings(createInitialState());
+    const html = renderLogin(createInitialState());
     expect(html).toContain('id="identity-recover-form"');
     expect(html).toContain('data-word-input="1"');
     expect(html).toContain('data-action="toggle-word-reveal"');

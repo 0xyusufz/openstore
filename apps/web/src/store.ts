@@ -13,7 +13,10 @@ import type { DashboardStats, WebIdentityStatus, WebNode } from "./types.js";
 import type { CatalogEntry } from "../../client/catalog.js";
 import type { BackendSnapshot, IdentityCreation, ProviderStatus, UploadFileResult } from "../backend.js";
 
-export type ViewId = "dashboard" | "files" | "upload" | "nodes" | "settings";
+export type ViewId = "login" | "dashboard" | "files" | "upload" | "nodes" | "settings";
+
+/** Views that require authentication (protected). */
+export const PROTECTED_VIEWS: ViewId[] = ["dashboard", "files", "upload", "nodes", "settings"];
 
 export const VIEWS: { id: ViewId; label: string; hash: string }[] = [
   { id: "dashboard", label: "Dashboard", hash: "#/dashboard" },
@@ -70,11 +73,15 @@ export interface WebState {
   provider: ProviderStatus | null;
   notice: string | null;
   demoMode: boolean;
+  /** Accounts available for login (public metadata only, no secrets). */
+  accounts: Array<{ accountId: string; publicKey: string }>;
+  /** Whether auth is required (accounts exist server-side). */
+  authRequired: boolean;
 }
 
 export function createInitialState(): WebState {
   return {
-    view: "dashboard",
+    view: "login",
     files: MOCK_FILES.map((f) => ({ ...f })),
     nodes: MOCK_NODES.map((n) => ({ ...n })),
     identity: { ...MOCK_IDENTITY },
@@ -85,11 +92,14 @@ export function createInitialState(): WebState {
     provider: null,
     notice: null,
     demoMode: DEMO_MODE,
+    accounts: [],
+    authRequired: false,
   };
 }
 
 /** Map a location hash to a view (unknown → dashboard). */
 export function parseHash(hash: string): ViewId {
+  if (hash === "#/login") return "login";
   const found = VIEWS.find((v) => v.hash === hash);
   return found ? found.id : "dashboard";
 }
@@ -535,6 +545,24 @@ export function resetUploadDraft(state: WebState): WebState {
     ...state,
     upload: { status: "idle", fileName: "", fileSize: 0, note: null, retryable: false },
   };
+}
+
+/** Apply accounts list and auth-required flag from the server. */
+export function applyAccounts(state: WebState, accounts: Array<{ accountId: string; publicKey: string }>, authRequired: boolean): WebState {
+  return { ...state, accounts, authRequired };
+}
+
+/** Whether the current view is protected (requires authentication). */
+export function isProtectedView(state: WebState): boolean {
+  return PROTECTED_VIEWS.includes(state.view);
+}
+
+/** Redirect to login when not authenticated (all protected views). */
+export function requireAuth(state: WebState): WebState {
+  if (!state.identity.unlocked && PROTECTED_VIEWS.includes(state.view)) {
+    return { ...state, view: "login", notice: "Please log in to continue." };
+  }
+  return state;
 }
 
 export function dashboardStats(state: WebState): DashboardStats {

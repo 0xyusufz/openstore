@@ -17,6 +17,7 @@ import {
   identityUnlocked,
   navigate,
   parseHash,
+  requireAuth,
   resetUploadDraft,
   retryDownload,
   retryUpload,
@@ -31,7 +32,7 @@ import {
 describe("web UI store", () => {
   it("starts from mock data in demo mode", () => {
     const state = createInitialState();
-    expect(state.view).toBe("dashboard");
+    expect(state.view).toBe("login");
     expect(state.demoMode).toBe(true);
     expect(state.files.length).toBeGreaterThan(0);
     expect(state.nodes.length).toBeGreaterThan(0);
@@ -213,5 +214,68 @@ describe("web UI store", () => {
     const dismissed = identityCreationDismissed(revealed);
     expect(dismissed.identityCreation).toBeNull();
     expect(dismissed.recoveryPhraseRevealed).toBe(false);
+  });
+
+  it("route guard redirects unprotected views to login when not authenticated", () => {
+    const initial = createInitialState();
+    expect(initial.identity.unlocked).toBe(false);
+
+    // Navigating to any protected view while logged out redirects to login
+    for (const view of ["dashboard", "files", "upload", "nodes", "settings"] as const) {
+      const state = navigate(createInitialState(), view);
+      const guarded = requireAuth(state);
+      expect(guarded.view).toBe("login");
+      expect(guarded.notice).toBe("Please log in to continue.");
+    }
+
+    // Login view is never redirected
+    const loginState = navigate(createInitialState(), "login");
+    const guardedLogin = requireAuth(loginState);
+    expect(guardedLogin.view).toBe("login");
+
+    // When unlocked, protected views are accessible
+    const unlocked = identityUnlocked(createInitialState(), "cHVi");
+    for (const view of ["dashboard", "files", "upload", "nodes", "settings"] as const) {
+      const state = navigate(unlocked, view);
+      const guarded = requireAuth(state);
+      expect(guarded.view).toBe(view);
+    }
+  });
+
+  it("browser runtime: guard must run AFTER syncFromHash so hash cannot override login redirect", () => {
+    // Models the exact composition in app.ts: guardAuth(syncFromHash(next))
+    // The server returns identity with unlocked=false. The browser hash is #/dashboard.
+    // The guard MUST override the hash-derived view back to "login".
+    const serverIdentity = {
+      configured: true,
+      unlocked: false,
+      label: "local keystore",
+      publicKey: "cHVi",
+    };
+
+    // Start with a state that has the server's locked identity
+    let state = createInitialState();
+    state = { ...state, identity: { ...serverIdentity } };
+
+    // syncFromHash reads window.location.hash — in a test we simulate it
+    // by calling navigate directly. In the browser, syncFromHash would set
+    // view to "dashboard" from #/dashboard.
+    state = navigate(state, "dashboard");
+
+    // guardAuth must redirect to login because identity is not unlocked
+    const guarded = requireAuth(state);
+    expect(guarded.view).toBe("login");
+    expect(guarded.notice).toBe("Please log in to continue.");
+
+    // Full composition: guardAuth(syncFromHash(state)) — guard runs last
+    const fromHash = navigate(state, "dashboard"); // syncFromHash equivalent
+    const finalState = requireAuth(fromHash);
+    expect(finalState.view).toBe("login");
+
+    // The critical invariant: even when the hash says #/dashboard,
+    // if identity.unlocked is false, the view MUST be "login"
+    const hashOverrides = navigate(requireAuth(navigate(state, "dashboard")), "dashboard");
+    const mustStillBeLogin = requireAuth(hashOverrides);
+    expect(mustStillBeLogin.view).toBe("login");
   });
 });
