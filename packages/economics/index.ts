@@ -118,6 +118,8 @@ export function createEconomics(options: EconomicsOptions = {}) {
   // must not issue credits twice. Different periods (different eventId or different capacity/duration) remain separate earnings.
   // Ledger remains append-only; duplicates produce no new entry and no balance change.
   const seenProviderEvents = new Set<string>();
+  // Idempotency for explicit transfers (used by settlement). Same eventId => same transfer not repeated.
+  const seenTransfers = new Set<string>();
 
   function getAccount(id: AccountId): Account | undefined {
     const acc = accounts.get(id);
@@ -329,6 +331,98 @@ export function createEconomics(options: EconomicsOptions = {}) {
         balanceAfter: acc.balance,
         reason,
       });
+    },
+
+    /**
+     * Internal transfer between accounts — balanced, integer-safe, idempotent, atomic.
+     * **Authority boundary:** This is an internal settlement primitive. Direct external use
+     * would bypass settlement invariants (provider eligibility, amount determinism, settlement
+     * status machine, audit semantics). Callers must go through `packages/settlement` which
+     * validates `isMarketplaceEligible`, derives `amount` deterministically, checks
+     * `consumerBalance`, and enforces `pending→finalized|rejected|failed` with append-only
+     * settlement records. Direct calls are rejected unless `reason` starts with `settlement:` and
+     * `eventId` (settlement id) is provided.
+     * Provider credits and consumer debits balance: same `amount` debited from `fromId` and credited to `toId`.
+     * `totalSupply` is unchanged (transfer, not issuance). Append-only, replay-safe via `eventId`, atomic.
+     */
+    transferCredits(
+      fromId: AccountId,
+      toId: AccountId,
+      amount: CreditAmount,
+      reason = "transfer",
+      eventId?: string,
+    ): { fromEntry: LedgerEntry; toEntry: LedgerEntry } | null {
+      assertAccountId(fromId);
+      assertAccountId(toId);
+      if (fromId === toId) throw new TypeError("fromId and toId must differ");
+      assertCreditAmount(amount, "amount");
+      if (amount === 0) throw new TypeError("amount must be >0");
+      if (eventId !== undefined && (typeof eventId !== "string" || eventId.length === 0 || eventId.length > 256)) throw new TypeError("eventId must be non-empty string 1-256 if provided");
+      // Authority boundary: only settlement layer may create transfers. Require explicit settlement reason + eventId.
+      if (eventId === undefined || !reason.startsWith("settlement:")) {
+        throw new Error("transferCredits is internal to settlement: use packages/settlement with settlement id and provider eligibility");
+      }
+      const transferKey = `transfer:${eventId}|${fromId}|${toId}|${amount}`;
+      if (seenTransfers.has(transferKey)) {
+        return null;
+      }
+      // Atomic validation before any mutation
+      const fromAcc = accounts.get(fromId);
+      const fromBalance = fromAcc ? fromAcc.balance : 0;
+      if (fromBalance < amount) throw new Error(`insufficient balance: need ${amount}, have ${fromBalance}`);
+      const toAcc = accounts.get(toId);
+      const toBalance = toAcc ? toAcc.balance : 0;
+      if (toBalance > Number.MAX_SAFE_INTEGER - amount) throw new RangeError("balance would exceed safe integer");
+      // Atomic mutation + ledger append; rollback on any failure
+      const ts = now();
+      let fromEntry: LedgerEntry | undefined;
+      let toEntry: LedgerEntry | undefined;
+      const prevFrom = fromAcc ? { ...fromAcc } : undefined;
+      const prevTo = toAcc ? { ...toAcc } : undefined;
+      try {
+        const newFrom: Account = { id: fromId, balance: fromBalance - amount, createdAt: fromAcc ? fromAcc.createdAt : ts };
+        const newTo: Account = { id: toId, balance: toBalance + amount, createdAt: toAcc ? toAcc.createdAt : ts };
+        accounts.set(fromId, newFrom);
+        accounts.set(toId, newTo);
+        fromEntry = appendEntry({
+          timestamp: ts,
+          accountId: fromId,
+          type: "spend",
+          amount,
+          delta: -amount,
+          balanceAfter: newFrom.balance,
+          reason,
+        });
+        toEntry = appendEntry({
+          timestamp: ts,
+          accountId: toId,
+          type: "earn",
+          amount,
+          delta: amount,
+          balanceAfter: newTo.balance,
+          reason,
+        });
+        seenTransfers.add(transferKey);
+      } catch (e) {
+        // Rollback balances and ledger on any failure (atomicity)
+        if (prevFrom) accounts.set(fromId, prevFrom);
+        else accounts.delete(fromId);
+        if (prevTo) accounts.set(toId, prevTo);
+        else accounts.delete(toId);
+        // Remove ledger entries if one was appended before failure
+        if (fromEntry) {
+          const idx = ledger.findIndex((el) => el.id === fromEntry!.id);
+          if (idx !== -1) ledger.splice(idx, 1);
+          nextId--;
+        }
+        if (toEntry) {
+          const idx = ledger.findIndex((el) => el.id === toEntry!.id);
+          if (idx !== -1) ledger.splice(idx, 1);
+          nextId--;
+        }
+        throw e;
+      }
+      return { fromEntry: fromEntry!, toEntry: toEntry! };
     },
   };
 }
