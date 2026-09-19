@@ -11,6 +11,7 @@ import { DEFAULT_RELIABILITY_SCORE } from "../../packages/registry/index.js";
 import type { StorageNodeEndpoint } from "./index.js";
 import { storePieceOnNodes } from "./index.js";
 import type { StorePieceOptions, StorePiecesReport } from "./index.js";
+import { hasTrustedCapacity as sharedHasTrustedCapacity, isPlacementEligible as sharedIsPlacementEligible } from "../../packages/placement/index.js";
 
 export interface SelectionOptions {
   replicationFactor: number;
@@ -23,26 +24,7 @@ export function isPlacementEligibleEndpoint(
   pieceSize: number,
   requireTrustedCapacity = true,
 ): boolean {
-  if (!endpoint || endpoint.lifecycle === "draining" || endpoint.lifecycle === "released") return false;
-  if (endpoint.capabilities?.pieceStore === false) return false;
-  if (endpoint.capabilities?.maxPieceBytes !== undefined &&
-      (!Number.isSafeInteger(endpoint.capabilities.maxPieceBytes) || endpoint.capabilities.maxPieceBytes < pieceSize)) return false;
-  if (endpoint.capacity === undefined) return !requireTrustedCapacity;
-  const allocated = endpoint.capacity.allocatedBytes ?? endpoint.capacity.totalBytes;
-  const { usedBytes, availableBytes } = endpoint.capacity;
-  if (allocated === undefined) {
-    return !requireTrustedCapacity && endpoint.lifecycle === undefined &&
-      Number.isSafeInteger(usedBytes) && usedBytes >= 0 &&
-      Number.isSafeInteger(availableBytes) && availableBytes >= 0 &&
-      pieceSize <= availableBytes;
-  }
-  if (allocated === undefined || !Number.isSafeInteger(allocated) || allocated <= 0 ||
-      !Number.isSafeInteger(usedBytes) || usedBytes < 0 ||
-      !Number.isSafeInteger(availableBytes) || availableBytes < 0 ||
-      usedBytes > allocated || availableBytes > allocated ||
-      usedBytes > Number.MAX_SAFE_INTEGER - availableBytes ||
-      usedBytes + availableBytes > allocated) return false;
-  return pieceSize >= 0 && pieceSize <= availableBytes;
+  return sharedIsPlacementEligible(endpoint as unknown as Parameters<typeof sharedIsPlacementEligible>[0], pieceSize, requireTrustedCapacity);
 }
 
 /**
@@ -116,13 +98,7 @@ export function selectAvailableNodes(
 }
 
 function hasTrustedCapacity(capacity: NodeRecord["capacity"], pieceSize: number): boolean {
-  const allocated = capacity.allocatedBytes ?? capacity.totalBytes;
-  const values = [allocated, capacity.usedBytes, capacity.availableBytes];
-  if (allocated === undefined || allocated <= 0 || values.some((value) => value === undefined || !Number.isSafeInteger(value) || value < 0)) return false;
-  if (capacity.usedBytes > allocated || capacity.availableBytes > allocated) return false;
-  if (capacity.usedBytes > Number.MAX_SAFE_INTEGER - capacity.availableBytes) return false;
-  if (capacity.usedBytes + capacity.availableBytes > allocated) return false;
-  return pieceSize <= capacity.availableBytes && pieceSize <= Number.MAX_SAFE_INTEGER - capacity.usedBytes;
+  return sharedHasTrustedCapacity(capacity as unknown as Parameters<typeof sharedHasTrustedCapacity>[0], pieceSize);
 }
 
 /**

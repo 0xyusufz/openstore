@@ -31,6 +31,10 @@ import { createProviderManager } from "./provider.js";
 import type { ProviderManager, ProviderStatus } from "./provider.js";
 
 export type { ProviderManager, ProviderStatus } from "./provider.js";
+import { createMarketplace } from "../../packages/marketplace/index.js";
+import type { MarketplaceFilter, MarketplaceProvider, MarketplaceSnapshot } from "../../packages/marketplace/index.js";
+
+export type { MarketplaceFilter, MarketplaceProvider, MarketplaceSnapshot } from "../../packages/marketplace/index.js";
 import { createDekStore } from "./dekstore.js";
 import type { DekStore } from "./dekstore.js";
 import type { StorageNodeEndpoint } from "../client/index.js";
@@ -240,6 +244,16 @@ export interface WebBackend {
    * calls fail clearly without a registry.
    */
   readonly provider: ProviderManager;
+  /**
+   * Marketplace provider listings — backend-authoritative, capacity/operational only.
+   * Excludes draining/released/ineligible providers; fail-closed when coordinator
+   * is not configured or listing would require stale data.
+   * No economics/credits/payment semantics.
+   */
+  readonly marketplace: {
+    list(filter?: MarketplaceFilter): MarketplaceProvider[];
+    snapshot(filter?: MarketplaceFilter): MarketplaceSnapshot;
+  };
 }
 
 export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
@@ -273,6 +287,16 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
     registry,
     identityPassword: options.providerIdentityPassword ?? process.env["OPENSTORE_PROVIDER_IDENTITY_PASSWORD"],
   });
+  // Marketplace is backend-authoritative: derived only from the live registry.
+  // No stale or demo synthesis; unconfigured registry fails closed.
+  const marketplace = registry
+    ? createMarketplace(registry)
+    : {
+        version: 1,
+        list: (): never => { throw new Error("marketplace unavailable: coordinator not configured"); },
+        snapshot: (): never => { throw new Error("marketplace unavailable: coordinator not configured"); },
+        isEligible: (): never => { throw new Error("marketplace unavailable: coordinator not configured"); },
+      } as unknown as ReturnType<typeof createMarketplace>;
   // The DEK vault lives alongside the manifests (sibling file, never
   // inside the manifest directory) and only exists for live backends.
   const dekStore: DekStore | null = options.manifestDir
@@ -344,6 +368,7 @@ export function createWebBackend(options: WebBackendOptions = {}): WebBackend {
     version: WEB_BACKEND_VERSION,
     status: { ...status },
     provider,
+    marketplace,
 
     async getSnapshot(): Promise<BackendSnapshot> {
       const files = catalog ? await catalog.listEntries() : MOCK_FILES.map((f) => ({ ...f }));

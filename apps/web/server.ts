@@ -237,6 +237,16 @@ async function handleRequest(
     }
     return;
   }
+  if ((rawPath === "/api/marketplace/providers" || rawPath === "/api/marketplace") && (method === "GET" || method === "HEAD")) {
+    try {
+      const filter = parseMarketplaceFilter((req.url ?? "").split("?")[1] ?? "");
+      const snapshot = backend.marketplace.snapshot(filter);
+      sendJson(res, 200, snapshot, headOnly);
+    } catch (err) {
+      sendJson(res, marketplaceErrorStatus((err as Error).message), { error: toSafeMarketplaceError((err as Error).message) }, headOnly);
+    }
+    return;
+  }
   if (rawPath === "/api/identity/create" && method === "POST") {
     const body = await readJsonBody(req, res);
     if (!body.ok) return;
@@ -442,6 +452,69 @@ function toSafeProviderError(message: string): string {
     return "Storage error. Please try again.";
   }
   return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+}
+
+function parseMarketplaceFilter(query: string): Record<string, unknown> {
+  if (!query) return {};
+  const params = new URLSearchParams(query);
+  const out: Record<string, unknown> = {};
+  const minAvailable = params.get("minAvailableBytes");
+  if (minAvailable !== null) {
+    const v = Number(minAvailable);
+    if (!Number.isSafeInteger(v) || v < 0) throw new Error("minAvailableBytes must be a non-negative safe integer");
+    out["minAvailableBytes"] = v;
+  }
+  const minScore = params.get("minScore");
+  if (minScore !== null) {
+    const v = Number(minScore);
+    if (!Number.isInteger(v) || v < 0 || v > 100) throw new Error("minScore must be 0-100");
+    out["minScore"] = v;
+  }
+  const minStorageScore = params.get("minStorageScore");
+  if (minStorageScore !== null) {
+    const v = Number(minStorageScore);
+    if (!Number.isInteger(v) || v < 0 || v > 100) throw new Error("minStorageScore must be 0-100");
+    out["minStorageScore"] = v;
+  }
+  const transport = params.get("transport");
+  if (transport !== null) {
+    if (transport !== "http" && transport !== "libp2p") throw new Error("transport must be http or libp2p");
+    out["transport"] = transport;
+  }
+  const limit = params.get("limit");
+  if (limit !== null) {
+    const v = Number(limit);
+    if (!Number.isInteger(v) || v < 1 || v > 100) throw new Error("limit must be 1-100");
+    out["limit"] = v;
+  }
+  const offset = params.get("offset");
+  if (offset !== null) {
+    const v = Number(offset);
+    if (!Number.isInteger(v) || v < 0) throw new Error("offset must be a non-negative integer");
+    out["offset"] = v;
+  }
+  return out;
+}
+
+function marketplaceErrorStatus(message: string): number {
+  if (/marketplace unavailable|coordinator not configured/i.test(message)) return 503;
+  if (/must be|invalid|limit|offset|transport/i.test(message)) return 400;
+  return 500;
+}
+
+function toSafeMarketplaceError(message: string): string {
+  if (typeof message !== "string" || message === "") return "Marketplace unavailable. Please try again.";
+  if (/privatekey|recoveryphrase|mnemonic|encryptionkey|decryptionkey|\bdek\b|password|plaintext|auth\s*tag|authTag|ciphertext/i.test(message)) {
+    return "Marketplace unavailable. Please try again.";
+  }
+  if (/\/[^\s]*\.(?:json|txt|log|db)|ENOENT|EACCES|statfs|\bat .*:\d+:\d+/i.test(message)) {
+    return "Marketplace unavailable. Please try again.";
+  }
+  let safe = message;
+  if (/marketplace unavailable|coordinator not configured/i.test(safe)) return "Marketplace is unavailable: coordinator not configured or stale.";
+  if (/must be|invalid/i.test(safe)) return message;
+  safe = safe.replace(/\s+/g, " ").trim();
+  return safe.length > 500 ? `${safe.slice(0, 500)}…` : safe;
 }
 
 /**
