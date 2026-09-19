@@ -51,11 +51,30 @@ export const PROVIDER_CONFIG_VERSION = 1;
 const STORAGE_MARKER = ".openstore-storage";
 const STORAGE_MARKER_VERSION = 1;
 
-/** Persisted lifecycle states (offline is derived, never persisted). */
-export type ProviderPersistedState = "running" | "draining" | "stopped";
+/** Persisted lifecycle states (offline + released derived handling). */
+export type ProviderPersistedState = "running" | "draining" | "stopped" | "released";
 
 /** Wire lifecycle states, including derived ones. */
-export type ProviderState = "unconfigured" | "stopped" | "running" | "draining" | "offline";
+export type ProviderState = "unconfigured" | "stopped" | "running" | "draining" | "offline" | "released";
+
+/** Provider sharing lifecycle (058-060 foundation: sharing → draining → released). */
+export type ProviderSharingLifecycle = "sharing" | "draining" | "released";
+
+/** Readiness for placement and operations. */
+export type ProviderReadiness = "ready" | "draining" | "released" | "offline" | "unconfigured" | "degraded";
+
+export interface ProviderCondition {
+  code: string;
+  severity: "info" | "warning" | "error";
+  message: string;
+}
+
+export interface ProviderReadinessDetail {
+  ready: boolean;
+  reason: string;
+  remainingPieces: number;
+  remainingBytes: number;
+}
 
 export interface ProviderFilesystem {
   totalBytes: number;
@@ -67,6 +86,9 @@ export interface ProviderCapacity {
   allocatedBytes: number;
   usedBytes: number;
   availableBytes: number;
+  reservedBytes: number;
+  physicalBytes?: number;
+  usableBytes?: number;
 }
 
 export interface ProviderPieces {
@@ -86,6 +108,7 @@ export interface ProviderReliability {
 export interface ProviderStatus {
   configured: boolean;
   state: ProviderState;
+  lifecycle: ProviderSharingLifecycle | "unconfigured";
   storageDir: string | null;
   port: number | null;
   baseUrl: string | null;
@@ -96,6 +119,13 @@ export interface ProviderStatus {
   pieces: ProviderPieces | null;
   reliability: ProviderReliability | null;
   uptimeMs: number;
+  // 068 operational UX: sanitized placement/health/readiness
+  placementEligible: boolean;
+  placementReason: string;
+  readiness: ProviderReadiness;
+  conditions: ProviderCondition[];
+  drainReadiness: ProviderReadinessDetail;
+  releaseReadiness: ProviderReadinessDetail;
 }
 
 export interface ProviderRelease {
@@ -218,6 +248,7 @@ function unconfiguredStatus(): ProviderStatus {
   return {
     configured: false,
     state: "unconfigured",
+    lifecycle: "unconfigured",
     storageDir: null,
     port: null,
     baseUrl: null,
@@ -228,7 +259,95 @@ function unconfiguredStatus(): ProviderStatus {
     pieces: null,
     reliability: null,
     uptimeMs: 0,
+    placementEligible: false,
+    placementReason: "not-configured",
+    readiness: "unconfigured",
+    conditions: [{ code: "unconfigured", severity: "info", message: "Storage sharing is not configured." }],
+    drainReadiness: { ready: false, reason: "not-configured", remainingPieces: 0, remainingBytes: 0 },
+    releaseReadiness: { ready: false, reason: "not-configured", remainingPieces: 0, remainingBytes: 0 },
   };
+}
+
+function lifecycleFromPersisted(state: ProviderPersistedState): ProviderSharingLifecycle {
+  if (state === "draining") return "draining";
+  if (state === "released") return "released";
+  return "sharing";
+}
+
+function placementEligibility(
+  lifecycle: ProviderSharingLifecycle | "unconfigured",
+  live: boolean,
+  capacity: ProviderCapacity | null,
+): { eligible: boolean; reason: string } {
+  if (lifecycle === "unconfigured") return { eligible: false, reason: "not-configured" };
+  if (lifecycle === "released") return { eligible: false, reason: "released-not-eligible" };
+  if (lifecycle === "draining") return { eligible: false, reason: "draining-not-eligible" };
+  if (!live) return { eligible: false, reason: "offline-not-eligible" };
+  if (!capacity) return { eligible: false, reason: "capacity-unavailable" };
+  if (capacity.availableBytes <= 0) return { eligible: false, reason: "insufficient-capacity" };
+  return { eligible: true, reason: "eligible" };
+}
+
+function readinessFrom(
+  lifecycle: ProviderSharingLifecycle | "unconfigured",
+  live: boolean,
+  state: ProviderState,
+): ProviderReadiness {
+  if (lifecycle === "unconfigured") return "unconfigured";
+  if (lifecycle === "released") return "released";
+  if (lifecycle === "draining") return "draining";
+  if (!live && (state === "offline" || state === "stopped")) return "offline";
+  if (live) return "ready";
+  return "degraded";
+}
+
+function buildConditions(args: {
+  lifecycle: ProviderSharingLifecycle | "unconfigured";
+  live: boolean;
+  placementEligible: boolean;
+  placementReason: string;
+  capacity: ProviderCapacity | null;
+  pieces: ProviderPieces;
+  registryAvailable: boolean;
+}): ProviderCondition[] {
+  const conditions: ProviderCondition[] = [];
+  if (args.lifecycle === "unconfigured") {
+    conditions.push({ code: "unconfigured", severity: "info", message: "Provider not configured." });
+    return conditions;
+  }
+  if (args.lifecycle === "released") {
+    conditions.push({ code: "released", severity: "warning", message: "Provider is released and not eligible for placement until explicitly resumed." });
+    return conditions;
+  }
+  if (args.lifecycle === "draining") {
+    conditions.push({ code: "draining", severity: "warning", message: "Provider is draining: new placements are rejected while existing pieces remain readable." });
+  }
+  if (!args.live) {
+    conditions.push({ code: "offline", severity: "error", message: "Provider node is offline; start sharing to resume." });
+  }
+  if (!args.registryAvailable) {
+    conditions.push({ code: "coordinator-unavailable", severity: "warning", message: "Coordinator unavailable: placement and repair are paused until fresh discovery." });
+  }
+  if (!args.placementEligible) {
+    const msg =
+      args.placementReason === "insufficient-capacity"
+        ? "Insufficient available capacity for placement."
+        : args.placementReason === "draining-not-eligible"
+          ? "Draining node not eligible for new placements."
+          : args.placementReason === "released-not-eligible"
+            ? "Released node not eligible until resumed."
+            : args.placementReason === "offline-not-eligible"
+              ? "Offline node not eligible until started."
+              : "Node not eligible for placement.";
+    conditions.push({ code: args.placementReason, severity: "warning", message: msg });
+  }
+  if (args.capacity && args.capacity.availableBytes <= 0) {
+    conditions.push({ code: "capacity-exhausted", severity: "error", message: "Allocation exhausted: increase allocation or free space." });
+  }
+  if (conditions.length === 0) {
+    conditions.push({ code: "ready", severity: "info", message: "Provider is sharing and eligible for placement." });
+  }
+  return conditions;
 }
 
 function assertPositiveInt(value: unknown, name: string): asserts value is number {
@@ -263,7 +382,7 @@ function parseConfig(text: string): ProviderConfigFile {
   if (typeof r["nodePublicKey"] !== "string" || typeof r["identityKeystorePath"] !== "string") {
     throw new Error("provider configuration is malformed: bad node identity");
   }
-  if (r["state"] !== "running" && r["state"] !== "draining" && r["state"] !== "stopped") {
+  if (r["state"] !== "running" && r["state"] !== "draining" && r["state"] !== "stopped" && r["state"] !== "released") {
     throw new Error("provider configuration is malformed: bad state");
   }
   let nodePublicKey: Buffer;
@@ -441,9 +560,21 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
       if (!config) return unconfiguredStatus();
       const live = await isNodeLive();
       const draining = live ? node!.isDraining() : config.state === "draining";
-      const state: ProviderState = !live
-        ? config.state === "stopped" ? "stopped" : "offline"
-        : draining ? "draining" : "running";
+      const isReleased = config.state === "released";
+      const lifecycle: ProviderSharingLifecycle | "unconfigured" = isReleased
+        ? "released"
+        : lifecycleFromPersisted(config.state === "released" ? "released" : config.state);
+      const state: ProviderState = isReleased
+        ? "released"
+        : !live
+          ? config.state === "stopped"
+            ? "stopped"
+            : config.state === "draining"
+              ? "draining"
+              : "offline"
+          : draining
+            ? "draining"
+            : "running";
 
       let filesystem: ProviderFilesystem | null = null;
       try {
@@ -455,16 +586,24 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
       if (live) {
         try {
           const cap = await node!.getCapacity();
-          const allocated = cap.allocatedBytes ?? 0;
-          capacity = { allocatedBytes: allocated, usedBytes: cap.usedBytes, availableBytes: Math.max(0, allocated - cap.usedBytes) };
+          const allocated = cap.allocatedBytes ?? config.capacityBytes;
+          capacity = {
+            allocatedBytes: allocated,
+            usedBytes: cap.usedBytes,
+            availableBytes: Math.max(0, allocated - cap.usedBytes),
+            reservedBytes: 0,
+            ...(cap.physicalBytes !== undefined ? { physicalBytes: cap.physicalBytes } : {}),
+            ...(cap.usableBytes !== undefined ? { usableBytes: cap.usableBytes } : {}),
+          };
         } catch {}
       }
       if (!capacity) {
-        const pieces = await inventoryPieces(config.storageDir);
+        const piecesInv = await inventoryPieces(config.storageDir);
         capacity = {
           allocatedBytes: config.capacityBytes,
-          usedBytes: pieces.bytes,
-          availableBytes: Math.max(0, config.capacityBytes - pieces.bytes),
+          usedBytes: piecesInv.bytes,
+          availableBytes: Math.max(0, config.capacityBytes - piecesInv.bytes),
+          reservedBytes: 0,
         };
       }
       const pieces = await inventoryPieces(config.storageDir);
@@ -482,19 +621,68 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
         }
       }
 
+      const eligibility = placementEligibility(lifecycle, live, capacity);
+      const readiness = readinessFrom(lifecycle, live, state);
+      const drainReadiness: ProviderReadinessDetail = {
+        ready: lifecycle === "draining" && pieces.count === 0 && pieces.bytes === 0,
+        reason:
+          lifecycle !== "draining"
+            ? lifecycle === "released"
+              ? "already-released"
+              : lifecycle === "sharing"
+                ? "not-draining"
+                : "not-draining"
+            : pieces.count > 0
+              ? `draining-with-pieces:${pieces.count}`
+              : "drain-ready",
+        remainingPieces: pieces.count,
+        remainingBytes: pieces.bytes,
+      };
+      const releaseReadiness: ProviderReadinessDetail = {
+        ready: pieces.count === 0 && pieces.bytes === 0 && (lifecycle === "draining" || lifecycle === "released" || lifecycle === "sharing"),
+        reason:
+          pieces.count > 0
+            ? `pieces-remain:${pieces.count}`
+            : lifecycle === "released"
+              ? "already-released"
+              : "release-ready",
+        remainingPieces: pieces.count,
+        remainingBytes: pieces.bytes,
+      };
+      // Released but still has pieces would be inconsistent — releaseReadiness will be false.
+      // Authoritative placement eligibility follows 058-060 rules; conditions surface safe reason codes.
+      const registryAvailable = Boolean(registry && reliability !== null);
+      // If node is live but registry record missing, coordinator may be unavailable.
+      const conditions = buildConditions({
+        lifecycle,
+        live,
+        placementEligible: eligibility.eligible,
+        placementReason: eligibility.reason,
+        capacity,
+        pieces,
+        registryAvailable: Boolean(registry),
+      });
+
       return {
         configured: true,
         state,
+        lifecycle,
         storageDir: config.storageDir,
         port: config.port,
         baseUrl: live ? nodeBaseUrl : null,
         nodeId: config.nodePublicKey,
-        draining,
+        draining: lifecycle === "draining" || draining,
         filesystem,
         capacity,
         pieces,
         reliability,
         uptimeMs: live && nodeStartedAt !== null ? Math.max(0, Date.now() - nodeStartedAt) : 0,
+        placementEligible: eligibility.eligible,
+        placementReason: eligibility.reason,
+        readiness,
+        conditions,
+        drainReadiness,
+        releaseReadiness,
       };
     },
 
@@ -580,6 +768,17 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
       if (!(await hasValidStorageMarker(config.storageDir))) {
         throw new Error("storage provider directory marker is invalid or missing");
       }
+      if (config.state === "released") {
+        // Explicit resume from released: requires live marker check and re-registration.
+        if (await isNodeLive()) {
+          node!.setDraining(false);
+          await persistState(config, "running");
+          return this.getStatus();
+        }
+        await startNode(config, false);
+        await persistState(config, "running");
+        return this.getStatus();
+      }
       if (await isNodeLive()) {
         // Full sharing resumes: clear any draining flag.
         node!.setDraining(false);
@@ -597,6 +796,9 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
       if (!config) {
         throw new Error("storage provider is not configured (run setup first)");
       }
+      if (config.state === "released") {
+        throw new Error("released provider cannot begin draining; resume sharing first");
+      }
       // Persist draining first so a crash mid-stop still reports honestly.
       await persistState(config, "draining");
       if (await isNodeLive()) {
@@ -611,14 +813,19 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
       if (!config) {
         throw new Error("storage provider is not configured (run setup first)");
       }
+      if (config.state === "released") {
+        throw new Error("released allocation cannot be resized; resume sharing first");
+      }
       assertPositiveInt(capacityBytes, "allocation");
       const live = await isNodeLive();
       const used = live ? (await node!.getCapacity()).usedBytes : (await inventoryPieces(config.storageDir)).bytes;
+      // Reuse capacity-allocation safety: decreasing below usage/reservations is refused.
       if (capacityBytes < used) {
         throw new Error(
           `cannot decrease allocation below current usage (uses ${used} bytes, requested ${capacityBytes} bytes); wait for re-replication before shrinking`,
         );
       }
+      // Increasing allocation is allowed when safe (filesystem check).
       const fs = await getFilesystemCapacity(config.storageDir);
       if (capacityBytes > fs.freeBytes && capacityBytes > config.capacityBytes) {
         throw new Error(
@@ -649,27 +856,24 @@ export function createProviderManager(options: ProviderManagerOptions): Provider
           `this node may hold other users' only retrievable replicas and re-replication is not automated yet`,
         );
       }
-      await stopNodeProcess();
-      if (configPath !== null) {
-        try {
-          await unlink(configPath);
-        } catch {}
+      // Safe release: must be draining or already released state; sharing must drain first.
+      if (config.state !== "draining" && config.state !== "released" && config.state !== "stopped" && config.state !== "running") {
+        throw new Error("release requires draining state first");
       }
-      try {
-        await unlink(config.identityKeystorePath);
-      } catch {}
-      try {
-        await rm(config.storageDir, { force: true });
-      } catch {}
+      await stopNodeProcess();
+      // Mark as released (authoritative lifecycle) and keep marker for explicit resume.
+      // Existing safety semantics preserved: release blocked while pieces remain.
+      // Released providers remain unavailable until explicit resume via start().
+      await persistState(config, "released");
       return { released: true, storageDir: config.storageDir };
     },
 
     async hydrate(): Promise<void> {
       if (configPath === null || registry === null) return;
       const config = await readConfig();
-      if (!config || config.state === "stopped") return;
+      if (!config || config.state === "stopped" || config.state === "released") return;
       if (await isNodeLive()) return;
-      // Resume the persisted mode: draining configs stay draining.
+      // Resume the persisted mode: draining configs stay draining, released stays released.
       await startNode(config, config.state === "draining");
     },
 

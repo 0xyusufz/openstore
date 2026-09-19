@@ -416,7 +416,7 @@ function toSafeUploadError(message: string): string {
 function providerErrorStatus(message: string): number {
   if (/already configured|pieces .*remain/i.test(message)) return 409;
   if (/not configured/i.test(message)) return 404;
-  if (/must be|invalid|requir|empty|not a directory|exceeds free|confirm|below current usage/i.test(message)) return 400;
+  if (/must be|invalid|requir|empty|not a directory|exceeds free|confirm|below current usage|released|draining.*resume/i.test(message)) return 400;
   return 500;
 }
 

@@ -173,10 +173,13 @@ function formatUptime(ms: number): string {
 function providerHtml(state: WebState): string {
   const provider = state.provider;
   if (state.demoMode || !provider) {
+    // In live mode, provider === null is a loading state; show honest placeholder without stale data.
+    const loading = !state.demoMode && !provider ? `<p class="muted">Loading provider status…</p>` : "";
     return `
     <div class="card">
       <h3>My Storage Node</h3>
       <p class="muted">Sharing storage is unavailable in demo mode. Start the server with a manifest store and registry for the live provider.</p>
+      ${loading}
     </div>`;
   }
   if (!provider.configured) {
@@ -199,21 +202,33 @@ function providerHtml(state: WebState): string {
       <p class="muted">Capacity and contribution metrics feed a future rewards system. No earnings exist yet.</p>
     </div>`;
   }
+  // Authoritative lifecycle: sharing → draining → released (058-060). UI reflects backend, never invents.
+  const lifecycle = (provider as unknown as { lifecycle?: string }).lifecycle ?? (provider.draining ? "draining" : "sharing");
+  const readiness = (provider as unknown as { readiness?: string }).readiness ?? provider.state;
+  const placementEligible = (provider as unknown as { placementEligible?: boolean }).placementEligible ?? false;
+  const placementReason = (provider as unknown as { placementReason?: string }).placementReason ?? "unknown";
+  const conditions = ((provider as unknown as { conditions?: Array<{ code: string; severity: string; message: string }> }).conditions ?? []) as Array<{ code: string; severity: string; message: string }>;
+  const drainReadiness = (provider as unknown as { drainReadiness?: { ready: boolean; reason: string; remainingPieces: number; remainingBytes: number } }).drainReadiness;
+  const releaseReadiness = (provider as unknown as { releaseReadiness?: { ready: boolean; reason: string; remainingPieces: number; remainingBytes: number } }).releaseReadiness;
+  // State pill reflects lifecycle + node liveness; released is distinct and remains unavailable until resume.
   const statePill =
-    provider.state === "running"
-      ? `<span class="pill pill-on">Sharing</span>`
-      : provider.state === "draining"
-        ? `<span class="pill pill-off">Draining</span>`
-        : provider.state === "stopped"
-          ? `<span class="pill pill-off">Stopped</span>`
-          : `<span class="pill pill-off">Offline</span>`;
+    lifecycle === "released" || provider.state === "released"
+      ? `<span class="pill pill-off">Released</span>`
+      : provider.state === "running"
+        ? `<span class="pill pill-on">Sharing</span>`
+        : provider.state === "draining" || lifecycle === "draining"
+          ? `<span class="pill pill-off">Draining</span>`
+          : provider.state === "stopped"
+            ? `<span class="pill pill-off">Stopped</span>`
+            : `<span class="pill pill-off">Offline</span>`;
   const capacity = provider.capacity;
+  const reserved = (capacity as unknown as { reservedBytes?: number })?.reservedBytes ?? 0;
   const capacityLine = capacity
-    ? `<p>Allocation: ${esc(formatBytes(capacity.allocatedBytes))} · Used: ${esc(formatBytes(capacity.usedBytes))} · Available: ${esc(formatBytes(capacity.availableBytes))}${capacityBar(capacity.usedBytes, capacity.allocatedBytes)}</p>`
-    : "";
+    ? `<p>Allocation: ${esc(formatBytes(capacity.allocatedBytes))} · Used: ${esc(formatBytes(capacity.usedBytes))} · Reserved: ${esc(formatBytes(reserved))} · Available: ${esc(formatBytes(capacity.availableBytes))}${capacityBar(capacity.usedBytes, capacity.allocatedBytes)}</p>`
+    : `<p class="muted">Allocation: unavailable — coordinator or node unreachable.</p>`;
   const filesystemLine = provider.filesystem
     ? `<p class="muted">Filesystem total: ${esc(formatBytes(provider.filesystem.totalBytes))} · free: ${esc(formatBytes(provider.filesystem.freeBytes))}</p>`
-    : "";
+    : `<p class="muted">Filesystem: unavailable</p>`;
   const piecesLine = provider.pieces
     ? `<p class="muted">Stored pieces: ${provider.pieces.count} (${esc(formatBytes(provider.pieces.bytes))})</p>`
     : "";
@@ -223,18 +238,53 @@ function providerHtml(state: WebState): string {
   const healthLine = provider.reliability
     ? `<p class="muted">Reliability ${provider.reliability.score} · Storage health ${provider.reliability.storageScore} · Uptime ${esc(formatUptime(provider.uptimeMs))}</p>`
     : `<p class="muted">Uptime ${esc(formatUptime(provider.uptimeMs))}</p>`;
+  const eligibilityLine = `<p class="muted">Placement: ${placementEligible ? `<span class="pill pill-on">Eligible</span>` : `<span class="pill pill-off">Not eligible</span>`} <span class="muted">(${esc(placementReason)})</span></p>`;
+  const readinessLine = `<p class="muted">Readiness: ${esc(String(readiness))} · Lifecycle: ${esc(String(lifecycle))}</p>`;
+  const conditionsLine = conditions.length
+    ? `<ul class="muted">${conditions.map((c) => `<li><strong>${esc(c.code)}</strong> [${esc(c.severity)}] ${esc(c.message)}</li>`).join("")}</ul>`
+    : "";
   const drainingWarning =
-    provider.state === "draining"
+    lifecycle === "draining" || provider.state === "draining"
       ? `<p class="warning" role="alert"><strong>Draining:</strong> this node no longer accepts new pieces. Existing pieces stay available until re-replication lands. Storage is released only after every piece is gone.</p>`
+      : "";
+  const releasedWarning =
+    lifecycle === "released" || provider.state === "released"
+      ? `<p class="warning" role="alert"><strong>Released:</strong> allocation is released and not eligible for placement. Use Resume Sharing to rejoin; this requires explicit confirmation and remains drained until re-registered.</p>`
       : "";
   const offlineWarning =
     provider.state === "offline"
       ? `<p class="warning" role="alert"><strong>Offline:</strong> the provider node process is unreachable. Your pieces stay on disk; use Start Sharing to bring the node back.</p>`
       : "";
-  const controls =
-    provider.state === "running" || provider.state === "draining"
-      ? `<div class="row"><button type="button" data-action="provider-stop">Stop Sharing</button></div>`
-      : `<div class="row"><button type="button" data-action="provider-start">Start Sharing</button></div>`;
+  const coordinatorWarning =
+    !provider.reliability && provider.state !== "unconfigured"
+      ? `<p class="warning" role="alert"><strong>Coordinator:</strong> registry unavailable or stale discovery — placement is paused until fresh coordinator data.</p>`
+      : "";
+  const drainInspect = drainReadiness
+    ? `<p class="muted">Drain readiness: ${drainReadiness.ready ? "ready" : "not ready"} (${esc(drainReadiness.reason)}) · remaining: ${drainReadiness.remainingPieces} pieces (${esc(formatBytes(drainReadiness.remainingBytes))})</p>`
+    : "";
+  const releaseInspect = releaseReadiness
+    ? `<p class="muted">Release readiness: ${releaseReadiness.ready ? "ready — release allowed when confirmed" : "not ready"} (${esc(releaseReadiness.reason)}) · remaining: ${releaseReadiness.remainingPieces} pieces (${esc(formatBytes(releaseReadiness.remainingBytes))})</p>`
+    : "";
+  const insufficientWarning =
+    capacity && capacity.availableBytes <= 0 && lifecycle === "sharing"
+      ? `<p class="warning" role="alert"><strong>Capacity:</strong> allocation exhausted. Increase allocation when safe to accept new placements.</p>`
+      : "";
+  // Controls reflect authoritative backend state (068: stopped+sharing=Start Sharing, sharing+running=Begin Draining).
+  // Draining/released safety rules unchanged: released/draining remain Resume Sharing via provider-start; backend remains authoritative.
+  let controls = "";
+  if (lifecycle === "released" || provider.state === "released") {
+    controls = `<div class="row"><button type="button" data-action="provider-start">Resume Sharing</button></div>`;
+  } else if (lifecycle === "draining" || provider.state === "draining") {
+    controls = `<div class="row"><button type="button" data-action="provider-start">Resume Sharing</button></div>`;
+  } else if (lifecycle === "sharing" && provider.state === "running") {
+    controls = `<div class="row"><button type="button" data-action="provider-stop">Begin Draining</button></div>`;
+  } else if (provider.state === "stopped" && lifecycle === "sharing") {
+    controls = `<div class="row"><button type="button" data-action="provider-start">Start Sharing</button></div>`;
+  } else {
+    controls = `<div class="row"><button type="button" data-action="provider-start">Start Sharing</button></div>`;
+  }
+  // Allocation controls: increase always allowed when safe, decrease only when usage permits (backend validates).
+  // Release remains fail-closed until readiness says ready.
   return `
     <div class="card">
       <h3>My Storage Node</h3>
@@ -245,18 +295,27 @@ function providerHtml(state: WebState): string {
       ${piecesLine}
       ${nodeLine}
       ${healthLine}
+      ${eligibilityLine}
+      ${readinessLine}
+      ${conditionsLine}
+      ${drainInspect}
+      ${releaseInspect}
       ${drainingWarning}
+      ${releasedWarning}
       ${offlineWarning}
+      ${coordinatorWarning}
+      ${insufficientWarning}
       ${controls}
       <form id="provider-allocation-form" autocomplete="off">
         <h3>Change allocation (MiB)</h3>
+        <p class="muted">Increasing is allowed when filesystem space permits; decreasing is refused while usage or reservations exceed the target.</p>
         <div class="form-row"><label>Allocation (MiB)
           <input id="provider-allocation-mb" name="capacityMB" type="number" min="1" step="1" required />
         </label></div>
         <div class="row"><button type="submit">Update allocation</button></div>
       </form>
       <div class="row"><button type="button" data-action="provider-release" class="danger">Release storage</button></div>
-      <p class="muted">Release is refused while any pieces remain — replicas are never deleted silently. Capacity and contribution metrics feed a future rewards system. No earnings exist yet.</p>
+      <p class="muted">Release is refused while any pieces remain — replicas are never deleted silently. Draining rejects new placement while preserving reads and repair migration. Capacity and contribution metrics feed a future rewards system. No earnings exist yet.</p>
     </div>`;
 }
 

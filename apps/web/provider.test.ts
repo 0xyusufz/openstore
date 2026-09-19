@@ -22,8 +22,9 @@ import { createWebServer } from "./server.js";
 
 const SECRET_WORDS = ["privatekey", "recoveryphrase", "encryptionkey", "password", "mnemonic", "plaintext"];
 const PROVIDER_KEYS = [
-  "baseUrl", "capacity", "configured", "draining", "filesystem",
-  "nodeId", "pieces", "port", "reliability", "state", "storageDir", "uptimeMs",
+  "baseUrl", "capacity", "conditions", "configured", "drainReadiness", "draining", "filesystem",
+  "lifecycle", "nodeId", "pieces", "placementEligible", "placementReason", "port", "readiness", "releaseReadiness",
+  "reliability", "state", "storageDir", "uptimeMs",
 ].sort();
 
 async function tempDir(prefix: string): Promise<string> {
